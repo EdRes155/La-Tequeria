@@ -69,11 +69,18 @@ function defaultData() {
     domicilios: [],
     cocina: [],
     gastos: [],
+    historial: [],                    // todos los tickets enviados (para reimprimir y corte)
+    cortes: [],                       // cortes de caja guardados
   };
 }
 
 const esAdmin = (u) => u?.rol === "admin";
 const money = (n) => "$" + (Number(n) || 0).toFixed(0);
+const ticketTotal = (t) =>
+  (t.ordenes || []).reduce((s, o) => s + o.items.reduce((a, i) => a + i.cantidad * (i.precio || 0), 0), 0)
+  + (t.extras || []).reduce((a, e) => a + e.cantidad * (e.precio || 0), 0);
+const contarTacos = (t) =>
+  (t.ordenes || []).reduce((s, o) => s + o.items.reduce((a, i) => a + (i.cat === "taco" ? i.cantidad : 0), 0), 0);
 
 /* ---------- persistencia ---------- */
 async function loadData() {
@@ -408,9 +415,9 @@ function Comanda({ data, setData, user, go, ctx }) {
   const [pedido, setPedido] = useState(() => {
     if (ctx?.tipo === "aqui" && ctx?.mesaId) {
       const m = data.mesas.find((x) => x.id === ctx.mesaId);
-      const ped = m?.pedido ? clone(m.pedido) : nuevoPedido();
-      if (!ped.extras) ped.extras = [];
-      return ped;
+      // Mesa ocupada -> empezamos vacío (su orden se ve en el resumen / orden extra)
+      if (m && m.estado === "ocupada") return nuevoPedido();
+      if (m?.pedido) { const ped = clone(m.pedido); if (!ped.extras) ped.extras = []; return ped; }
     }
     return nuevoPedido();
   });
@@ -419,6 +426,7 @@ function Comanda({ data, setData, user, go, ctx }) {
   const [domOk, setDomOk] = useState(false);
   const [modalDom, setModalDom] = useState(ctx?.tipo === "domicilio");
   const [refLlevar, setRefLlevar] = useState(""); // nombre de referencia (pestaña Para llevar)
+  const [esExtra, setEsExtra] = useState(false);  // orden extra sobre una mesa ya ocupada
   const [ticket, setTicket] = useState(null);
   const [pane, setPane] = useState("menu"); // celular: menu | orden
 
@@ -483,14 +491,15 @@ function Comanda({ data, setData, user, go, ctx }) {
 
   const finalizar = () => {
     if (vacio) { alert("Agrega al menos un producto."); return; }
-    if (entrada === "domicilio" && (!dom.direccion.trim() || !dom.telefono.trim())) {
+    if (!esExtra && entrada === "domicilio" && (!dom.direccion.trim() || !dom.telefono.trim())) {
       setModalDom(true); alert("Captura dirección y teléfono del domicilio."); return;
     }
-    let ticketTipo, origen, paraLlevar = false, referencia = null;
-    if (entrada === "aqui") {
-      ticketTipo = "aqui";
+    let ticketTipo = "aqui", origen, paraLlevar = false, referencia = null;
+    if (esExtra) {
       origen = `Mesa ${mesaId}`;
-      paraLlevar = tipo === "llevar";          // mesa que pide para llevar
+    } else if (entrada === "aqui") {
+      origen = `Mesa ${mesaId}`;
+      paraLlevar = tipo === "llevar";
     } else if (entrada === "llevar") {
       ticketTipo = "llevar";
       referencia = refLlevar.trim();
@@ -500,22 +509,27 @@ function Comanda({ data, setData, user, go, ctx }) {
       origen = dom.nombre.trim() || "Domicilio";
     }
     const t = {
-      id: uid(), tipo: ticketTipo, origen, paraLlevar, referencia,
-      mesaId: entrada === "aqui" ? mesaId : null,
+      id: uid(), tipo: ticketTipo, esExtra, origen, paraLlevar, referencia,
+      mesaId: (esExtra || entrada === "aqui") ? mesaId : null,
       ordenes: clone(pedido.ordenes), extras: clone(pedido.extras || []),
       mesero: user.nombre, hora: hora(), fecha: fecha(), estado: "pendiente",
-      domicilio: entrada === "domicilio" ? { ...dom } : null,
+      domicilio: (!esExtra && entrada === "domicilio") ? { ...dom } : null,
+      total: totalDinero,
     };
     setData((d) => {
       const nd = clone(d);
       nd.cocina.unshift(t);
+      if (!nd.historial) nd.historial = [];
+      nd.historial.unshift(t);
       pedido.ordenes.forEach((o) => o.items.forEach((it) => {
         if (it.cat === "bebida" && it.invId) {
           const b = nd.bebidas.find((x) => x.id === it.invId);
           if (b) b.cantidad = Math.max(0, b.cantidad - it.cantidad);
         }
       }));
-      if (entrada === "aqui") {
+      if (esExtra) {
+        // no se modifica la orden original; la mesa sigue ocupada
+      } else if (entrada === "aqui") {
         const m = nd.mesas.find((x) => x.id === mesaId);
         m.pedido = clone(pedido); m.estado = "ocupada"; m.mesero = user.nombre; m.hora = t.hora;
       } else if (entrada === "domicilio") {
@@ -549,14 +563,21 @@ function Comanda({ data, setData, user, go, ctx }) {
     <div className="type-bar">
       <button className="btn btn-ghost btn-sm" onClick={() => go("mesas")}><ArrowLeft size={16} /> Mesas</button>
       {entrada === "aqui" ? (
-        <div className="type-btns">
-          <button className={"type-btn" + (tipo === "aqui" ? " on" : "")} style={{ "--tc": TIPOS.aqui.color }} onClick={() => setTipo("aqui")}>
-            <Utensils size={16} /> Para esta mesa
-          </button>
-          <button className={"type-btn" + (tipo === "llevar" ? " on" : "")} style={{ "--tc": TIPOS.llevar.color }} onClick={() => setTipo("llevar")}>
-            <ShoppingBag size={16} /> Para llevar
-          </button>
-        </div>
+        esExtra ? (
+          <div className="type-btns">
+            <span className="type-fixed" style={{ "--tc": "var(--especial)" }}>Orden extra</span>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setEsExtra(false); setPedido(nuevoPedido()); setActiva(0); }}>Cancelar</button>
+          </div>
+        ) : (
+          <div className="type-btns">
+            <button className={"type-btn" + (tipo === "aqui" ? " on" : "")} style={{ "--tc": TIPOS.aqui.color }} onClick={() => setTipo("aqui")}>
+              <Utensils size={16} /> Para esta mesa
+            </button>
+            <button className={"type-btn" + (tipo === "llevar" ? " on" : "")} style={{ "--tc": TIPOS.llevar.color }} onClick={() => setTipo("llevar")}>
+              <ShoppingBag size={16} /> Para llevar
+            </button>
+          </div>
+        )
       ) : entrada === "domicilio" ? (
         <div className="type-btns">
           <span className="type-fixed" style={{ "--tc": TIPOS.domicilio.color }}><Bike size={16} /> Domicilio {domOk && <Check size={15} />}</span>
@@ -575,15 +596,18 @@ function Comanda({ data, setData, user, go, ctx }) {
 
   const banner = (
     <div className="type-banner" style={{
-      background: entrada === "aqui"
-        ? (tipo === "llevar" ? TIPOS.llevar.color : TIPOS.aqui.color)
-        : TIPOS[tipo].color,
+      background: esExtra ? "var(--especial)"
+        : entrada === "aqui"
+          ? (tipo === "llevar" ? TIPOS.llevar.color : TIPOS.aqui.color)
+          : TIPOS[tipo].color,
     }}>
-      {entrada === "aqui"
-        ? `Mesa ${mesaId}${tipo === "llevar" ? " · EXCLUSIVO PARA LLEVAR" : ""}`
-        : entrada === "llevar"
-          ? `Para llevar${refLlevar.trim() ? ` · ${refLlevar.trim()}` : ""}`
-          : `Domicilio${domOk && dom.nombre ? ` · ${dom.nombre}` : ""}`}
+      {esExtra
+        ? `Mesa ${mesaId} · ORDEN EXTRA`
+        : entrada === "aqui"
+          ? `Mesa ${mesaId}${tipo === "llevar" ? " · EXCLUSIVO PARA LLEVAR" : ""}`
+          : entrada === "llevar"
+            ? `Para llevar${refLlevar.trim() ? ` · ${refLlevar.trim()}` : ""}`
+            : `Domicilio${domOk && dom.nombre ? ` · ${dom.nombre}` : ""}`}
     </div>
   );
 
@@ -672,6 +696,11 @@ function Comanda({ data, setData, user, go, ctx }) {
     </div>
   );
 
+  const previewTicket = esExtra
+    ? { id: "preview", tipo: "aqui", esExtra: true, origen: `Mesa ${mesaId}`, paraLlevar: false,
+        ordenes: pedido.ordenes, extras: pedido.extras || [], mesero: user.nombre, hora: hora(), fecha: fecha(), domicilio: null }
+    : buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user);
+
   const accionesIzq = (
     <div className="footer-izq">
       <button className="btn btn-add btn-block" onClick={addOrden}><Plus size={16} /> Agregar orden (otra persona)</button>
@@ -679,11 +708,59 @@ function Comanda({ data, setData, user, go, ctx }) {
   );
   const accionesDer = (
     <div className="footer-der">
-      <button className="btn btn-line" disabled={vacio} onClick={() => setTicket(buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user))}>
+      <button className="btn btn-line" disabled={vacio} onClick={() => setTicket(previewTicket)}>
         <Printer size={16} /> Ver ticket</button>
-      <button className="btn btn-primary" disabled={vacio} onClick={finalizar}><Send size={16} /> Enviar a cocina</button>
+      <button className={"btn " + (esExtra ? "btn-barro" : "btn-primary")} disabled={vacio} onClick={finalizar}>
+        <Send size={16} /> {esExtra ? "Enviar orden extra" : "Enviar a cocina"}</button>
     </div>
   );
+
+  // Mesa ocupada: mostramos resumen + opción de Orden Extra (no se edita la orden original)
+  if (mesaOcupada && !esExtra) {
+    const ped = mesaInfo.pedido || { ordenes: [], extras: [] };
+    const tot = ticketTotal(ped);
+    const reimprimir = () => setTicket({
+      id: "reimp", tipo: "aqui", origen: `Mesa ${mesaId}`, paraLlevar: false,
+      ordenes: ped.ordenes || [], extras: ped.extras || [],
+      mesero: mesaInfo.mesero, hora: mesaInfo.hora, fecha: fecha(), domicilio: null,
+    });
+    return (
+      <div className="comanda-wrap">
+        <div className="type-bar">
+          <button className="btn btn-ghost btn-sm" onClick={() => go("mesas")}><ArrowLeft size={16} /> Mesas</button>
+          <span className="mesa-chip">Mesa {mesaId}</span>
+        </div>
+        {banner}
+        {ocupadaBar}
+        <div className="resumen-scroll">
+          <h3 className="resumen-h">Lo que ya se pidió</h3>
+          {(ped.ordenes || []).map((o) => (
+            <div key={o.id} className="resumen-orden">
+              <div className="resumen-oname">{o.nombre}{o.prep ? ` · ${PREP_LABEL[o.prep] || o.prep}` : ""}</div>
+              {o.items.map((it) => (
+                <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.nombre}</div>
+              ))}
+            </div>
+          ))}
+          {(ped.extras || []).length > 0 && (
+            <div className="resumen-orden">
+              <div className="resumen-oname">Para todo el pedido</div>
+              {ped.extras.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.corto || it.nombre}</div>)}
+            </div>
+          )}
+          <div className="ticket-total"><span>Total</span><b>{money(tot)}</b></div>
+        </div>
+        <div className="resumen-actions">
+          <button className="btn btn-barro btn-block" onClick={() => { setEsExtra(true); setPedido(nuevoPedido()); setActiva(0); setPane("menu"); }}>
+            <Plus size={16} /> Agregar orden extra
+          </button>
+          <button className="btn btn-line btn-block" onClick={reimprimir}><Printer size={16} /> Reimprimir ticket</button>
+          <button className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
+        </div>
+        {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
+      </div>
+    );
+  }
 
   return (
     <div className="comanda-wrap">
@@ -711,7 +788,7 @@ function Comanda({ data, setData, user, go, ctx }) {
           <aside className="ticket-pane">
             {ordenPane}
             {accionesDer}
-            {entrada === "aqui" && (
+            {entrada === "aqui" && !esExtra && !mesaOcupada && (
               <div className="ticket-extra">
                 <button className="btn btn-ghost btn-sm btn-block" onClick={guardarMesa}>Guardar sin enviar</button>
               </div>
@@ -846,6 +923,7 @@ function DomicilioModal({ dom, setDom, onAgregar, onClose }) {
 
 /* etiqueta + color para tickets y cocina */
 function ticketView(t) {
+  if (t.esExtra) return { label: "Orden extra", color: "var(--especial)" };
   if (t.tipo === "aqui" && t.paraLlevar) return { label: "Exclusivo para llevar", color: TIPOS.llevar.color };
   const Tb = TIPOS[t.tipo] || TIPOS.aqui;
   return { label: Tb.label, color: Tb.color };
@@ -915,58 +993,131 @@ function TicketModal({ t, negocio, onClose }) {
 
 /* ============================== COCINA ============================== */
 function Cocina({ data, setData }) {
+  const [tab, setTab] = useState("pendientes");
+  const [ticket, setTicket] = useState(null);
+
   const setEstado = (id, estado) => setData((d) => {
     const nd = clone(d); const t = nd.cocina.find((x) => x.id === id); if (t) t.estado = estado; return nd;
   });
   const quitar = (id) => setData((d) => ({ ...d, cocina: d.cocina.filter((x) => x.id !== id) }));
   const pend = data.cocina.filter((t) => t.estado !== "listo");
   const listos = data.cocina.filter((t) => t.estado === "listo");
+  const historial = data.historial || [];
+  const totalDia = historial.reduce((s, t) => s + (t.total != null ? t.total : ticketTotal(t)), 0);
+
+  const hacerCorte = () => {
+    if (historial.length === 0) { alert("No hay ventas registradas hoy."); return; }
+    if (!confirm(`Hacer corte del día.\nVentas: ${historial.length}  ·  Total: ${money(totalDia)}\n\nSe guardará el corte y se limpiará el historial. ¿Continuar?`)) return;
+    setData((d) => {
+      const nd = clone(d);
+      const h = nd.historial || [];
+      const total = h.reduce((s, t) => s + (t.total != null ? t.total : ticketTotal(t)), 0);
+      nd.cortes = nd.cortes || [];
+      nd.cortes.unshift({ id: uid(), fecha: fecha(), hora: hora(), tickets: h.length, total });
+      nd.historial = [];
+      return nd;
+    });
+  };
+
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Cocina</h2>
-        <p className="muted">Comandas de mesas, para llevar y domicilio.</p></div></div>
-      {pend.length === 0 && <div className="empty">No hay comandas pendientes.</div>}
-      <div className="cocina-grid">
-        {pend.map((t) => {
-          const tv = ticketView(t);
-          return (
-            <div key={t.id} className={"kticket " + t.estado}>
-              <div className="kt-tipo" style={{ background: tv.color }}>{tv.label}</div>
-              <div className="kt-head"><span className="kt-origen">{t.origen}</span><span className="kt-hora">{t.hora}</span></div>
-              <div className="kt-mesero">{t.mesero}</div>
-              {t.domicilio && (
-                <div className="kt-dom">📍 {t.domicilio.direccion}{t.domicilio.referencia ? ` · ${t.domicilio.referencia}` : ""}<br />📞 {t.domicilio.telefono} · {t.domicilio.pago}</div>
-              )}
-              <div className="kt-body">
-                {t.ordenes.map((o) => (
-                  <div key={o.id} className="kt-orden"><div className="kt-oname">{o.nombre}</div>
-                    {o.prep && <div className="kt-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
-                    {o.items.map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.nombre}</div>)}</div>
-                ))}
-                {t.extras && t.extras.length > 0 && (
-                  <div className="kt-extras">
-                    <div className="kt-extras-h">Para todo el pedido</div>
-                    {t.extras.map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.corto || it.nombre}</div>)}
-                  </div>
-                )}
-              </div>
-              <div className="kt-actions">
-                {t.estado === "pendiente" && <button className="btn btn-line btn-sm" onClick={() => setEstado(t.id, "preparando")}>Preparando</button>}
-                <button className="btn btn-primary btn-sm" onClick={() => setEstado(t.id, "listo")}><Check size={14} /> Listo</button>
-              </div>
-            </div>
-          );
-        })}
+        <p className="muted">Comandas en preparación e historial de ventas del día.</p></div></div>
+
+      <div className="admin-tabs">
+        <button className={tab === "pendientes" ? "on" : ""} onClick={() => setTab("pendientes")}>Pendientes · {pend.length}</button>
+        <button className={tab === "historial" ? "on" : ""} onClick={() => setTab("historial")}>Historial / Corte</button>
       </div>
-      {listos.length > 0 && (
-        <><h3 className="sub-h">Listos</h3>
-          <div className="listos-row">
-            {listos.map((t) => (
-              <div key={t.id} className="listo-chip"><span>{t.origen} · {t.hora}</span>
-                <button className="icon-btn" onClick={() => quitar(t.id)}><X size={14} /></button></div>
-            ))}
-          </div></>
+
+      {tab === "pendientes" && (
+        <>
+          {pend.length === 0 && <div className="empty">No hay comandas pendientes.</div>}
+          <div className="cocina-grid">
+            {pend.map((t) => {
+              const tv = ticketView(t);
+              const tacos = contarTacos(t);
+              return (
+                <div key={t.id} className={"kticket " + t.estado}>
+                  <div className="kt-tipo" style={{ background: tv.color }}>{tv.label}</div>
+                  <div className="kt-head"><span className="kt-origen">{t.origen}</span><span className="kt-hora">{t.hora}</span></div>
+                  <div className="kt-mesero">{t.mesero}</div>
+                  {t.domicilio && (
+                    <div className="kt-dom">📍 {t.domicilio.direccion}{t.domicilio.referencia ? ` · ${t.domicilio.referencia}` : ""}<br />📞 {t.domicilio.telefono} · {t.domicilio.pago}</div>
+                  )}
+                  <div className="kt-body">
+                    {t.ordenes.map((o) => (
+                      <div key={o.id} className="kt-orden"><div className="kt-oname">{o.nombre}</div>
+                        {o.prep && <div className="kt-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
+                        {o.items.map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.nombre}</div>)}</div>
+                    ))}
+                    {t.extras && t.extras.length > 0 && (
+                      <div className="kt-extras">
+                        <div className="kt-extras-h">Para todo el pedido</div>
+                        {t.extras.map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.corto || it.nombre}</div>)}
+                      </div>
+                    )}
+                  </div>
+                  <div className="kt-tacos">🌮 Tacos en total: <b>{tacos}</b></div>
+                  <div className="kt-actions">
+                    {t.estado === "pendiente" && <button className="btn btn-line btn-sm" onClick={() => setEstado(t.id, "preparando")}>Preparando</button>}
+                    <button className="btn btn-primary btn-sm" onClick={() => setEstado(t.id, "listo")}><Check size={14} /> Listo</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {listos.length > 0 && (
+            <><h3 className="sub-h">Listos</h3>
+              <div className="listos-row">
+                {listos.map((t) => (
+                  <div key={t.id} className="listo-chip"><span>{t.origen} · {t.hora}</span>
+                    <button className="icon-btn" onClick={() => quitar(t.id)}><X size={14} /></button></div>
+                ))}
+              </div></>
+          )}
+        </>
       )}
+
+      {tab === "historial" && (
+        <>
+          <div className="corte-bar">
+            <div><div className="corte-total">{money(totalDia)}</div>
+              <div className="muted small">{historial.length} venta(s) hoy</div></div>
+            <button className="btn btn-primary" onClick={hacerCorte}>Hacer corte del día</button>
+          </div>
+          {historial.length === 0 && <div className="empty">Aún no hay ventas registradas hoy.</div>}
+          <div className="hist-list">
+            {historial.map((t) => {
+              const tv = ticketView(t);
+              return (
+                <div key={t.id} className="hist-row">
+                  <span className="hist-dot" style={{ background: tv.color }} />
+                  <div className="hist-info">
+                    <div className="hist-origen">{t.origen}{t.esExtra ? " · orden extra" : ""}</div>
+                    <div className="muted small">{t.hora} · {t.mesero} · {(t.ordenes || []).reduce((a, o) => a + o.items.reduce((x, i) => x + i.cantidad, 0), 0)} prod.</div>
+                  </div>
+                  <div className="hist-total">{money(t.total != null ? t.total : ticketTotal(t))}</div>
+                  <button className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} /> Ver</button>
+                </div>
+              );
+            })}
+          </div>
+          {(data.cortes || []).length > 0 && (
+            <><h3 className="sub-h">Cortes anteriores</h3>
+              <div className="hist-list">
+                {data.cortes.map((c) => (
+                  <div key={c.id} className="hist-row">
+                    <div className="hist-info"><div className="hist-origen">Corte {c.fecha}</div>
+                      <div className="muted small">{c.hora} · {c.tickets} ventas</div></div>
+                    <div className="hist-total">{money(c.total)}</div>
+                  </div>
+                ))}
+              </div></>
+          )}
+        </>
+      )}
+
+      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
     </div>
   );
 }
@@ -1510,6 +1661,23 @@ button{font-family:inherit;cursor:pointer;}
 .kt-oname{font-weight:700;font-size:13px;margin-bottom:3px;}
 .kt-item{font-size:13px;}
 .kt-actions{display:flex;gap:6px;padding:0 12px 12px;} .kt-actions .btn{flex:1;}
+.kt-tacos{margin:0 12px 10px;background:var(--crema);border:1px dashed var(--barro);border-radius:9px;padding:6px 10px;font-size:13px;font-weight:700;color:var(--barro);text-align:center;}
+.kt-tacos b{font-size:16px;}
+.corte-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--papel);border:1px solid var(--linea);border-radius:14px;padding:14px 16px;margin-bottom:14px;}
+.corte-total{font-size:26px;font-weight:800;color:var(--agave);line-height:1;}
+.hist-list{display:flex;flex-direction:column;gap:8px;}
+.hist-row{display:flex;align-items:center;gap:10px;background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 12px;}
+.hist-dot{width:10px;height:10px;border-radius:50%;flex:none;}
+.hist-info{flex:1;min-width:0;}
+.hist-origen{font-weight:700;font-size:14px;}
+.hist-total{font-weight:800;color:var(--barro);}
+.resumen-scroll{flex:1;overflow:auto;padding:14px;min-height:0;}
+.resumen-h{margin:0 0 10px;font-size:16px;}
+.resumen-orden{background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 12px;margin-bottom:8px;}
+.resumen-oname{font-weight:800;font-size:14px;margin-bottom:4px;}
+.resumen-item{font-size:13px;}
+.resumen-item span{font-weight:700;display:inline-block;min-width:26px;}
+.resumen-actions{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid var(--linea);background:var(--papel);}
 .listos-row{display:flex;flex-wrap:wrap;gap:8px;}
 .listo-chip{display:flex;align-items:center;gap:8px;background:#EAF3EE;border:1px solid #CFE3D8;border-radius:20px;padding:6px 8px 6px 14px;font-size:13px;color:var(--ok);font-weight:600;}
 
@@ -1590,8 +1758,14 @@ button{font-family:inherit;cursor:pointer;}
 
 @media (max-width:760px){
   .cols-3{grid-template-columns:1fr;}
-  .type-banner{font-size:17px;}
+  .type-banner{font-size:16px;}
+  .topbar{flex-wrap:nowrap;gap:8px;padding:8px 10px;}
+  .topbar-name{display:none;}
+  .user-name{display:none;}
+  .topbar-nav{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex:1;}
+  .topbar-nav::-webkit-scrollbar{display:none;}
+  .nav-btn{flex:none;white-space:nowrap;padding:9px 12px;}
+  .type-bar{gap:8px;}
   .type-btns{order:2;width:100%;}
-  .mesa-select{order:3;}
 }
 `;
