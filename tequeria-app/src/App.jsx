@@ -3,7 +3,7 @@ import {
   Plus, Minus, Trash2, X, Printer, Send, LogOut, ArrowLeft,
   Bike, Package, Wallet, Utensils, ShoppingBag, ChefHat, Check, Pencil, Settings
 } from "lucide-react";
-import { loadOrInit, saveState, subscribeState, supabaseReady } from "./store.js";
+import { loadAll, subscribeTables, saveBlob, login as dbLogin, supabaseReady, setStatusHandler, io } from "./store.js";
 
 /* ============================================================
    LA TEQUERÍA — Sistema de comandas
@@ -75,6 +75,36 @@ function defaultData() {
 }
 
 const esAdmin = (u) => u?.rol === "admin";
+
+// Asegura que cualquier estado (incluido uno viejo de la BD) tenga todos los campos
+function normalize(d) {
+  if (!d || typeof d !== "object") return d;
+  d.nombreNegocio = d.nombreNegocio || "La Tequería";
+  d.usuarios = d.usuarios || [];
+  d.carnes = d.carnes || [];
+  d.bebidas = d.bebidas || [];
+  d.extras = d.extras || [];
+  d.ocultos = d.ocultos || [];
+  d.precios = d.precios || {};
+  d.mesas = (d.mesas || []).map((m) => ({ ...m, extras: m.extras || [] }));
+  d.domicilios = d.domicilios || [];
+  d.cocina = d.cocina || [];
+  d.gastos = d.gastos || [];
+  d.historial = d.historial || [];
+  d.cortes = d.cortes || [];
+  return d;
+}
+
+const ROLES = { admin: "Administrador", mesero: "Mesero", cocinero: "Cocinero" };
+const PERMISOS = {
+  mesas:      ["admin", "mesero", "cocinero"],
+  comanda:    ["admin", "mesero"],
+  cocina:     ["admin", "mesero", "cocinero"],
+  inventario: ["admin", "mesero"],
+  gastos:     ["admin"],
+  admin:      ["admin"],
+};
+const puede = (u, v) => (PERMISOS[v] || []).includes(u?.rol);
 const money = (n) => "$" + (Number(n) || 0).toFixed(0);
 const ticketTotal = (t) =>
   (t.ordenes || []).reduce((s, o) => s + o.items.reduce((a, i) => a + i.cantidad * (i.precio || 0), 0), 0)
@@ -222,78 +252,179 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [view, setView] = useState("mesas");
   const [ctx, setCtx] = useState(null);
-  const lastRev = useRef(null);
-  const skipSave = useRef(false);
+  const [conn, setConn] = useState(supabaseReady ? "reconnecting" : "local");
+  const dataRef = useRef(null);
+  dataRef.current = data;
 
-  // Cargar estado + suscribirse a cambios en tiempo real
+  // Objeto semilla para el primer arranque (sirve para sembrar la BD o el respaldo local)
+  const seed = useMemo(() => ({
+    config: { nombreNegocio: "La Tequería", precios: preciosDefault(CARNES_DEFAULT), extras: [], ocultos: [] },
+    carnes: CARNES_DEFAULT, bebidas: BEBIDAS_DEFAULT,
+    mesas: Array.from({ length: NUM_MESAS }, (_, i) => ({ id: i + 1 })),
+    usuarios: USUARIOS_DEFAULT,
+    blob: normalize(defaultData()),
+  }), []);
+
+  // Cargar estado + suscribirse a cambios por tabla
   useEffect(() => {
     let unsub = () => {};
+    setStatusHandler(setConn);
     (async () => {
-      const s = await loadOrInit(defaultData);
-      lastRev.current = s.rev;
-      skipSave.current = true;
-      setData(s.data);
-      unsub = subscribeState((row) => {
-        if (!row || row.rev === lastRev.current) return; // ignora el eco de mi propio guardado
-        lastRev.current = row.rev;
-        skipSave.current = true;
-        setData(row.data);
-      });
+      const d = await loadAll(seed);
+      setData(d);
+      unsub = subscribeTables((fresh) => setData(fresh));
     })();
-    return () => unsub();
+    return () => { setStatusHandler(null); unsub(); };
   }, []);
 
-  // Guardar cambios (con pequeño retardo) y propagarlos a los demás dispositivos
+  // Sin Supabase: persistimos el respaldo local en cada cambio
   useEffect(() => {
-    if (!data) return;
-    if (skipSave.current) { skipSave.current = false; return; }
-    const rev = uid();
-    lastRev.current = rev;
-    const t = setTimeout(() => saveState(data, rev), 400);
+    if (!data || supabaseReady) return;
+    const t = setTimeout(() => saveBlob(data), 250);
     return () => clearTimeout(t);
   }, [data]);
 
+  // Acciones: actualizan la pantalla al instante y escriben en la base (o respaldo local)
+  const db = makeDb(setData, dataRef);
+
   if (!data) return <div className="loading">Cargando…</div>;
-  if (!user) return <Login data={data} onLogin={setUser} online={supabaseReady} />;
+  if (!user) return <Login data={data} onLogin={setUser} conn={conn} />;
+
+  // Si el usuario fue eliminado/cambiado desde otro dispositivo, cerrar sesión
+  const yo = data.usuarios.find((u) => u.id === user.id);
+  if (!yo) return <Login data={data} onLogin={setUser} conn={conn} aviso="Tu usuario ya no existe. Inicia sesión de nuevo." />;
+  const userActual = yo;
 
   const go = (v, c = null) => { setView(v); setCtx(c); };
-  const props = { data, setData, user, go, ctx };
+  const props = { data, db, user: userActual, go, ctx };
 
   return (
     <div className="app">
       <style>{CSS}</style>
-      <TopBar data={data} user={user} view={view} go={go} onLogout={() => setUser(null)} />
+      <TopBar data={data} user={userActual} view={view} go={go} conn={conn} onLogout={() => setUser(null)} />
       <main className="main">
         {view === "mesas"      && <Mesas {...props} />}
-        {view === "comanda"    && <Comanda {...props} />}
+        {view === "comanda"    && (puede(userActual, "comanda") ? <Comanda {...props} /> : <SinAcceso />)}
         {view === "cocina"     && <Cocina {...props} />}
-        {view === "inventario" && <Inventario {...props} />}
-        {view === "gastos"     && (esAdmin(user) ? <Gastos {...props} /> : <SinAcceso />)}
-        {view === "admin"      && (esAdmin(user) ? <Admin {...props} /> : <SinAcceso />)}
+        {view === "inventario" && (puede(userActual, "inventario") ? <Inventario {...props} /> : <SinAcceso />)}
+        {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
+        {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
       </main>
     </div>
   );
 }
 
+/* ============================== ACCIONES (db) ============================== */
+function makeDb(setData, dataRef) {
+  const local = (fn) => setData((d) => { const nd = clone(d); fn(nd); return nd; });
+  const capHist = (nd) => { if (nd.historial.length > 400) nd.historial = nd.historial.slice(0, 400); };
+
+  return {
+    // ---- mesas ----
+    guardarMesa(mesaId, pedido, userNombre) {
+      const ocupa = pedido.ordenes.some((o) => o.items.length > 0);
+      const patch = { pedido: ocupa ? pedido : null, estado: ocupa ? "ocupada" : "libre", mesero: ocupa ? userNombre : null, hora: ocupa ? hora() : null };
+      local((nd) => { const m = nd.mesas.find((x) => x.id === mesaId); if (m) Object.assign(m, patch); });
+      io.updateMesa(mesaId, patch);
+    },
+    liberarMesa(mesaId) {
+      const patch = { pedido: null, estado: "libre", mesero: null, hora: null, extras: [] };
+      local((nd) => { const m = nd.mesas.find((x) => x.id === mesaId); if (m) Object.assign(m, patch); });
+      io.updateMesa(mesaId, patch);
+    },
+    // ---- tickets ----
+    enviarTicket(t, { esExtra, mesaId, pedido, userNombre }) {
+      // bebidas consumidas
+      const consumo = {};
+      (t.ordenes || []).forEach((o) => o.items.forEach((i) => { if (i.cat === "bebida" && i.invId) consumo[i.invId] = (consumo[i.invId] || 0) + i.cantidad; }));
+      local((nd) => {
+        nd.cocina.unshift(clone(t)); nd.historial.unshift(clone(t)); capHist(nd);
+        Object.entries(consumo).forEach(([bid, q]) => { const b = nd.bebidas.find((x) => x.id === bid); if (b) b.cantidad = Math.max(0, b.cantidad - q); });
+        if (esExtra) { const m = nd.mesas.find((x) => x.id === mesaId); if (m) { m.extras = m.extras || []; m.extras.push({ id: t.id, ordenes: clone(pedido.ordenes), extras: clone(pedido.extras || []), hora: t.hora, total: t.total }); } }
+        else if (t.tipo === "aqui" && mesaId) { const m = nd.mesas.find((x) => x.id === mesaId); if (m) { m.pedido = clone(pedido); m.estado = "ocupada"; m.mesero = userNombre; m.hora = t.hora; } }
+      });
+      io.addTicket(t);
+      const cur = dataRef.current;
+      Object.entries(consumo).forEach(([bid, q]) => { const b = cur.bebidas.find((x) => x.id === bid); if (b) io.updateBebida(bid, { cantidad: Math.max(0, b.cantidad - q) }); });
+      if (esExtra) { const m = cur.mesas.find((x) => x.id === mesaId); const ex = [...((m && m.extras) || []), { id: t.id, ordenes: pedido.ordenes, extras: pedido.extras || [], hora: t.hora, total: t.total }]; io.updateMesa(mesaId, { extras: ex }); }
+      else if (t.tipo === "aqui" && mesaId) io.updateMesa(mesaId, { pedido, estado: "ocupada", mesero: userNombre, hora: t.hora });
+    },
+    setTicketEstado(id, estado) {
+      local((nd) => { [nd.cocina, nd.historial].forEach((arr) => { const x = arr.find((t) => t.id === id); if (x) x.estado = estado; }); });
+      io.updateTicket(id, { estado });
+    },
+    archivarTicket(id) {
+      local((nd) => { nd.cocina = nd.cocina.filter((t) => t.id !== id); });
+      io.updateTicket(id, { archivado_cocina: true });
+    },
+    hacerCorte() {
+      const cur = dataRef.current; const h = cur.historial || [];
+      const total = h.reduce((s, t) => s + (t.total != null ? t.total : 0), 0);
+      const id = uid(), f = fecha(), hr = hora();
+      local((nd) => { nd.cortes.unshift({ id, fecha: f, hora: hr, tickets: h.length, total }); nd.historial = []; nd.cocina = []; });
+      io.hacerCorte(id, f, hr);
+    },
+    // ---- bebidas ----
+    updateBebida(id, patch) { local((nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) Object.assign(b, patch); }); io.updateBebida(id, patch); },
+    addBebida(b) { local((nd) => nd.bebidas.push({ ...b })); io.addBebida(b); },
+    removeBebida(id) { local((nd) => { nd.bebidas = nd.bebidas.filter((x) => x.id !== id); }); io.removeBebida(id); },
+    // ---- carnes ----
+    addCarne(nombre) {
+      const id = slug(nombre);
+      const precios = { [`taco-${id}`]: 20, [`taco-queso-${id}`]: 30, [`gringa-${id}`]: 45, [`llenadora-${id}`]: 55, [`volcan-${id}`]: 40, [`costra-${id}`]: 50, [`media-costra-${id}`]: 28 };
+      local((nd) => { nd.carnes.push({ id, nombre, activo: true }); nd.precios = { ...nd.precios, ...precios }; });
+      io.addCarne({ id, nombre }, (dataRef.current.carnes.length));
+      io.saveConfig({ precios: { ...dataRef.current.precios } });
+    },
+    updateCarne(id, patch) { local((nd) => { const c = nd.carnes.find((x) => x.id === id); if (c) Object.assign(c, patch); }); io.updateCarne(id, patch); },
+    removeCarne(id) { local((nd) => { nd.carnes = nd.carnes.filter((x) => x.id !== id); }); io.removeCarne(id); },
+    // ---- config (precios / extras / ocultos) ----
+    setPrecio(key, val) { const precios = { ...dataRef.current.precios, [key]: val }; local((nd) => { nd.precios = precios; }); io.saveConfig({ precios }); },
+    setExtraPrecio(id, val) { const extras = dataRef.current.extras.map((e) => e.id === id ? { ...e, precio: val } : e); local((nd) => { nd.extras = extras; }); io.saveConfig({ extras }); },
+    addExtra(cat, nombre, precio) { const extras = [...dataRef.current.extras, { id: uid(), nombre, cat, precio, activo: true }]; local((nd) => { nd.extras = extras; }); io.saveConfig({ extras }); },
+    removeExtra(id) { const extras = dataRef.current.extras.filter((e) => e.id !== id); local((nd) => { nd.extras = extras; }); io.saveConfig({ extras }); },
+    toggleOculto(key) { const set = new Set(dataRef.current.ocultos || []); set.has(key) ? set.delete(key) : set.add(key); const ocultos = [...set]; local((nd) => { nd.ocultos = ocultos; }); io.saveConfig({ ocultos }); },
+    // ---- gastos ----
+    addGasto(g) { local((nd) => nd.gastos.unshift({ ...g })); io.addGasto(g); },
+    removeGasto(id) { local((nd) => { nd.gastos = nd.gastos.filter((x) => x.id !== id); }); io.removeGasto(id); },
+    // ---- usuarios ----
+    crearUsuario(u) { local((nd) => nd.usuarios.push({ id: u.id, nombre: u.nombre, rol: u.rol, pin: u.pin })); io.crearUsuario(u); },
+    eliminarUsuario(id) { local((nd) => { nd.usuarios = nd.usuarios.filter((x) => x.id !== id); }); io.eliminarUsuario(id); },
+  };
+}
+
 function SinAcceso() {
   return (
     <div className="screen">
-      <div className="empty">Esta sección es solo para el administrador.</div>
+      <div className="empty">No tienes acceso a esta sección.</div>
     </div>
   );
 }
 
 /* ============================== LOGIN ============================== */
-function Login({ data, onLogin, online }) {
+function Login({ data, onLogin, conn, aviso }) {
   const [sel, setSel] = useState(null);
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
-  const entrar = () => {
-    const u = data.usuarios.find((x) => x.id === sel);
-    if (!u) return;
-    if (u.pin === pin) onLogin(u);
-    else { setErr("PIN incorrecto"); setPin(""); }
+  const [busy, setBusy] = useState(false);
+  const entrar = async () => {
+    if (busy || !sel) return;
+    setBusy(true); setErr("");
+    try {
+      if (supabaseReady) {
+        const u = await dbLogin(sel, pin);
+        if (u) onLogin(u); else { setErr("PIN incorrecto"); setPin(""); }
+      } else {
+        const u = data.usuarios.find((x) => x.id === sel);
+        if (u && u.pin === pin) onLogin(u); else { setErr("PIN incorrecto"); setPin(""); }
+      }
+    } finally { setBusy(false); }
   };
+  const online = conn === "online";
+  const connTxt = conn === "online" ? "● En línea — sincronizado entre dispositivos"
+    : conn === "reconnecting" ? "● Conectando…"
+    : "● Modo local (configura Supabase para sincronizar)";
+  const connCol = conn === "online" ? "var(--ok)" : conn === "reconnecting" ? "var(--maiz)" : "var(--alerta)";
   return (
     <div className="login">
       <style>{CSS}</style>
@@ -301,6 +432,7 @@ function Login({ data, onLogin, online }) {
         <div className="brand-mark">🌵</div>
         <h1 className="brand-title">{data.nombreNegocio}</h1>
         <p className="brand-sub">Sistema de comandas</p>
+        {aviso && <div className="login-err">{aviso}</div>}
         <div className="login-users">
           {data.usuarios.map((u) => (
             <button key={u.id} className={"user-chip" + (sel === u.id ? " on" : "")}
@@ -313,32 +445,32 @@ function Login({ data, onLogin, online }) {
               value={pin} onChange={(e) => setPin(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && entrar()} />
             {err && <div className="login-err">{err}</div>}
-            <button className="btn btn-primary btn-block" onClick={entrar}>Entrar</button>
+            <button className="btn btn-primary btn-block" disabled={busy} onClick={entrar}>{busy ? "Entrando…" : "Entrar"}</button>
           </>
         )}
-        <p className="login-hint">PIN de prueba — Edwin: 1234 · Mesero 1: 1111</p>
-        <p className="login-hint" style={{ marginTop: 6, color: online ? "var(--ok)" : "var(--alerta)" }}>
-          {online ? "● En línea — sincronizado entre dispositivos" : "● Modo local (configura Supabase para sincronizar)"}
-        </p>
+        <p className="login-hint" style={{ marginTop: 10, color: connCol }}>{connTxt}</p>
       </div>
     </div>
   );
 }
 
 /* ============================== TOPBAR ============================== */
-function TopBar({ data, user, view, go, onLogout }) {
+function TopBar({ data, user, view, go, conn, onLogout }) {
   const items = [
-    { id: "mesas", label: "Mesas", icon: Utensils, admin: false },
-    { id: "cocina", label: "Cocina", icon: ChefHat, admin: false },
-    { id: "inventario", label: "Inventario", icon: Package, admin: false },
-    { id: "gastos", label: "Gastos", icon: Wallet, admin: true },
-    { id: "admin", label: "Administración", icon: Settings, admin: true },
-  ].filter((it) => !it.admin || esAdmin(user));
+    { id: "mesas", label: "Mesas", icon: Utensils },
+    { id: "cocina", label: "Cocina", icon: ChefHat },
+    { id: "inventario", label: "Inventario", icon: Package },
+    { id: "gastos", label: "Gastos", icon: Wallet },
+    { id: "admin", label: "Administración", icon: Settings },
+  ].filter((it) => puede(user, it.id));
   const pendientes = data.cocina.filter((t) => t.estado !== "listo").length;
+  const connCol = conn === "online" ? "var(--ok)" : conn === "reconnecting" ? "var(--maiz)" : "var(--alerta)";
+  const connTitle = conn === "online" ? "En línea" : conn === "reconnecting" ? "Conectando…" : "Modo local";
   return (
     <header className="topbar">
       <div className="topbar-brand"><span className="topbar-cactus">🌵</span>
-        <span className="topbar-name">{data.nombreNegocio}</span></div>
+        <span className="topbar-name">{data.nombreNegocio}</span>
+        <span className="conn-dot" title={connTitle} style={{ background: connCol }} /></div>
       <nav className="topbar-nav">
         {items.map((it) => {
           const I = it.icon;
@@ -351,21 +483,26 @@ function TopBar({ data, user, view, go, onLogout }) {
           );
         })}
       </nav>
-      <div className="topbar-user"><span className="user-name">{user.nombre}</span>
+      <div className="topbar-user">
+        <span className="user-name">{user.nombre}</span>
+        <span className={"rol-tag " + user.rol}>{ROLES[user.rol] || user.rol}</span>
         <button className="nav-btn ghost" onClick={onLogout}><LogOut size={18} /></button></div>
     </header>
   );
 }
 
 /* ============================== MESAS ============================== */
-function Mesas({ data, go }) {
+function Mesas({ data, go, user }) {
+  const puedeComanda = puede(user, "comanda");
   const domsActivos = data.cocina.filter((t) => t.tipo === "domicilio" && t.estado !== "listo").length;
   return (
     <div className="screen">
       <div className="screen-head">
         <div>
           <h2>Mesas</h2>
-          <p className="muted">Toca una mesa para tomar su orden. Para llevar y Domicilio están abajo como un cuadro más.</p>
+          <p className="muted">{puedeComanda
+            ? "Toca una mesa para tomar su orden. Para llevar y Domicilio están abajo como un cuadro más."
+            : "Vista de mesas (solo lectura)."}</p>
         </div>
       </div>
       <div className="mesas-grid">
@@ -374,8 +511,8 @@ function Mesas({ data, go }) {
           const ordenes = m.pedido?.ordenes?.length || 0;
           const items = m.pedido?.ordenes?.reduce((s, p) => s + p.items.reduce((a, i) => a + i.cantidad, 0), 0) || 0;
           return (
-            <button key={m.id} className={"mesa-card" + (ocupada ? " ocupada" : "")}
-              onClick={() => go("comanda", { tipo: "aqui", mesaId: m.id })}>
+            <button key={m.id} className={"mesa-card" + (ocupada ? " ocupada" : "") + (puedeComanda ? "" : " solo-ver")}
+              onClick={() => puedeComanda && go("comanda", { tipo: "aqui", mesaId: m.id })}>
               <div className="mesa-num">{m.id}</div>
               <div className="mesa-estado">{ocupada ? "Ocupada" : "Libre"}</div>
               {ocupada && (
@@ -388,23 +525,27 @@ function Mesas({ data, go }) {
           );
         })}
 
-        <button className="mesa-card especial-card llevar" onClick={() => go("comanda", { tipo: "llevar" })}>
-          <ShoppingBag size={34} />
-          <div className="especial-card-label">Para llevar</div>
-        </button>
+        {puedeComanda && (
+          <button className="mesa-card especial-card llevar" onClick={() => go("comanda", { tipo: "llevar" })}>
+            <ShoppingBag size={34} />
+            <div className="especial-card-label">Para llevar</div>
+          </button>
+        )}
 
-        <button className="mesa-card especial-card domicilio" onClick={() => go("comanda", { tipo: "domicilio" })}>
-          <Bike size={34} />
-          <div className="especial-card-label">Domicilio</div>
-          {domsActivos > 0 && <span className="especial-badge">{domsActivos} en curso</span>}
-        </button>
+        {puedeComanda && (
+          <button className="mesa-card especial-card domicilio" onClick={() => go("comanda", { tipo: "domicilio" })}>
+            <Bike size={34} />
+            <div className="especial-card-label">Domicilio</div>
+            {domsActivos > 0 && <span className="especial-badge">{domsActivos} en curso</span>}
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
 /* ============================== COMANDA ============================== */
-function Comanda({ data, setData, user, go, ctx }) {
+function Comanda({ data, db, user, go, ctx }) {
   const isPhone = useIsPhone();
   const menu = useMemo(() => buildMenu(data.carnes, data.bebidas, data.extras, data.precios, data.ocultos),
     [data.carnes, data.bebidas, data.extras, data.precios, data.ocultos]);
@@ -429,6 +570,7 @@ function Comanda({ data, setData, user, go, ctx }) {
   const [esExtra, setEsExtra] = useState(false);  // orden extra sobre una mesa ya ocupada
   const [ticket, setTicket] = useState(null);
   const [pane, setPane] = useState("menu"); // celular: menu | orden
+  const sending = useRef(false);
 
   const extras = pedido.extras || [];
   const totalProd = pedido.ordenes.reduce((s, p) => s + p.items.reduce((a, i) => a + i.cantidad, 0), 0);
@@ -478,22 +620,18 @@ function Comanda({ data, setData, user, go, ctx }) {
   const renombrar = (idx, nombre) => setPedido((p) => { const np = clone(p); np.ordenes[idx].nombre = nombre; return np; });
 
   const guardarMesa = () => {
-    setData((d) => {
-      const nd = clone(d); const m = nd.mesas.find((x) => x.id === mesaId); if (!m) return nd;
-      m.pedido = clone(pedido);
-      m.estado = totalProd > 0 ? "ocupada" : "libre";
-      m.mesero = totalProd > 0 ? user.nombre : null;
-      m.hora = totalProd > 0 ? hora() : null;
-      return nd;
-    });
+    db.guardarMesa(mesaId, clone(pedido), user.nombre);
     go("mesas");
   };
 
   const finalizar = () => {
+    if (sending.current) return;            // evita doble toque / doble ticket
     if (vacio) { alert("Agrega al menos un producto."); return; }
     if (!esExtra && entrada === "domicilio" && (!dom.direccion.trim() || !dom.telefono.trim())) {
       setModalDom(true); alert("Captura dirección y teléfono del domicilio."); return;
     }
+    sending.current = true;
+    setTimeout(() => { sending.current = false; }, 1200);
     let ticketTipo = "aqui", origen, paraLlevar = false, referencia = null;
     if (esExtra) {
       origen = `Mesa ${mesaId}`;
@@ -516,35 +654,12 @@ function Comanda({ data, setData, user, go, ctx }) {
       domicilio: (!esExtra && entrada === "domicilio") ? { ...dom } : null,
       total: totalDinero,
     };
-    setData((d) => {
-      const nd = clone(d);
-      nd.cocina.unshift(t);
-      if (!nd.historial) nd.historial = [];
-      nd.historial.unshift(t);
-      pedido.ordenes.forEach((o) => o.items.forEach((it) => {
-        if (it.cat === "bebida" && it.invId) {
-          const b = nd.bebidas.find((x) => x.id === it.invId);
-          if (b) b.cantidad = Math.max(0, b.cantidad - it.cantidad);
-        }
-      }));
-      if (esExtra) {
-        // no se modifica la orden original; la mesa sigue ocupada
-      } else if (entrada === "aqui") {
-        const m = nd.mesas.find((x) => x.id === mesaId);
-        m.pedido = clone(pedido); m.estado = "ocupada"; m.mesero = user.nombre; m.hora = t.hora;
-      } else if (entrada === "domicilio") {
-        nd.domicilios.unshift({ ...t });
-      }
-      return nd;
-    });
+    db.enviarTicket(t, { esExtra, mesaId, pedido: clone(pedido), userNombre: user.nombre });
     setTicket(t);
   };
 
   const liberarMesa = () => {
-    setData((d) => {
-      const nd = clone(d); const m = nd.mesas.find((x) => x.id === mesaId); if (!m) return nd;
-      m.pedido = null; m.estado = "libre"; m.mesero = null; m.hora = null; return nd;
-    });
+    db.liberarMesa(mesaId);
     go("mesas");
   };
 
@@ -718,10 +833,13 @@ function Comanda({ data, setData, user, go, ctx }) {
   // Mesa ocupada: mostramos resumen + opción de Orden Extra (no se edita la orden original)
   if (mesaOcupada && !esExtra) {
     const ped = mesaInfo.pedido || { ordenes: [], extras: [] };
-    const tot = ticketTotal(ped);
+    const extrasMesa = mesaInfo.extras || [];
+    const tot = ticketTotal(ped) + extrasMesa.reduce((s, e) => s + (e.total != null ? e.total : ticketTotal(e)), 0);
+    const todasOrdenes = [...(ped.ordenes || []), ...extrasMesa.flatMap((e) => e.ordenes || [])];
+    const todosExtras = [...(ped.extras || []), ...extrasMesa.flatMap((e) => e.extras || [])];
     const reimprimir = () => setTicket({
       id: "reimp", tipo: "aqui", origen: `Mesa ${mesaId}`, paraLlevar: false,
-      ordenes: ped.ordenes || [], extras: ped.extras || [],
+      ordenes: todasOrdenes, extras: todosExtras,
       mesero: mesaInfo.mesero, hora: mesaInfo.hora, fecha: fecha(), domicilio: null,
     });
     return (
@@ -748,13 +866,34 @@ function Comanda({ data, setData, user, go, ctx }) {
               {ped.extras.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.corto || it.nombre}</div>)}
             </div>
           )}
+
+          {extrasMesa.map((ex, n) => (
+            <div key={ex.id} className="resumen-extra">
+              <div className="resumen-extra-h">Orden extra {n + 1}{ex.hora ? ` · ${ex.hora}` : ""}</div>
+              {(ex.ordenes || []).map((o) => (
+                <div key={o.id} className="resumen-orden">
+                  <div className="resumen-oname">{o.nombre}{o.prep ? ` · ${PREP_LABEL[o.prep] || o.prep}` : ""}</div>
+                  {o.items.map((it) => (
+                    <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.nombre}</div>
+                  ))}
+                </div>
+              ))}
+              {(ex.extras || []).length > 0 && (
+                <div className="resumen-orden">
+                  <div className="resumen-oname">Para todo el pedido</div>
+                  {ex.extras.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.corto || it.nombre}</div>)}
+                </div>
+              )}
+            </div>
+          ))}
+
           <div className="ticket-total"><span>Total</span><b>{money(tot)}</b></div>
         </div>
         <div className="resumen-actions">
           <button className="btn btn-barro btn-block" onClick={() => { setEsExtra(true); setPedido(nuevoPedido()); setActiva(0); setPane("menu"); }}>
             <Plus size={16} /> Agregar orden extra
           </button>
-          <button className="btn btn-line btn-block" onClick={reimprimir}><Printer size={16} /> Reimprimir ticket</button>
+          <button className="btn btn-line btn-block" onClick={reimprimir}><Printer size={16} /> Reimprimir ticket (todo)</button>
           <button className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
         </div>
         {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
@@ -992,14 +1131,12 @@ function TicketModal({ t, negocio, onClose }) {
 }
 
 /* ============================== COCINA ============================== */
-function Cocina({ data, setData }) {
+function Cocina({ data, db }) {
   const [tab, setTab] = useState("pendientes");
   const [ticket, setTicket] = useState(null);
 
-  const setEstado = (id, estado) => setData((d) => {
-    const nd = clone(d); const t = nd.cocina.find((x) => x.id === id); if (t) t.estado = estado; return nd;
-  });
-  const quitar = (id) => setData((d) => ({ ...d, cocina: d.cocina.filter((x) => x.id !== id) }));
+  const setEstado = (id, estado) => db.setTicketEstado(id, estado);
+  const quitar = (id) => db.archivarTicket(id);
   const pend = data.cocina.filter((t) => t.estado !== "listo");
   const listos = data.cocina.filter((t) => t.estado === "listo");
   const historial = data.historial || [];
@@ -1008,15 +1145,7 @@ function Cocina({ data, setData }) {
   const hacerCorte = () => {
     if (historial.length === 0) { alert("No hay ventas registradas hoy."); return; }
     if (!confirm(`Hacer corte del día.\nVentas: ${historial.length}  ·  Total: ${money(totalDia)}\n\nSe guardará el corte y se limpiará el historial. ¿Continuar?`)) return;
-    setData((d) => {
-      const nd = clone(d);
-      const h = nd.historial || [];
-      const total = h.reduce((s, t) => s + (t.total != null ? t.total : ticketTotal(t)), 0);
-      nd.cortes = nd.cortes || [];
-      nd.cortes.unshift({ id: uid(), fecha: fecha(), hora: hora(), tickets: h.length, total });
-      nd.historial = [];
-      return nd;
-    });
+    db.hacerCorte();
   };
 
   return (
@@ -1123,9 +1252,9 @@ function Cocina({ data, setData }) {
 }
 
 /* ============================== INVENTARIO ============================== */
-function Inventario({ data, setData }) {
-  const setBebida = (id, patch) => setData((d) => ({ ...d, bebidas: d.bebidas.map((b) => b.id === id ? { ...b, ...patch } : b) }));
-  const setCarne = (id, patch) => setData((d) => ({ ...d, carnes: d.carnes.map((c) => c.id === id ? { ...c, ...patch } : c) }));
+function Inventario({ data, db }) {
+  const setBebida = (id, patch) => db.updateBebida(id, patch);
+  const setCarne = (id, patch) => db.updateCarne(id, patch);
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Inventario</h2>
@@ -1162,15 +1291,15 @@ function Inventario({ data, setData }) {
 }
 
 /* ============================== GASTOS ============================== */
-function Gastos({ data, setData, user }) {
+function Gastos({ data, db, user }) {
   const [concepto, setConcepto] = useState("");
   const [monto, setMonto] = useState("");
   const add = () => {
     const m = parseFloat(monto); if (!concepto.trim() || isNaN(m)) return;
-    setData((d) => ({ ...d, gastos: [{ id: uid(), concepto: concepto.trim(), monto: m, fecha: fecha(), hora: hora(), user: user.nombre }, ...d.gastos] }));
+    db.addGasto({ id: uid(), concepto: concepto.trim(), monto: m, fecha: fecha(), hora: hora(), user: user.nombre });
     setConcepto(""); setMonto("");
   };
-  const borrar = (id) => setData((d) => ({ ...d, gastos: d.gastos.filter((g) => g.id !== id) }));
+  const borrar = (id) => db.removeGasto(id);
   const total = data.gastos.reduce((s, g) => s + g.monto, 0);
   return (
     <div className="screen">
@@ -1205,28 +1334,28 @@ const CAT_LABELS = {
   taco: "Tacos", quesa: "Quesadillas / Gringas", volcan: "Volcanes", costra: "Especialidad — Costra",
 };
 
-function Admin({ data, setData, user }) {
+function Admin({ data, db, user }) {
   const [tab, setTab] = useState("precios");
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Administración</h2>
-        <p className="muted">Solo el administrador. Aquí defines precios, productos y meseros.</p></div></div>
+        <p className="muted">Solo el administrador. Aquí defines precios, productos y usuarios.</p></div></div>
       <div className="admin-tabs">
-        {[["precios", "Precios"], ["productos", "Productos"], ["meseros", "Meseros"]].map(([k, l]) => (
+        {[["precios", "Precios"], ["productos", "Productos"], ["meseros", "Usuarios"]].map(([k, l]) => (
           <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
-      {tab === "precios" && <AdminPrecios data={data} setData={setData} />}
-      {tab === "productos" && <AdminProductos data={data} setData={setData} />}
-      {tab === "meseros" && <AdminMeseros data={data} setData={setData} user={user} />}
+      {tab === "precios" && <AdminPrecios data={data} db={db} />}
+      {tab === "productos" && <AdminProductos data={data} db={db} />}
+      {tab === "meseros" && <AdminMeseros data={data} db={db} user={user} />}
     </div>
   );
 }
 
-function AdminPrecios({ data, setData }) {
-  const setPrecio = (key, v) => setData((d) => ({ ...d, precios: { ...d.precios, [key]: num(v) } }));
-  const setExtra = (id, v) => setData((d) => ({ ...d, extras: d.extras.map((e) => e.id === id ? { ...e, precio: num(v) } : e) }));
-  const setBeb = (id, v) => setData((d) => ({ ...d, bebidas: d.bebidas.map((b) => b.id === id ? { ...b, precio: num(v) } : b) }));
+function AdminPrecios({ data, db }) {
+  const setPrecio = (key, v) => db.setPrecio(key, num(v));
+  const setExtra = (id, v) => db.setExtraPrecio(id, num(v));
+  const setBeb = (id, v) => db.updateBebida(id, { precio: num(v) });
 
   const grupos = {
     taco: [
@@ -1335,7 +1464,7 @@ function CatCategoria({ titulo, cat, base, extras, ocultos, onToggle, onAdd, onD
   );
 }
 
-function AdminProductos({ data, setData }) {
+function AdminProductos({ data, db }) {
   const [carne, setCarne] = useState("");
   const [beb, setBeb] = useState({ nombre: "", precio: "", cantidad: "" });
   const base = catalogoBase(data.carnes);
@@ -1345,40 +1474,25 @@ function AdminProductos({ data, setData }) {
     const n = carne.trim(); if (!n) return;
     const id = slug(n);
     if (data.carnes.some((c) => c.id === id)) { alert("Esa carne ya existe."); return; }
-    setData((d) => ({
-      ...d,
-      carnes: [...d.carnes, { id, nombre: n, activo: true }],
-      precios: {
-        ...d.precios,
-        [`taco-${id}`]: 20, [`taco-queso-${id}`]: 30,
-        [`gringa-${id}`]: 45, [`llenadora-${id}`]: 55,
-        [`volcan-${id}`]: 40, [`costra-${id}`]: 50, [`media-costra-${id}`]: 28,
-      },
-    }));
+    db.addCarne(n);
     setCarne("");
   };
   const quitarCarne = (id) => {
     if (!confirm("¿Quitar esta carne y todos sus productos del menú?")) return;
-    setData((d) => ({ ...d, carnes: d.carnes.filter((c) => c.id !== id) }));
+    db.removeCarne(id);
   };
 
-  const toggleOculto = (key) => setData((d) => {
-    const set = new Set(d.ocultos || []);
-    set.has(key) ? set.delete(key) : set.add(key);
-    return { ...d, ocultos: [...set] };
-  });
-  const addExtraEn = (cat, nombre, precio) => setData((d) => ({
-    ...d, extras: [...d.extras, { id: uid(), nombre, cat, precio: num(precio), activo: true }],
-  }));
-  const quitarExtra = (id) => setData((d) => ({ ...d, extras: d.extras.filter((e) => e.id !== id) }));
+  const toggleOculto = (key) => db.toggleOculto(key);
+  const addExtraEn = (cat, nombre, precio) => db.addExtra(cat, nombre, num(precio));
+  const quitarExtra = (id) => db.removeExtra(id);
 
   const addBeb = () => {
     const n = beb.nombre.trim(); if (!n) return;
-    setData((d) => ({ ...d, bebidas: [...d.bebidas, { id: uid(), nombre: n, cantidad: num(beb.cantidad), activo: true, precio: num(beb.precio) }] }));
+    db.addBebida({ id: uid(), nombre: n, cantidad: num(beb.cantidad), activo: true, precio: num(beb.precio) });
     setBeb({ nombre: "", precio: "", cantidad: "" });
   };
-  const quitarBeb = (id) => setData((d) => ({ ...d, bebidas: d.bebidas.filter((b) => b.id !== id) }));
-  const toggleBeb = (id) => setData((d) => ({ ...d, bebidas: d.bebidas.map((b) => b.id === id ? { ...b, activo: !b.activo } : b) }));
+  const quitarBeb = (id) => db.removeBebida(id);
+  const toggleBeb = (id) => { const b = data.bebidas.find((x) => x.id === id); if (b) db.updateBebida(id, { activo: !b.activo }); };
 
   const cats = [["taco", "Tacos"], ["quesa", "Quesadillas / Gringas"], ["volcan", "Volcanes"], ["costra", "Especialidad — Costra"]];
 
@@ -1428,21 +1542,21 @@ function AdminProductos({ data, setData }) {
   );
 }
 
-function AdminMeseros({ data, setData, user }) {
+function AdminMeseros({ data, db, user }) {
   const [nuevo, setNuevo] = useState({ nombre: "", pin: "", rol: "mesero" });
   const admins = data.usuarios.filter((u) => u.rol === "admin").length;
 
   const add = () => {
     const n = nuevo.nombre.trim(); const p = nuevo.pin.trim();
     if (!n || p.length < 4) { alert("Nombre y PIN de al menos 4 dígitos."); return; }
-    setData((d) => ({ ...d, usuarios: [...d.usuarios, { id: uid(), nombre: n, pin: p, rol: nuevo.rol }] }));
+    db.crearUsuario({ id: uid(), nombre: n, pin: p, rol: nuevo.rol });
     setNuevo({ nombre: "", pin: "", rol: "mesero" });
   };
   const quitar = (u) => {
     if (u.id === user.id) { alert("No puedes eliminar tu propio usuario."); return; }
     if (u.rol === "admin" && admins <= 1) { alert("Debe quedar al menos un administrador."); return; }
     if (!confirm(`¿Eliminar a ${u.nombre}?`)) return;
-    setData((d) => ({ ...d, usuarios: d.usuarios.filter((x) => x.id !== u.id) }));
+    db.eliminarUsuario(u.id);
   };
 
   return (
@@ -1451,7 +1565,7 @@ function AdminMeseros({ data, setData, user }) {
         {data.usuarios.map((u) => (
           <div key={u.id} className="inv-row">
             <span className="inv-name">{u.nombre}</span>
-            <span className={"rol-tag " + u.rol}>{u.rol === "admin" ? "Administrador" : "Mesero"}</span>
+            <span className={"rol-tag " + u.rol}>{ROLES[u.rol] || u.rol}</span>
             <button className="btn btn-danger-ghost btn-sm" onClick={() => quitar(u)}><Trash2 size={14} /> Quitar</button>
           </div>
         ))}
@@ -1462,10 +1576,14 @@ function AdminMeseros({ data, setData, user }) {
         <input className="inp inp-sm" inputMode="numeric" placeholder="PIN" value={nuevo.pin} onChange={(e) => setNuevo({ ...nuevo, pin: e.target.value })} />
         <select className="inp inp-sm" value={nuevo.rol} onChange={(e) => setNuevo({ ...nuevo, rol: e.target.value })}>
           <option value="mesero">Mesero</option>
+          <option value="cocinero">Cocinero</option>
           <option value="admin">Administrador</option>
         </select>
         <button className="btn btn-add" onClick={add}><Plus size={16} /></button>
       </div>
+      <p className="muted small" style={{ marginTop: 10 }}>
+        El <b>Mesero</b> toma órdenes y ve cocina/inventario. El <b>Cocinero</b> solo ve mesas y cocina. El <b>Administrador</b> controla precios, productos y usuarios.
+      </p>
     </div>
   );
 }
@@ -1502,6 +1620,7 @@ button{font-family:inherit;cursor:pointer;}
 /* TOPBAR */
 .topbar{display:flex;align-items:center;gap:14px;background:var(--agave);color:#fff;padding:10px 16px;flex-wrap:wrap;}
 .topbar-brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:18px;}
+.conn-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 2px rgba(255,255,255,.2);}
 .topbar-cactus{font-size:22px;}
 .topbar-nav{display:flex;gap:6px;flex:1;flex-wrap:wrap;}
 .nav-btn{display:flex;align-items:center;gap:7px;background:transparent;border:none;color:#cfe3d8;padding:9px 13px;border-radius:11px;font-size:14px;font-weight:600;position:relative;}
@@ -1678,6 +1797,8 @@ button{font-family:inherit;cursor:pointer;}
 .resumen-item{font-size:13px;}
 .resumen-item span{font-weight:700;display:inline-block;min-width:26px;}
 .resumen-actions{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid var(--linea);background:var(--papel);}
+.resumen-extra{border:1px solid var(--especial);border-radius:12px;padding:8px 10px 4px;margin-bottom:8px;background:rgba(180,40,40,.05);}
+.resumen-extra-h{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--especial);margin-bottom:6px;}
 .listos-row{display:flex;flex-wrap:wrap;gap:8px;}
 .listo-chip{display:flex;align-items:center;gap:8px;background:#EAF3EE;border:1px solid #CFE3D8;border-radius:20px;padding:6px 8px 6px 14px;font-size:13px;color:var(--ok);font-weight:600;}
 
@@ -1733,6 +1854,8 @@ button{font-family:inherit;cursor:pointer;}
 .rol-tag{font-size:11px;font-weight:700;padding:3px 10px;border-radius:8px;}
 .rol-tag.admin{background:var(--agave);color:#fff;}
 .rol-tag.mesero{background:var(--linea);color:var(--tinta);}
+.rol-tag.cocinero{background:var(--barro);color:#fff;}
+.mesa-card.solo-ver{cursor:default;}
 
 .tp-item{display:flex;gap:8px;font-size:13px;align-items:baseline;}
 .tp-q{min-width:28px;} .tp-n{flex:1;} .tp-p{font-weight:700;white-space:nowrap;}
@@ -1762,6 +1885,7 @@ button{font-family:inherit;cursor:pointer;}
   .topbar{flex-wrap:nowrap;gap:8px;padding:8px 10px;}
   .topbar-name{display:none;}
   .user-name{display:none;}
+  .topbar-user .rol-tag{display:none;}
   .topbar-nav{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex:1;}
   .topbar-nav::-webkit-scrollbar{display:none;}
   .nav-btn{flex:none;white-space:nowrap;padding:9px 12px;}
