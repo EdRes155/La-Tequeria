@@ -138,3 +138,54 @@ begin
     exception when duplicate_object then null; end;
   end loop;
 end $$;
+
+-- =====================================================================
+--  SESIÓN ÚNICA DE COCINA  (solo un dispositivo cocinero a la vez)
+--  Re-ejecutable. Pégalo en SQL Editor si ya tenías el esquema anterior.
+-- =====================================================================
+create table if not exists public.cocina_sesion (
+  id int primary key default 1,
+  session_id text,
+  actualizado timestamptz
+);
+alter table public.cocina_sesion enable row level security;
+drop policy if exists rw_all on public.cocina_sesion;
+create policy rw_all on public.cocina_sesion for all using (true) with check (true);
+grant select, insert, update, delete on public.cocina_sesion to anon, authenticated;
+
+-- Reclama la cocina: true si la obtiene (libre, propia o sesión vieja > 45s)
+create or replace function public.claim_cocina(p_session text)
+returns boolean language plpgsql security definer set search_path = public, extensions as $$
+declare cur record;
+begin
+  select * into cur from public.cocina_sesion where id = 1;
+  if cur.id is null then
+    insert into public.cocina_sesion(id, session_id, actualizado) values (1, p_session, now())
+      on conflict (id) do update set session_id = excluded.session_id, actualizado = excluded.actualizado;
+    return true;
+  end if;
+  if cur.session_id is null or cur.session_id = p_session or cur.actualizado < now() - interval '45 seconds' then
+    update public.cocina_sesion set session_id = p_session, actualizado = now() where id = 1;
+    return true;
+  end if;
+  return false;
+end $$;
+
+-- Latido para mantener viva la sesión; devuelve true si seguimos siendo la cocina
+create or replace function public.latido_cocina(p_session text)
+returns boolean language plpgsql security definer set search_path = public as $$
+declare n int;
+begin
+  update public.cocina_sesion set actualizado = now() where id = 1 and session_id = p_session;
+  get diagnostics n = row_count;
+  return n > 0;
+end $$;
+
+create or replace function public.liberar_cocina(p_session text)
+returns void language sql security definer set search_path = public as $$
+  update public.cocina_sesion set session_id = null where id = 1 and session_id = p_session;
+$$;
+
+grant execute on function public.claim_cocina(text)   to anon, authenticated;
+grant execute on function public.latido_cocina(text)  to anon, authenticated;
+grant execute on function public.liberar_cocina(text) to anon, authenticated;
