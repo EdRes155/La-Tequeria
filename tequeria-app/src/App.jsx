@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   Plus, Minus, Trash2, X, Printer, Send, LogOut, ArrowLeft,
   Bike, Package, Wallet, Utensils, ShoppingBag, ChefHat, Check, Pencil, Settings
@@ -96,15 +96,16 @@ function normalize(d) {
 }
 
 const ROLES = { admin: "Administrador", mesero: "Mesero", cocinero: "Cocinero" };
+// Permisos por rol: "ver" = pantallas visibles; "edita" = dónde puede modificar.
+// - admin: todo.  - mesero: mesas y comanda (su trabajo); cocina solo lectura.
+// - cocinero: cocina (completo) y mesas solo lectura (no toma ni edita órdenes).
 const PERMISOS = {
-  mesas:      ["admin", "mesero", "cocinero"],
-  comanda:    ["admin", "mesero"],
-  cocina:     ["admin", "mesero", "cocinero"],
-  inventario: ["admin", "mesero"],
-  gastos:     ["admin"],
-  admin:      ["admin"],
+  admin:    { ver: ["mesas", "comanda", "cocina", "inventario", "gastos", "admin"], edita: ["mesas", "comanda", "cocina", "inventario", "gastos", "admin"] },
+  mesero:   { ver: ["mesas", "comanda", "cocina"],                                  edita: ["mesas", "comanda"] },
+  cocinero: { ver: ["mesas", "cocina"],                                             edita: ["cocina"] },
 };
-const puede = (u, v) => (PERMISOS[v] || []).includes(u?.rol);
+const puede = (u, v) => !!(PERMISOS[u?.rol]?.ver || []).includes(v);
+const puedeEditar = (u, v) => !!(PERMISOS[u?.rol]?.edita || []).includes(v);
 const money = (n) => "$" + (Number(n) || 0).toFixed(0);
 const ticketTotal = (t) =>
   (t.ordenes || []).reduce((s, o) => s + o.items.reduce((a, i) => a + i.cantidad * (i.precio || 0), 0), 0)
@@ -131,16 +132,16 @@ async function saveData(d) {
 const uid = () => Math.random().toString(36).slice(2, 9);
 const hora = () => new Date().toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
 const fecha = () => new Date().toLocaleDateString("es-MX", { day: "2-digit", month: "2-digit", year: "numeric" });
-const clone = (o) => JSON.parse(JSON.stringify(o));
+const clone = (o) => (typeof structuredClone === "function" ? structuredClone(o) : JSON.parse(JSON.stringify(o)));
 
 function useIsPhone() {
-  const [w, setW] = useState(typeof window !== "undefined" ? window.innerWidth : 1024);
+  const [phone, setPhone] = useState(typeof window !== "undefined" ? window.innerWidth < 760 : false);
   useEffect(() => {
-    const f = () => setW(window.innerWidth);
+    const f = () => { const p = window.innerWidth < 760; setPhone((prev) => (prev === p ? prev : p)); };
     window.addEventListener("resize", f);
     return () => window.removeEventListener("resize", f);
   }, []);
-  return w < 760;
+  return phone;
 }
 
 /* tipos de comanda */
@@ -329,6 +330,37 @@ function ChoiceHost() {
   );
 }
 
+let _pinListener = null;
+function pedirPin(opts) {
+  const o = typeof opts === "string" ? { mensaje: opts } : (opts || {});
+  return new Promise((resolve) => {
+    if (_pinListener) _pinListener({ ...o, resolve });
+    else { const v = window.prompt(o.mensaje || "PIN de administrador:"); resolve(v ? v : null); }
+  });
+}
+function PinHost() {
+  const [state, setState] = useState(null);
+  const [pin, setPin] = useState("");
+  useEffect(() => { _pinListener = (s) => { setPin(""); setState(s); }; return () => { _pinListener = null; }; }, []);
+  if (!state) return null;
+  const cerrar = (val) => { state.resolve(val); setState(null); };
+  return (
+    <div className="modal-bg" onClick={() => cerrar(null)}>
+      <div className="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
+        {state.titulo && <h3 className="confirm-title">{state.titulo}</h3>}
+        {state.mensaje && <p className="confirm-msg">{state.mensaje}</p>}
+        <input className="pin-input" type="password" inputMode="numeric" autoFocus value={pin}
+          onChange={(e) => setPin(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && pin) cerrar(pin); }} placeholder="PIN" />
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={() => cerrar(null)}>Cancelar</button>
+          <button className="btn btn-primary" disabled={!pin} onClick={() => cerrar(pin)}>Autorizar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================== AVISOS DE COCINA ============================== */
 function CocinaAlertas({ data, onAbrir }) {
   const seen = useRef(null);
@@ -422,7 +454,7 @@ export default function App() {
   }, [user?.id, user?.rol]);
 
   // Acciones: actualizan la pantalla al instante y escriben en la base (o respaldo local)
-  const db = makeDb(setData, dataRef);
+  const db = useMemo(() => makeDb(setData, dataRef), []);
 
   if (!data) return <div className="loading">Cargando…</div>;
   if (!user) return <Login data={data} onLogin={setUser} conn={conn} />;
@@ -432,7 +464,7 @@ export default function App() {
   if (!yo) return <Login data={data} onLogin={setUser} conn={conn} aviso="Tu usuario ya no existe. Inicia sesión de nuevo." />;
   const userActual = yo;
 
-  const go = (v, c = null) => { setView(v); setCtx(c); };
+  const go = useCallback((v, c = null) => { setView(v); setCtx(c); }, []);
   const props = { data, db, user: userActual, go, ctx };
   const abrirImpresion = (t, auto = false) => { setPrintAuto(!!auto); setPrintTicket(t); };
 
@@ -442,9 +474,9 @@ export default function App() {
       <TopBar data={data} user={userActual} view={view} go={go} conn={conn} onLogout={() => setUser(null)} />
       {userActual.rol === "cocinero" && <CocinaAlertas data={data} onAbrir={abrirImpresion} />}
       <main className="main">
-        {view === "mesas"      && <Mesas {...props} />}
+        {view === "mesas"      && (puede(userActual, "mesas") ? <Mesas {...props} /> : <SinAcceso />)}
         {view === "comanda"    && (puede(userActual, "comanda") ? <Comanda {...props} /> : <SinAcceso />)}
-        {view === "cocina"     && <Cocina {...props} />}
+        {view === "cocina"     && (puede(userActual, "cocina") ? <Cocina {...props} /> : <SinAcceso />)}
         {view === "inventario" && (puede(userActual, "inventario") ? <Inventario {...props} /> : <SinAcceso />)}
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
@@ -454,6 +486,7 @@ export default function App() {
       <Toaster />
       <ConfirmHost />
       <ChoiceHost />
+      <PinHost />
     </div>
   );
 }
@@ -501,12 +534,19 @@ function makeDb(setData, dataRef) {
       local((nd) => { nd.cocina = nd.cocina.filter((t) => t.id !== id); });
       io.updateTicket(id, { archivado_cocina: true });
     },
-    hacerCorte() {
+    // Reenvía la orden de una mesa a la cocina para reimprimir (NO cuenta como venta)
+    reenviarCocina(t) {
+      const copia = { ...clone(t), id: uid(), estado: "pendiente", reenvio: true, total: 0, hora: hora(), fecha: fecha() };
+      local((nd) => { nd.cocina.unshift(clone(copia)); });
+      io.addTicket(copia);
+    },
+    async hacerCorte(adminPin, detalle) {
       const cur = dataRef.current; const h = cur.historial || [];
       const total = h.reduce((s, t) => s + (t.total != null ? t.total : 0), 0);
       const id = uid(), f = fecha(), hr = hora();
-      local((nd) => { nd.cortes.unshift({ id, fecha: f, hora: hr, tickets: h.length, total }); nd.historial = []; nd.cocina = []; });
-      io.hacerCorte(id, f, hr);
+      if (supabaseReady) { const ok = await io.hacerCorte(adminPin, id, f, hr, detalle); if (!ok) return false; }
+      local((nd) => { nd.cortes.unshift({ id, fecha: f, hora: hr, tickets: h.length, total, detalle }); nd.historial = []; nd.cocina = []; });
+      return true;
     },
     // ---- bebidas ----
     updateBebida(id, patch) { local((nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) Object.assign(b, patch); }); io.updateBebida(id, patch); },
@@ -532,8 +572,16 @@ function makeDb(setData, dataRef) {
     addGasto(g) { local((nd) => nd.gastos.unshift({ ...g })); io.addGasto(g); },
     removeGasto(id) { local((nd) => { nd.gastos = nd.gastos.filter((x) => x.id !== id); }); io.removeGasto(id); },
     // ---- usuarios ----
-    crearUsuario(u) { local((nd) => nd.usuarios.push({ id: u.id, nombre: u.nombre, rol: u.rol, pin: u.pin })); io.crearUsuario(u); },
-    eliminarUsuario(id) { local((nd) => { nd.usuarios = nd.usuarios.filter((x) => x.id !== id); }); io.eliminarUsuario(id); },
+    async crearUsuario(u, adminPin) {
+      if (supabaseReady) { const ok = await io.crearUsuario(u, adminPin); if (!ok) return false; }
+      local((nd) => nd.usuarios.push({ id: u.id, nombre: u.nombre, rol: u.rol, pin: u.pin }));
+      return true;
+    },
+    async eliminarUsuario(id, adminPin) {
+      if (supabaseReady) { const ok = await io.eliminarUsuario(id, adminPin); if (!ok) return false; }
+      local((nd) => { nd.usuarios = nd.usuarios.filter((x) => x.id !== id); });
+      return true;
+    },
   };
 }
 
@@ -1006,11 +1054,16 @@ function Comanda({ data, db, user, go, ctx }) {
     const tot = ticketTotal(ped) + extrasMesa.reduce((s, e) => s + (e.total != null ? e.total : ticketTotal(e)), 0);
     const todasOrdenes = [...(ped.ordenes || []), ...extrasMesa.flatMap((e) => e.ordenes || [])];
     const todosExtras = [...(ped.extras || []), ...extrasMesa.flatMap((e) => e.extras || [])];
-    const reimprimir = () => setTicket({
-      id: "reimp", tipo: "aqui", origen: `Mesa ${mesaId}`, paraLlevar: false,
-      ordenes: todasOrdenes, extras: todosExtras,
-      mesero: mesaInfo.mesero, hora: mesaInfo.hora, fecha: fecha(), domicilio: null,
-    });
+    const reenviar = async () => {
+      if (todasOrdenes.length === 0) { toast("La mesa no tiene nada que reenviar.", "info"); return; }
+      if (!(await confirmDialog({ titulo: "Reenviar a cocina", mensaje: "Se enviará de nuevo a la cocina para que la impriman. No vuelve a contar como venta.", confirmar: "Reenviar" }))) return;
+      db.reenviarCocina({
+        id: "x", tipo: "aqui", origen: `Mesa ${mesaId}`, paraLlevar: false,
+        ordenes: clone(todasOrdenes), extras: clone(todosExtras),
+        mesero: mesaInfo.mesero, hora: hora(), fecha: fecha(), domicilio: null,
+      });
+      toast("Reenviado a cocina", "ok");
+    };
     return (
       <div className="comanda-wrap">
         <div className="type-bar">
@@ -1062,7 +1115,7 @@ function Comanda({ data, db, user, go, ctx }) {
           <button className="btn btn-barro btn-block" onClick={() => { setEsExtra(true); setPedido(nuevoPedido()); setActiva(0); setPane("menu"); }}>
             <Plus size={16} /> Agregar orden extra
           </button>
-          <button className="btn btn-line btn-block" onClick={reimprimir}><Printer size={16} /> Reimprimir ticket</button>
+          <button className="btn btn-line btn-block" onClick={reenviar}><Send size={16} /> Reenviar a cocina</button>
           <button className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
         </div>
         {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
@@ -1410,7 +1463,41 @@ function TicketModal({ t, negocio, onClose, recienEnviado, autoPrint }) {
 }
 
 /* ============================== COCINA ============================== */
-function Cocina({ data, db }) {
+function resumenDia(hist) {
+  const porTipo = {}, porMesero = {}, prod = {};
+  let total = 0;
+  hist.forEach((t) => {
+    const tt = t.total != null ? t.total : ticketTotal(t);
+    total += tt;
+    const tipo = (TIPOS[t.tipo] && TIPOS[t.tipo].label) || "Otro";
+    porTipo[tipo] = (porTipo[tipo] || 0) + tt;
+    porMesero[t.mesero || "—"] = (porMesero[t.mesero || "—"] || 0) + tt;
+    (t.ordenes || []).forEach((o) => o.items.forEach((it) => {
+      const n = it.corto || it.nombre; prod[n] = (prod[n] || 0) + it.cantidad;
+    }));
+  });
+  const top = Object.entries(prod).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([nombre, cant]) => ({ nombre, cant }));
+  return { total, count: hist.length, porTipo, porMesero, top };
+}
+
+function textoCorteWhatsApp(neg, r, gastosDia, fechaStr) {
+  const L = [];
+  L.push(`*${neg || "La Tequería"}* — Corte del ${fechaStr}`);
+  L.push(`Ventas: ${r.count}`);
+  L.push(`Total: ${money(r.total)}`);
+  L.push("");
+  L.push("Por tipo:");
+  Object.entries(r.porTipo).forEach(([k, v]) => L.push(`• ${k}: ${money(v)}`));
+  L.push("");
+  L.push("Por mesero:");
+  Object.entries(r.porMesero).forEach(([k, v]) => L.push(`• ${k}: ${money(v)}`));
+  if (r.top.length) { L.push(""); L.push("Más vendidos:"); r.top.forEach((p, i) => L.push(`${i + 1}. ${p.nombre} ×${p.cant}`)); }
+  if (gastosDia > 0) { L.push(""); L.push(`Gastos del día: ${money(gastosDia)}`); L.push(`*Neto: ${money(r.total - gastosDia)}*`); }
+  return L.join("\n");
+}
+
+function Cocina({ data, db, user }) {
+  const edita = puedeEditar(user, "cocina");
   const [tab, setTab] = useState("pendientes");
   const [ticket, setTicket] = useState(null);
 
@@ -1419,26 +1506,43 @@ function Cocina({ data, db }) {
   const pend = data.cocina.filter((t) => t.estado !== "listo");
   const listos = data.cocina.filter((t) => t.estado === "listo");
   const historial = data.historial || [];
-  const totalDia = historial.reduce((s, t) => s + (t.total != null ? t.total : ticketTotal(t)), 0);
+  const res = resumenDia(historial);
+  const gastosHoy = (data.gastos || []).filter((g) => g.fecha === fecha()).reduce((s, g) => s + (Number(g.monto) || 0), 0);
+
+  const compartirWhatsApp = () => {
+    const txt = textoCorteWhatsApp(data.nombreNegocio, res, gastosHoy, fecha());
+    try { window.open("https://wa.me/?text=" + encodeURIComponent(txt), "_blank"); }
+    catch { try { navigator.clipboard.writeText(txt); toast("Resumen copiado", "ok"); } catch {} }
+  };
 
   const hacerCorte = async () => {
     if (historial.length === 0) { toast("No hay ventas registradas hoy.", "info"); return; }
-    if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${historial.length} · Total: ${money(totalDia)}. Se guardará el corte y se limpiará el historial.`, confirmar: "Hacer corte" }))) return;
-    db.hacerCorte();
+    if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${res.count} · Total: ${money(res.total)}. Se guardará el corte y se limpiará el historial.`, confirmar: "Hacer corte" }))) return;
+    let adminPin = "";
+    if (supabaseReady) {
+      const pin = await pedirPin({ titulo: "Corte del día", mensaje: "Escribe el PIN de un administrador para autorizar el corte." });
+      if (pin === null) return;
+      adminPin = pin;
+    }
+    const detalle = { porTipo: res.porTipo, porMesero: res.porMesero, top: res.top, gastos: gastosHoy };
+    const okMsg = await db.hacerCorte(adminPin, detalle);
+    if (okMsg === false) { toast("PIN de administrador no válido.", "error"); return; }
     toast("Corte del día guardado", "ok");
   };
 
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Cocina</h2>
-        <p className="muted">Comandas en preparación e historial de ventas del día.</p></div></div>
+        <p className="muted">{edita ? "Comandas en preparación e historial de ventas del día." : "Vista de comandas pendientes (solo lectura)."}</p></div></div>
 
-      <div className="admin-tabs">
-        <button className={tab === "pendientes" ? "on" : ""} onClick={() => setTab("pendientes")}>Pendientes · {pend.length}</button>
-        <button className={tab === "historial" ? "on" : ""} onClick={() => setTab("historial")}>Historial / Corte</button>
-      </div>
+      {edita && (
+        <div className="admin-tabs">
+          <button className={tab === "pendientes" ? "on" : ""} onClick={() => setTab("pendientes")}>Pendientes · {pend.length}</button>
+          <button className={tab === "historial" ? "on" : ""} onClick={() => setTab("historial")}>Historial / Corte</button>
+        </div>
+      )}
 
-      {tab === "pendientes" && (
+      {(tab === "pendientes" || !edita) && (
         <>
           {pend.length === 0 && <div className="empty">No hay comandas pendientes.</div>}
           <div className="cocina-grid">
@@ -1467,16 +1571,18 @@ function Cocina({ data, db }) {
                     )}
                   </div>
                   <div className="kt-tacos">🌮 Tacos en total: <b>{tacos}</b></div>
-                  <div className="kt-actions">
-                    <button className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} /> Imprimir</button>
-                    {t.estado === "pendiente" && <button className="btn btn-line btn-sm" onClick={() => setEstado(t.id, "preparando")}>Preparando</button>}
-                    <button className="btn btn-primary btn-sm" onClick={() => setEstado(t.id, "listo")}><Check size={14} /> Listo</button>
-                  </div>
+                  {edita && (
+                    <div className="kt-actions">
+                      <button className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} /> Imprimir</button>
+                      {t.estado === "pendiente" && <button className="btn btn-line btn-sm" onClick={() => setEstado(t.id, "preparando")}>Preparando</button>}
+                      <button className="btn btn-primary btn-sm" onClick={() => setEstado(t.id, "listo")}><Check size={14} /> Listo</button>
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
-          {listos.length > 0 && (
+          {edita && listos.length > 0 && (
             <><h3 className="sub-h">Listos</h3>
               <div className="listos-row">
                 {listos.map((t) => (
@@ -1488,13 +1594,34 @@ function Cocina({ data, db }) {
         </>
       )}
 
-      {tab === "historial" && (
+      {edita && tab === "historial" && (
         <>
           <div className="corte-bar">
-            <div><div className="corte-total">{money(totalDia)}</div>
-              <div className="muted small">{historial.length} venta(s) hoy</div></div>
-            <button className="btn btn-primary" onClick={hacerCorte}>Hacer corte del día</button>
+            <div><div className="corte-total">{money(res.total)}</div>
+              <div className="muted small">{res.count} venta(s) hoy{gastosHoy > 0 ? ` · gastos ${money(gastosHoy)} · neto ${money(res.total - gastosHoy)}` : ""}</div></div>
+            <div className="corte-btns">
+              <button className="btn btn-line" onClick={compartirWhatsApp} disabled={res.count === 0}>Compartir</button>
+              <button className="btn btn-primary" onClick={hacerCorte}>Hacer corte</button>
+            </div>
           </div>
+
+          {res.count > 0 && (
+            <div className="corte-desglose">
+              <div className="cd-col">
+                <h4>Por tipo</h4>
+                {Object.entries(res.porTipo).map(([k, v]) => <div key={k} className="cd-row"><span>{k}</span><b>{money(v)}</b></div>)}
+              </div>
+              <div className="cd-col">
+                <h4>Por mesero</h4>
+                {Object.entries(res.porMesero).map(([k, v]) => <div key={k} className="cd-row"><span>{k}</span><b>{money(v)}</b></div>)}
+              </div>
+              <div className="cd-col">
+                <h4>Más vendidos</h4>
+                {res.top.map((p) => <div key={p.nombre} className="cd-row"><span>{p.nombre}</span><b>×{p.cant}</b></div>)}
+              </div>
+            </div>
+          )}
+
           {historial.length === 0 && <div className="empty">Aún no hay ventas registradas hoy.</div>}
           <div className="hist-list">
             {historial.map((t) => {
@@ -1518,7 +1645,7 @@ function Cocina({ data, db }) {
                 {data.cortes.map((c) => (
                   <div key={c.id} className="hist-row">
                     <div className="hist-info"><div className="hist-origen">Corte {c.fecha}</div>
-                      <div className="muted small">{c.hora} · {c.tickets} ventas</div></div>
+                      <div className="muted small">{c.hora} · {c.tickets} ventas{c.detalle && c.detalle.top && c.detalle.top[0] ? ` · top: ${c.detalle.top[0].nombre}` : ""}</div></div>
                     <div className="hist-total">{money(c.total)}</div>
                   </div>
                 ))}
@@ -1828,10 +1955,16 @@ function AdminMeseros({ data, db, user }) {
   const [nuevo, setNuevo] = useState({ nombre: "", pin: "", rol: "mesero" });
   const admins = data.usuarios.filter((u) => u.rol === "admin").length;
 
-  const add = () => {
+  const add = async () => {
     const n = nuevo.nombre.trim(); const p = nuevo.pin.trim();
     if (!n || p.length < 4) { toast("Nombre y PIN de al menos 4 dígitos.", "error"); return; }
-    db.crearUsuario({ id: uid(), nombre: n, pin: p, rol: nuevo.rol });
+    let adminPin = "";
+    if (supabaseReady) {
+      const pin = await pedirPin({ titulo: "Crear usuario", mensaje: "Escribe tu PIN de administrador para autorizar." });
+      if (pin === null) return; adminPin = pin;
+    }
+    const ok = await db.crearUsuario({ id: uid(), nombre: n, pin: p, rol: nuevo.rol }, adminPin);
+    if (ok === false) { toast("PIN de administrador no válido.", "error"); return; }
     toast(`Usuario "${n}" creado`, "ok");
     setNuevo({ nombre: "", pin: "", rol: "mesero" });
   };
@@ -1839,7 +1972,14 @@ function AdminMeseros({ data, db, user }) {
     if (u.id === user.id) { toast("No puedes eliminar tu propio usuario.", "error"); return; }
     if (u.rol === "admin" && admins <= 1) { toast("Debe quedar al menos un administrador.", "error"); return; }
     if (!(await confirmDialog({ titulo: "Eliminar usuario", mensaje: `¿Eliminar a ${u.nombre}?`, confirmar: "Eliminar", peligro: true }))) return;
-    db.eliminarUsuario(u.id);
+    let adminPin = "";
+    if (supabaseReady) {
+      const pin = await pedirPin({ titulo: "Eliminar usuario", mensaje: "Escribe tu PIN de administrador para autorizar." });
+      if (pin === null) return; adminPin = pin;
+    }
+    const ok = await db.eliminarUsuario(u.id, adminPin);
+    if (ok === false) { toast("PIN de administrador no válido.", "error"); return; }
+    toast("Usuario eliminado", "ok");
   };
 
   return (
@@ -1965,7 +2105,7 @@ button{font-family:inherit;cursor:pointer;}
 
 .comanda{flex:1;display:grid;grid-template-columns:1fr 380px;min-height:0;}
 .menu-pane{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--linea);}
-.menu-pane-scroll{flex:1;overflow:auto;padding:14px;}
+.menu-pane-scroll{flex:1;overflow:auto;padding:14px;contain:content;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
 .menu-inner{display:flex;flex-direction:column;gap:14px;}
 .cols-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
 .menu-col{background:var(--papel);border-radius:14px;border:1px solid var(--linea);overflow:hidden;}
@@ -1990,7 +2130,7 @@ button{font-family:inherit;cursor:pointer;}
 .ticket-origen{font-size:18px;font-weight:800;} .ticket-mesero{font-size:12px;color:var(--tinta2);}
 .dom-resumen{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:#FBEDE6;border:none;border-bottom:1px solid var(--linea);padding:10px 16px;font-size:13px;color:var(--barro);font-weight:600;}
 .dom-resumen span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.ticket-scroll{flex:1;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;}
+.ticket-scroll{flex:1;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;contain:content;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
 
 .orden{border:1.5px solid var(--linea);border-radius:12px;padding:10px;background:#fff;}
 .orden.activa{border-color:var(--agave);box-shadow:0 0 0 2px rgba(23,58,47,.12);}
@@ -2053,12 +2193,12 @@ button{font-family:inherit;cursor:pointer;}
 .pane-toggle{display:flex;gap:6px;padding:8px 12px;background:var(--papel);border-bottom:1px solid var(--linea);}
 .pane-toggle button{flex:1;border:none;background:var(--crema);border-radius:10px;padding:11px;font-weight:700;font-size:14px;color:var(--tinta2);}
 .pane-toggle button.on{background:var(--agave);color:#fff;}
-.pane-scroll{flex:1;overflow:auto;min-height:0;padding:14px;}
+.pane-scroll{flex:1;overflow:auto;min-height:0;padding:14px;contain:content;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
 .phone-footer{border-top:1px solid var(--linea);background:var(--papel);}
 .phone-footer .footer-izq,.phone-footer .footer-der{border-top:none;}
 
 /* COCINA */
-.cocina-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;}
+.cocina-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;contain:content;}
 .kticket{background:var(--papel);border:1px solid var(--linea);border-radius:14px;overflow:hidden;}
 .kt-tipo{color:#fff;font-weight:800;font-size:13px;text-transform:uppercase;letter-spacing:.5px;padding:6px 12px;}
 .kt-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px 0;}
@@ -2074,13 +2214,19 @@ button{font-family:inherit;cursor:pointer;}
 .kt-tacos b{font-size:16px;}
 .corte-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--papel);border:1px solid var(--linea);border-radius:14px;padding:14px 16px;margin-bottom:14px;}
 .corte-total{font-size:26px;font-weight:800;color:var(--agave);line-height:1;}
+.corte-btns{display:flex;gap:8px;flex:none;}
+.corte-desglose{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;}
+.cd-col{background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:12px 14px;}
+.cd-col h4{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--tinta2);}
+.cd-row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:14px;}
+.pin-input{width:100%;box-sizing:border-box;margin:6px 0 4px;padding:12px 14px;font-size:20px;letter-spacing:.3em;text-align:center;border:1.5px solid var(--linea);border-radius:12px;background:var(--crema);}
 .hist-list{display:flex;flex-direction:column;gap:8px;}
 .hist-row{display:flex;align-items:center;gap:10px;background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 12px;}
 .hist-dot{width:10px;height:10px;border-radius:50%;flex:none;}
 .hist-info{flex:1;min-width:0;}
 .hist-origen{font-weight:700;font-size:14px;}
 .hist-total{font-weight:800;color:var(--barro);}
-.resumen-scroll{flex:1;overflow:auto;padding:14px;min-height:0;}
+.resumen-scroll{flex:1;overflow:auto;padding:14px;min-height:0;contain:content;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
 .resumen-h{margin:0 0 10px;font-size:16px;}
 .resumen-orden{background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 12px;margin-bottom:8px;}
 .resumen-oname{font-weight:800;font-size:14px;margin-bottom:4px;}

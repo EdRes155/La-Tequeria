@@ -11,13 +11,13 @@ function status(s) { if (onStatus) onStatus(s); }
 const ticketFromRow = (r) => ({
   id: r.id, tipo: r.tipo, esExtra: !!r.es_extra, origen: r.origen, mesaId: r.mesa_id,
   ordenes: r.ordenes || [], extras: r.extras || [], mesero: r.mesero, hora: r.hora, fecha: r.fecha,
-  estado: r.estado, total: Number(r.total) || 0, domicilio: r.domicilio || null,
+  estado: r.estado, total: Number(r.total) || 0, domicilio: r.domicilio || null, reenvio: !!r.reenvio,
 });
 const ticketToRow = (t) => ({
   id: t.id, tipo: t.tipo, es_extra: !!t.esExtra, origen: t.origen, mesa_id: t.mesaId ?? null,
   ordenes: t.ordenes || [], extras: t.extras || [], mesero: t.mesero, hora: t.hora, fecha: t.fecha,
   estado: t.estado || "pendiente", total: t.total || 0, domicilio: t.domicilio || null,
-  archivado_cocina: false,
+  archivado_cocina: false, reenvio: !!t.reenvio,
 });
 
 function assemble(rows) {
@@ -32,8 +32,8 @@ function assemble(rows) {
     mesas: (rows.mesas || []).map((m) => ({ id: m.id, estado: m.estado, mesero: m.mesero, hora: m.hora, pedido: m.pedido, extras: m.extras || [] })),
     gastos: (rows.gastos || []).map((g) => ({ id: g.id, concepto: g.concepto, monto: Number(g.monto) || 0, fecha: g.fecha, hora: g.hora, user: g.usuario })),
     cocina: open.filter((t) => !t.archivado_cocina).map(ticketFromRow),
-    historial: open.map(ticketFromRow),
-    cortes: (rows.cortes || []).map((c) => ({ id: c.id, fecha: c.fecha, hora: c.hora, tickets: c.tickets, total: Number(c.total) || 0 })),
+    historial: open.filter((t) => !t.reenvio).map(ticketFromRow),
+    cortes: (rows.cortes || []).map((c) => ({ id: c.id, fecha: c.fecha, hora: c.hora, tickets: c.tickets, total: Number(c.total) || 0, detalle: c.detalle || null })),
     domicilios: [],
   };
 }
@@ -151,6 +151,12 @@ async function w(promise, etiqueta) {
   try { const { error } = await promise; if (error) throw error; status("online"); }
   catch (e) { console.error(etiqueta + ":", e.message || e); status("reconnecting"); }
 }
+// Igual que w() pero devuelve true/false (para acciones que requieren confirmar éxito, p.ej. PIN admin)
+async function wbool(promise, etiqueta) {
+  if (!supabase) return true;
+  try { const { error } = await promise; if (error) throw error; status("online"); return true; }
+  catch (e) { console.error(etiqueta + ":", e.message || e); status("reconnecting"); return false; }
+}
 
 export const io = {
   // config
@@ -171,9 +177,9 @@ export const io = {
   // gastos
   addGasto: (g) => w(supabase.from("gastos").insert({ id: g.id, concepto: g.concepto, monto: g.monto, fecha: g.fecha, hora: g.hora, usuario: g.user }), "addGasto"),
   removeGasto: (id) => w(supabase.from("gastos").delete().eq("id", id), "removeGasto"),
-  // usuarios (vía funciones)
-  crearUsuario: (u) => w(supabase.rpc("crear_usuario", { p_id: u.id, p_nombre: u.nombre, p_pin: u.pin, p_rol: u.rol }), "crearUsuario"),
-  eliminarUsuario: (id) => w(supabase.rpc("eliminar_usuario", { p_id: id }), "eliminarUsuario"),
-  // corte
-  hacerCorte: (id, fechaStr, horaStr) => w(supabase.rpc("hacer_corte", { p_id: id, p_fecha: fechaStr, p_hora: horaStr }), "hacerCorte"),
+  // usuarios (vía funciones, requieren PIN de administrador)
+  crearUsuario: (u, adminPin) => wbool(supabase.rpc("crear_usuario", { p_admin_pin: adminPin, p_id: u.id, p_nombre: u.nombre, p_pin: u.pin, p_rol: u.rol }), "crearUsuario"),
+  eliminarUsuario: (id, adminPin) => wbool(supabase.rpc("eliminar_usuario", { p_admin_pin: adminPin, p_id: id }), "eliminarUsuario"),
+  // corte (requiere PIN de administrador)
+  hacerCorte: (adminPin, id, fechaStr, horaStr, detalle) => wbool(supabase.rpc("hacer_corte", { p_admin_pin: adminPin, p_id: id, p_fecha: fechaStr, p_hora: horaStr, p_detalle: detalle || null }), "hacerCorte"),
 };
