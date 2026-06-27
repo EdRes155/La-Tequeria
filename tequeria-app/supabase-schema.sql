@@ -56,14 +56,14 @@ create table if not exists public.gastos (
 -- ---------- FUNCIONES (PIN cifrado, login y corte en el servidor) ----------
 create or replace function public.login(p_id text, p_pin text)
 returns table(id text, nombre text, rol text)
-language sql security definer set search_path = public as $$
+language sql security definer set search_path = public, extensions as $$
   select u.id, u.nombre, u.rol from public.usuarios u
   where u.id = p_id
     and u.pin_hash = encode(digest(p_pin || '|' || u.id, 'sha256'), 'hex');
 $$;
 
 create or replace function public.crear_usuario(p_id text, p_nombre text, p_pin text, p_rol text)
-returns void language sql security definer set search_path = public as $$
+returns void language sql security definer set search_path = public, extensions as $$
   insert into public.usuarios(id, nombre, rol, pin_hash)
   values (p_id, p_nombre, coalesce(nullif(p_rol,''),'mesero'),
           encode(digest(p_pin || '|' || p_id, 'sha256'), 'hex'))
@@ -72,12 +72,12 @@ returns void language sql security definer set search_path = public as $$
 $$;
 
 create or replace function public.eliminar_usuario(p_id text)
-returns void language sql security definer set search_path = public as $$
+returns void language sql security definer set search_path = public, extensions as $$
   delete from public.usuarios where id = p_id;
 $$;
 
 create or replace function public.hacer_corte(p_id text, p_fecha text, p_hora text)
-returns void language plpgsql security definer set search_path = public as $$
+returns void language plpgsql security definer set search_path = public, extensions as $$
 declare v_total numeric; v_count int;
 begin
   select coalesce(sum(total),0), count(*) into v_total, v_count
@@ -108,6 +108,13 @@ begin
     execute format('create policy rw_all on public.%I for all using (true) with check (true)', t);
   end loop;
 end $$;
+
+-- PERMISOS de tabla para el rol anon (RLS controla las filas; GRANT da el acceso).
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on
+  public.config, public.carnes, public.bebidas, public.mesas,
+  public.tickets, public.cortes, public.gastos
+to anon, authenticated;
 
 -- usuarios: sólo se pueden LEER id, nombre y rol (jamás el hash del PIN).
 revoke all on public.usuarios from anon, authenticated;
