@@ -92,7 +92,13 @@ export async function loadAll(seed) {
     return seed.blob;
   }
   try { await seedIfEmpty(seed); } catch (e) { console.error("seed:", e.message || e); }
-  return await fetchAll();
+  try {
+    return await fetchAll();
+  } catch (e) {
+    console.error("loadAll/fetch:", e.message || e);
+    status("reconnecting");
+    return seed.blob; // no dejar la app colgada: arranca con datos locales
+  }
 }
 
 export function subscribeTables(onData) {
