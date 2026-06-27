@@ -627,6 +627,7 @@ function Comanda({ data, db, user, go, ctx }) {
   const [refLlevar, setRefLlevar] = useState(""); // nombre de referencia (pestaña Para llevar)
   const [esExtra, setEsExtra] = useState(false);  // orden extra sobre una mesa ya ocupada
   const [ticket, setTicket] = useState(null);
+  const [cuentasSep, setCuentasSep] = useState(false); // modal de cuentas separadas
   const [pane, setPane] = useState("menu"); // celular: menu | orden
   const sending = useRef(false);
 
@@ -954,9 +955,48 @@ function Comanda({ data, db, user, go, ctx }) {
           <button className="btn btn-barro btn-block" onClick={() => { setEsExtra(true); setPedido(nuevoPedido()); setActiva(0); setPane("menu"); }}>
             <Plus size={16} /> Agregar orden extra
           </button>
+          <button className="btn btn-line btn-block" onClick={() => setCuentasSep(true)} disabled={todasOrdenes.length === 0}>
+            Cuentas separadas
+          </button>
           <button className="btn btn-line btn-block" onClick={reimprimir}><Printer size={16} /> Reimprimir ticket (todo)</button>
           <button className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
         </div>
+        {cuentasSep && (
+          <div className="modal-bg" onClick={() => setCuentasSep(false)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-head"><h3>Cuentas separadas</h3>
+                <button className="icon-btn" onClick={() => setCuentasSep(false)}><X size={18} /></button></div>
+              <div className="cuentas-list">
+                <p className="muted" style={{ margin: "0 0 8px" }}>Una cuenta por cada orden (comida + bebida). Toca para imprimir.</p>
+                {todasOrdenes.map((o, i) => {
+                  const sub = o.items.reduce((s, it) => s + it.cantidad * (it.precio || 0), 0);
+                  return (
+                    <button key={o.id || i} className="cuenta-row" onClick={() => {
+                      setCuentasSep(false);
+                      setTicket({ id: "sep-" + (o.id || i), tipo: "aqui", origen: `Mesa ${mesaId} · ${o.nombre}`, paraLlevar: false,
+                        ordenes: [o], extras: [], mesero: mesaInfo.mesero, hora: mesaInfo.hora, fecha: fecha(), domicilio: null });
+                    }}>
+                      <span className="cuenta-name">{o.nombre}</span>
+                      <span className="cuenta-sub">{money(sub)}</span>
+                      <Printer size={16} />
+                    </button>
+                  );
+                })}
+                {todosExtras.length > 0 && (
+                  <button className="cuenta-row" onClick={() => {
+                    setCuentasSep(false);
+                    setTicket({ id: "sep-gen", tipo: "aqui", origen: `Mesa ${mesaId} · Generales`, paraLlevar: false,
+                      ordenes: [], extras: todosExtras, mesero: mesaInfo.mesero, hora: mesaInfo.hora, fecha: fecha(), domicilio: null });
+                  }}>
+                    <span className="cuenta-name">Generales (para todo el pedido)</span>
+                    <span className="cuenta-sub">{money(todosExtras.reduce((s, e) => s + e.cantidad * (e.precio || 0), 0))}</span>
+                    <Printer size={16} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
       </div>
     );
@@ -1130,20 +1170,59 @@ function ticketView(t) {
 }
 
 /* impresión térmica 58mm */
-// Nombre corto para la COMANDA de cocina (legible de lejos, cabe en 2 columnas)
-// T:Tacos  Q:Quesadillas  V:Volcanes  G:Gringas  · costras quedan con nombre completo
-function comandaCorto(item) {
-  const n = (item.nombre || "").trim();
+// La COMANDA de cocina se agrupa por TIPO con su conteo; las bebidas van aparte.
+const TIPOS_COMANDA = [
+  { pre: "taco-queso-", label: "TACOS C/QUESO", ord: 1 },
+  { pre: "taco-",       label: "TACOS",         ord: 2 },
+  { pre: "gringa-",     label: "GRINGAS",       ord: 3 },
+  { pre: "llenadora-",  label: "LLENADORAS",    ord: 4 },
+  { pre: "volcan-",     label: "VOLCANES",      ord: 5 },
+  { pre: "media-costra-", label: "MEDIA COSTRA", ord: 6, full: true },
+  { pre: "costra-",     label: "COSTRAS",       ord: 7, full: true },
+  { pre: "quesa-",      label: "QUESADILLAS",   ord: 8 },
+  { pre: "beb-",        label: "BEBIDAS",       ord: 20, beb: true },
+];
+function tipoDe(item) {
   const k = item.key || "";
-  const carne3 = (s) => s.trim().replace(/^de\s+/i, "").slice(0, 3);
-  if (k.startsWith("media-costra-") || k.startsWith("costra-")) return n;        // costras igual
-  if (k.startsWith("taco-queso-")) return "TQ:" + carne3(n.replace(/^Taco de queso\s+/i, ""));
-  if (k.startsWith("taco-"))       return "T:"  + carne3(n.replace(/^Taco\s+/i, ""));
-  if (k.startsWith("gringa-"))     return "G:"  + carne3(n.replace(/^Gringa\s+/i, ""));
-  if (k.startsWith("llenadora-"))  return "LL:" + carne3(n.replace(/^Llenadora\s+/i, ""));
-  if (k.startsWith("volcan-"))     return "V:"  + carne3(n.replace(/^Volcán\s+/i, ""));
-  if (k.startsWith("quesa-"))      return "Q:"  + n.replace(/^Quesadilla de\s+/i, "").replace(/\s*\(queso\)/i, "").trim();
-  return item.corto || n;          // bebidas, empaque y extras: nombre corto normal
+  for (const d of TIPOS_COMANDA) if (k.startsWith(d.pre)) return d;
+  return { label: "EXTRAS", ord: 15, otros: true };
+}
+function carneCorto(item, def) {
+  const n = (item.nombre || "").trim();
+  if (def.full) return n.replace(/^Media costra\s+/i, "").replace(/^Costra\s+/i, "");   // carne completa
+  if (def.beb || def.otros) return item.corto || n;
+  const r = n.replace(/^(Taco de queso|Taco|Gringa|Llenadora|Volcán|Quesadilla de)\s+/i, "")
+             .replace(/\s*\(queso\)/i, "").replace(/^de\s+/i, "").trim();
+  return def.pre === "quesa-" ? r : r.slice(0, 3);    // 3 letras del nombre de la carne
+}
+function agruparComanda(items) {
+  const map = {}; const arr = [];
+  for (const it of items) {
+    const def = tipoDe(it);
+    if (!map[def.label]) { map[def.label] = { label: def.label, ord: def.ord, beb: def.beb, total: 0, partes: [] }; arr.push(map[def.label]); }
+    const g = map[def.label];
+    g.total += it.cantidad;
+    g.partes.push({ nombre: carneCorto(it, def), cantidad: it.cantidad });
+  }
+  arr.sort((a, b) => a.ord - b.ord);
+  return arr;
+}
+function ComandaGrupo({ g }) {
+  return (
+    <div className={"cg" + (g.beb ? " cg-beb" : "")}>
+      <span className="cg-h">{g.label} {g.total}</span>{" "}
+      <span className="cg-bd">{g.partes.map((p, i) => <span key={i} className="cg-p">{p.cantidad} {p.nombre}</span>)}</span>
+    </div>
+  );
+}
+function ComandaOrden({ o }) {
+  const grupos = agruparComanda(o.items);
+  return (
+    <div className="tp-orden">
+      <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
+      {grupos.map((g) => <ComandaGrupo key={g.label} g={g} />)}
+    </div>
+  );
 }
 
 const AUTOPRINT_KEY = "tequeria_autoprint";
@@ -1188,45 +1267,53 @@ function TicketModal({ t, negocio, onClose, recienEnviado }) {
             </div>
           )}
           <div className="tp-line" />
-          {t.ordenes.map((o) => (
-            <div key={o.id} className="tp-orden"><div className="tp-oname">{o.nombre}</div>
-              {o.prep && <div className="tp-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
-              <div className="tp-items">
-                {o.items.map((it) => {
-                  const lbl = modo === "cocina" ? comandaCorto(it) : it.nombre;
-                  const wide = modo === "cocina" && lbl.length > 9;
-                  return (
-                    <div key={it.key} className={"tp-item" + (wide ? " wide" : "")}>
-                      <span className="tp-q">{it.cantidad}×</span>
-                      <span className="tp-n">{lbl}</span>
-                      <span className="tp-p">{money((it.precio || 0) * it.cantidad)}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-          {ex.length > 0 && (
+          {modo === "cocina" ? (
             <>
-              <div className="tp-line" />
-              <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
-              <div className="tp-items">
-                {ex.map((it) => {
-                  const lbl = it.corto || (modo === "cocina" ? comandaCorto(it) : it.nombre);
-                  const wide = modo === "cocina" && lbl.length > 9;
-                  return (
-                    <div key={it.key} className={"tp-item" + (wide ? " wide" : "")}>
-                      <span className="tp-q">{it.cantidad}×</span>
-                      <span className="tp-n">{lbl}</span>
-                      <span className="tp-p">{it.precio > 0 ? money(it.precio * it.cantidad) : ""}</span>
-                    </div>
-                  );
-                })}
-              </div>
+              {t.ordenes.map((o) => <ComandaOrden key={o.id} o={o} />)}
+              {ex.length > 0 && (
+                <div className="tp-orden">
+                  <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
+                  {agruparComanda(ex).map((g) => <ComandaGrupo key={g.label} g={g} />)}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {t.ordenes.map((o) => (
+                <div key={o.id} className="tp-orden"><div className="tp-oname">{o.nombre}</div>
+                  {o.prep && <div className="tp-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
+                  <div className="tp-items">
+                    {o.items.map((it) => (
+                      <div key={it.key} className="tp-item">
+                        <span className="tp-q">{it.cantidad}×</span>
+                        <span className="tp-n">{it.nombre}</span>
+                        <span className="tp-p">{money((it.precio || 0) * it.cantidad)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {ex.length > 0 && (
+                <>
+                  <div className="tp-line" />
+                  <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
+                  <div className="tp-items">
+                    {ex.map((it) => (
+                      <div key={it.key} className="tp-item">
+                        <span className="tp-q">{it.cantidad}×</span>
+                        <span className="tp-n">{it.corto || it.nombre}</span>
+                        <span className="tp-p">{it.precio > 0 ? money(it.precio * it.cantidad) : ""}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
             </>
           )}
           <div className="tp-line" />
-          <div className="tp-tacos">TACOS EN TOTAL: {tacos}</div>
+          <div className="tp-tacos">{agruparComanda(t.ordenes.flatMap((o) => o.items)).map((g) => (
+            <span key={g.label} className="tt"><b>{g.total}</b> {g.label}</span>
+          ))}</div>
           <div className="tp-total"><span>TOTAL</span><span>{money(total)}</span></div>
           <div className="tp-foot cuenta-foot">¡Gracias por su compra!</div>
           <div className="tp-foot cocina-foot">— COCINA —</div>
@@ -1960,6 +2047,13 @@ button{font-family:inherit;cursor:pointer;}
 .confirm-title{margin:0;padding:18px 18px 0;font-size:18px;}
 .confirm-msg{margin:0;padding:10px 18px 4px;color:var(--tinta);line-height:1.5;}
 
+/* ---- Cuentas separadas ---- */
+.cuentas-list{padding:16px;display:flex;flex-direction:column;gap:8px;}
+.cuenta-row{display:flex;align-items:center;gap:10px;width:100%;background:var(--crema);border:1px solid var(--linea);border-radius:12px;padding:12px 14px;cursor:pointer;text-align:left;}
+.cuenta-row:hover{border-color:var(--agave);}
+.cuenta-name{flex:1;font-weight:700;color:var(--tinta);}
+.cuenta-sub{font-weight:800;color:var(--agave);}
+
 /* ---- Toasts ---- */
 .toaster{position:fixed;left:0;right:0;bottom:18px;display:flex;flex-direction:column;align-items:center;gap:8px;z-index:90;pointer-events:none;padding:0 16px;}
 .toast{pointer-events:auto;max-width:440px;width:fit-content;background:var(--tinta);color:#fff;padding:12px 18px;border-radius:12px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.25);animation:toastIn .22s ease;cursor:pointer;}
@@ -2021,16 +2115,18 @@ button{font-family:inherit;cursor:pointer;}
 #print-area.cuenta .tp-tacos,
 #print-area.cuenta .cocina-foot{display:none;}
 
-/* COMANDA: grande y legible de lejos, en 2 columnas */
+/* COMANDA: agrupada por tipo, grande y legible de lejos */
 #print-area.cocina .tp-tipo{font-size:17px;}
 #print-area.cocina .tp-sub{font-size:14px;font-weight:700;}
-#print-area.cocina .tp-oname{font-size:16px;}
+#print-area.cocina .tp-oname{font-size:15px;font-weight:800;margin-top:3px;}
 #print-area.cocina .tp-prep{font-size:14px;}
-#print-area.cocina .tp-items{display:grid;grid-template-columns:1fr 1fr;gap:1px 8px;align-items:baseline;}
-#print-area.cocina .tp-item{font-size:18px;font-weight:800;line-height:1.25;gap:4px;}
-#print-area.cocina .tp-item.wide{grid-column:1 / -1;}
-#print-area.cocina .tp-q{min-width:30px;}
-#print-area.cocina .tp-tacos{font-size:18px;}
+.cg{font-size:17px;line-height:1.3;margin:1px 0;}
+.cg-h{font-weight:800;}
+.cg-bd{font-weight:700;}
+.cg-p{margin-right:10px;white-space:nowrap;}
+.cg-beb{margin-top:3px;padding-top:3px;border-top:1px dotted #000;}
+#print-area.cocina .tp-tacos{font-size:15px;font-weight:700;display:flex;flex-wrap:wrap;gap:2px 14px;justify-content:center;}
+.tp-tacos .tt b{font-size:18px;}
 
 @media print{
   @page{ size:58mm auto; margin:0; }
