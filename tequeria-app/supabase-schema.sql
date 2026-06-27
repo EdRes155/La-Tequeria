@@ -189,3 +189,66 @@ $$;
 grant execute on function public.claim_cocina(text)   to anon, authenticated;
 grant execute on function public.latido_cocina(text)  to anon, authenticated;
 grant execute on function public.liberar_cocina(text) to anon, authenticated;
+
+-- =====================================================================
+--  SEGURIDAD POR PIN + DESGLOSE DE CORTE + REENVÍO A COCINA
+--  Re-ejecutable. Endurece las operaciones sensibles: crear/eliminar
+--  usuarios y hacer corte exigen el PIN de un administrador (verificado
+--  en el servidor). 'cortes' deja de ser escribible con la llave anon.
+-- =====================================================================
+alter table public.tickets add column if not exists reenvio boolean default false;
+alter table public.cortes  add column if not exists detalle jsonb;
+
+-- ¿El PIN corresponde a algún administrador? (hash con sal por id)
+create or replace function public.es_admin_pin(p_pin text)
+returns boolean language sql security definer set search_path = public, extensions as $$
+  select exists(
+    select 1 from public.usuarios u
+    where u.rol = 'admin'
+      and u.pin_hash = encode(digest(p_pin || '|' || u.id, 'sha256'), 'hex')
+  );
+$$;
+
+-- Reemplazamos las funciones sensibles por versiones que exigen PIN admin.
+drop function if exists public.crear_usuario(text,text,text,text);
+drop function if exists public.eliminar_usuario(text);
+drop function if exists public.hacer_corte(text,text,text);
+
+create or replace function public.crear_usuario(p_admin_pin text, p_id text, p_nombre text, p_pin text, p_rol text)
+returns void language plpgsql security definer set search_path = public, extensions as $$
+begin
+  if not public.es_admin_pin(p_admin_pin) then raise exception 'No autorizado'; end if;
+  insert into public.usuarios(id, nombre, rol, pin_hash)
+  values (p_id, p_nombre, coalesce(nullif(p_rol,''),'mesero'),
+          encode(digest(p_pin || '|' || p_id, 'sha256'), 'hex'))
+  on conflict (id) do update
+    set nombre = excluded.nombre, rol = excluded.rol, pin_hash = excluded.pin_hash;
+end $$;
+
+create or replace function public.eliminar_usuario(p_admin_pin text, p_id text)
+returns void language plpgsql security definer set search_path = public, extensions as $$
+begin
+  if not public.es_admin_pin(p_admin_pin) then raise exception 'No autorizado'; end if;
+  delete from public.usuarios where id = p_id;
+end $$;
+
+create or replace function public.hacer_corte(p_admin_pin text, p_id text, p_fecha text, p_hora text, p_detalle jsonb)
+returns void language plpgsql security definer set search_path = public, extensions as $$
+declare v_total numeric; v_count int;
+begin
+  if not public.es_admin_pin(p_admin_pin) then raise exception 'No autorizado'; end if;
+  select coalesce(sum(total),0), count(*) into v_total, v_count
+    from public.tickets where corte_id is null and reenvio is not true;
+  insert into public.cortes(id, fecha, hora, tickets, total, detalle)
+    values (p_id, p_fecha, p_hora, v_count, v_total, p_detalle);
+  update public.tickets set corte_id = p_id where corte_id is null;
+end $$;
+
+grant execute on function public.es_admin_pin(text)                                  to anon, authenticated;
+grant execute on function public.crear_usuario(text,text,text,text,text)             to anon, authenticated;
+grant execute on function public.eliminar_usuario(text,text)                         to anon, authenticated;
+grant execute on function public.hacer_corte(text,text,text,text,jsonb)              to anon, authenticated;
+
+-- 'cortes': nadie lo escribe directo con la llave anon; sólo hacer_corte (definer).
+revoke insert, update, delete on public.cortes from anon, authenticated;
+grant select on public.cortes to anon, authenticated;
