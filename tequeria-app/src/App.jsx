@@ -944,7 +944,7 @@ function Comanda({ data, db, user, go, ctx }) {
           }}
           onClose={() => { setModalDom(false); if (!domOk && tipo === "domicilio") setTipo("llevar"); }} />
       )}
-      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio}
+      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} recienEnviado={!!ticket.estado}
         onClose={() => { setTicket(null); if (ticket.estado) go("mesas"); }} />}
     </div>
   );
@@ -1068,27 +1068,46 @@ function ticketView(t) {
   return { label: Tb.label, color: Tb.color };
 }
 
-/* modal ticket imprimible */
-function TicketModal({ t, negocio, onClose }) {
+/* impresión térmica 58mm */
+const AUTOPRINT_KEY = "tequeria_autoprint";
+const getAutoprint = () => { try { return localStorage.getItem(AUTOPRINT_KEY) === "1"; } catch { return false; } };
+const setAutoprintLS = (v) => { try { localStorage.setItem(AUTOPRINT_KEY, v ? "1" : "0"); } catch {} };
+
+function TicketModal({ t, negocio, onClose, recienEnviado }) {
   const tv = ticketView(t);
   const ex = t.extras || [];
   const total = t.ordenes.reduce((s, o) => s + o.items.reduce((a, i) => a + i.cantidad * (i.precio || 0), 0), 0)
     + ex.reduce((a, e) => a + e.cantidad * (e.precio || 0), 0);
+  const tacos = contarTacos(t);
+  const [modo, setModo] = useState("cuenta");        // "cocina" | "cuenta"
+  const [auto, setAuto] = useState(getAutoprint());
+  const doPrint = (m) => { setModo(m); setTimeout(() => window.print(), 80); };
+
+  // Auto-imprimir la comanda de cocina al enviar (si está activado)
+  useEffect(() => {
+    if (recienEnviado && getAutoprint()) {
+      setModo("cocina");
+      const id = setTimeout(() => window.print(), 350);
+      return () => clearTimeout(id);
+    }
+  }, []);
+
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div id="print-area" className="ticket-print">
-          <div className="tp-tipo" style={{ color: tv.color }}>{tv.label.toUpperCase()}</div>
+      <div className="modal modal-ticket" onClick={(e) => e.stopPropagation()}>
+        <div id="print-area" className={"ticket-print t58 " + modo}>
+          <div className="tp-tipo">{tv.label.toUpperCase()}</div>
           <div className="tp-name">{negocio}</div>
-          <div className="tp-sub">{t.origen}{t.paraLlevar ? " · exclusivo para llevar" : ""}</div>
-          <div className="tp-meta"><span>Mesero: {t.mesero}</span><span>{t.fecha} · {t.hora}</span></div>
+          <div className="tp-sub">{t.origen}{t.paraLlevar ? " · para llevar" : ""}</div>
+          <div className="tp-meta"><span>Mesero: {t.mesero}</span><span>{t.hora}</span></div>
+          <div className="tp-meta"><span>{t.fecha}</span><span className="tp-modo-tag">{modo === "cocina" ? "COMANDA" : "CUENTA"}</span></div>
           {t.domicilio && (
             <div className="tp-dom">
-              {t.domicilio.nombre && <div>👤 {t.domicilio.nombre}</div>}
-              <div>📍 {t.domicilio.direccion}</div>
-              {t.domicilio.referencia && <div>🔖 {t.domicilio.referencia}</div>}
-              <div>📞 {t.domicilio.telefono}</div>
-              <div>💵 {t.domicilio.pago}{t.domicilio.tiempo ? ` · ${t.domicilio.tiempo} min` : ""}</div>
+              {t.domicilio.nombre && <div>Cliente: {t.domicilio.nombre}</div>}
+              <div>Dir: {t.domicilio.direccion}</div>
+              {t.domicilio.referencia && <div>Ref: {t.domicilio.referencia}</div>}
+              <div>Tel: {t.domicilio.telefono}</div>
+              <div>Pago: {t.domicilio.pago}{t.domicilio.tiempo ? ` · ${t.domicilio.tiempo} min` : ""}</div>
             </div>
           )}
           <div className="tp-line" />
@@ -1107,23 +1126,31 @@ function TicketModal({ t, negocio, onClose }) {
           {ex.length > 0 && (
             <>
               <div className="tp-line" />
-              <div className="tp-extras-h">PARA TODO EL PEDIDO</div>
+              <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
               {ex.map((it) => (
                 <div key={it.key} className="tp-item">
                   <span className="tp-q">{it.cantidad}×</span>
                   <span className="tp-n">{it.corto || it.nombre}</span>
-                  <span className="tp-p">{it.precio > 0 ? money(it.precio * it.cantidad) : "—"}</span>
+                  <span className="tp-p">{it.precio > 0 ? money(it.precio * it.cantidad) : ""}</span>
                 </div>
               ))}
             </>
           )}
           <div className="tp-line" />
+          <div className="tp-tacos">TACOS EN TOTAL: {tacos}</div>
           <div className="tp-total"><span>TOTAL</span><span>{money(total)}</span></div>
-          <div className="tp-foot">¡Gracias! 🌵</div>
+          <div className="tp-foot cuenta-foot">¡Gracias por su compra!</div>
+          <div className="tp-foot cocina-foot">— COCINA —</div>
         </div>
-        <div className="modal-actions">
+
+        <label className="auto-print no-print">
+          <input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); setAutoprintLS(e.target.checked); }} />
+          Auto-imprimir comanda al enviar
+        </label>
+        <div className="modal-actions no-print">
           <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
-          <button className="btn btn-primary" onClick={() => window.print()}><Printer size={16} /> Imprimir</button>
+          <button className="btn btn-line" onClick={() => doPrint("cocina")}><Printer size={16} /> Comanda</button>
+          <button className="btn btn-primary" onClick={() => doPrint("cuenta")}><Printer size={16} /> Cuenta</button>
         </div>
       </div>
     </div>
@@ -1857,26 +1884,46 @@ button{font-family:inherit;cursor:pointer;}
 .rol-tag.cocinero{background:var(--barro);color:#fff;}
 .mesa-card.solo-ver{cursor:default;}
 
-.tp-item{display:flex;gap:8px;font-size:13px;align-items:baseline;}
-.tp-q{min-width:28px;} .tp-n{flex:1;} .tp-p{font-weight:700;white-space:nowrap;}
-.tp-total{display:flex;justify-content:space-between;font-weight:800;font-size:16px;margin:4px 0 8px;}
-
-.tp-tipo{text-align:center;font-weight:800;font-size:16px;letter-spacing:1px;margin-bottom:4px;}
-.ticket-print{padding:22px;font-family:"Courier New",monospace;}
-.tp-name{text-align:center;font-size:20px;font-weight:800;}
-.tp-sub{text-align:center;font-size:14px;margin-bottom:8px;}
-.tp-meta{display:flex;justify-content:space-between;font-size:11px;color:#444;}
-.tp-dom{font-size:12px;margin-top:6px;line-height:1.6;}
-.tp-line{border-top:1px dashed #999;margin:10px 0;}
-.tp-orden{margin-bottom:8px;} .tp-oname{font-weight:800;font-size:13px;}
+/* ---- TICKET TÉRMICO 58mm ---- */
+.modal-ticket{max-width:300px;}
+.ticket-print{font-family:"Courier New",monospace;color:#000;background:#fff;}
+.t58{width:230px;margin:0 auto;padding:8px 10px;border:1px solid var(--linea);border-radius:4px;}
+.tp-tipo{text-align:center;font-weight:800;font-size:15px;letter-spacing:1px;margin-bottom:2px;}
+.tp-name{text-align:center;font-size:18px;font-weight:800;line-height:1.1;}
+.tp-sub{text-align:center;font-size:12px;margin:2px 0 6px;}
+.tp-meta{display:flex;justify-content:space-between;font-size:11px;}
+.tp-modo-tag{font-weight:800;}
+.tp-dom{font-size:12px;margin-top:6px;line-height:1.5;}
+.tp-line{border-top:1px dashed #000;margin:7px 0;}
+.tp-orden{margin-bottom:7px;}
+.tp-oname{font-weight:800;font-size:13px;}
 .tp-prep{font-size:12px;font-style:italic;margin:1px 0 2px;}
 .kt-prep{font-size:12px;font-weight:700;color:var(--barro);margin-bottom:2px;}
-.tp-foot{text-align:center;font-size:13px;}
+.tp-extras-h{font-weight:800;font-size:12px;margin-bottom:2px;}
+.tp-item{display:flex;gap:6px;font-size:13px;align-items:baseline;line-height:1.35;}
+.tp-q{min-width:26px;font-weight:700;} .tp-n{flex:1;} .tp-p{font-weight:700;white-space:nowrap;}
+.tp-tacos{font-weight:800;font-size:15px;text-align:center;margin:2px 0;}
+.tp-total{display:flex;justify-content:space-between;font-weight:800;font-size:16px;margin:2px 0 6px;}
+.tp-foot{text-align:center;font-size:12px;margin-top:4px;}
+.auto-print{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--tinta2);padding:10px 4px 0;cursor:pointer;}
+.auto-print input{width:18px;height:18px;}
+
+/* modo cocina (comanda, sin precios) vs cuenta (con precios) */
+#print-area.cocina .tp-p,
+#print-area.cocina .tp-total,
+#print-area.cocina .cuenta-foot{display:none;}
+#print-area.cuenta .tp-tacos,
+#print-area.cuenta .cocina-foot{display:none;}
+#print-area.cocina .tp-item{font-size:15px;}
+#print-area.cocina .tp-oname{font-size:15px;}
 
 @media print{
-  body *{visibility:hidden;}
-  #print-area,#print-area *{visibility:visible;}
-  #print-area{position:absolute;left:0;top:0;width:100%;}
+  @page{ size:58mm auto; margin:0; }
+  html,body{ width:58mm; margin:0!important; padding:0!important; background:#fff; }
+  body *{ visibility:hidden; }
+  #print-area,#print-area *{ visibility:visible; color:#000!important; }
+  #print-area{ position:absolute; left:0; top:0; width:58mm; border:0!important; border-radius:0!important; padding:0 2mm!important; }
+  .no-print{ display:none!important; }
 }
 
 @media (max-width:760px){
