@@ -455,6 +455,7 @@ export default function App() {
 
   // Acciones: actualizan la pantalla al instante y escriben en la base (o respaldo local)
   const db = useMemo(() => makeDb(setData, dataRef), []);
+  const go = useCallback((v, c = null) => { setView(v); setCtx(c); }, []);
 
   if (!data) return <div className="loading">Cargando…</div>;
   if (!user) return <Login data={data} onLogin={setUser} conn={conn} />;
@@ -464,7 +465,6 @@ export default function App() {
   if (!yo) return <Login data={data} onLogin={setUser} conn={conn} aviso="Tu usuario ya no existe. Inicia sesión de nuevo." />;
   const userActual = yo;
 
-  const go = useCallback((v, c = null) => { setView(v); setCtx(c); }, []);
   const props = { data, db, user: userActual, go, ctx };
   const abrirImpresion = (t, auto = false) => { setPrintAuto(!!auto); setPrintTicket(t); };
 
