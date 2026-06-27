@@ -1130,6 +1130,22 @@ function ticketView(t) {
 }
 
 /* impresión térmica 58mm */
+// Nombre corto para la COMANDA de cocina (legible de lejos, cabe en 2 columnas)
+// T:Tacos  Q:Quesadillas  V:Volcanes  G:Gringas  · costras quedan con nombre completo
+function comandaCorto(item) {
+  const n = (item.nombre || "").trim();
+  const k = item.key || "";
+  const carne3 = (s) => s.trim().replace(/^de\s+/i, "").slice(0, 3);
+  if (k.startsWith("media-costra-") || k.startsWith("costra-")) return n;        // costras igual
+  if (k.startsWith("taco-queso-")) return "TQ:" + carne3(n.replace(/^Taco de queso\s+/i, ""));
+  if (k.startsWith("taco-"))       return "T:"  + carne3(n.replace(/^Taco\s+/i, ""));
+  if (k.startsWith("gringa-"))     return "G:"  + carne3(n.replace(/^Gringa\s+/i, ""));
+  if (k.startsWith("llenadora-"))  return "LL:" + carne3(n.replace(/^Llenadora\s+/i, ""));
+  if (k.startsWith("volcan-"))     return "V:"  + carne3(n.replace(/^Volcán\s+/i, ""));
+  if (k.startsWith("quesa-"))      return "Q:"  + n.replace(/^Quesadilla de\s+/i, "").replace(/\s*\(queso\)/i, "").trim();
+  return item.corto || n;          // bebidas, empaque y extras: nombre corto normal
+}
+
 const AUTOPRINT_KEY = "tequeria_autoprint";
 const getAutoprint = () => { try { return localStorage.getItem(AUTOPRINT_KEY) === "1"; } catch { return false; } };
 const setAutoprintLS = (v) => { try { localStorage.setItem(AUTOPRINT_KEY, v ? "1" : "0"); } catch {} };
@@ -1175,26 +1191,38 @@ function TicketModal({ t, negocio, onClose, recienEnviado }) {
           {t.ordenes.map((o) => (
             <div key={o.id} className="tp-orden"><div className="tp-oname">{o.nombre}</div>
               {o.prep && <div className="tp-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
-              {o.items.map((it) => (
-                <div key={it.key} className="tp-item">
-                  <span className="tp-q">{it.cantidad}×</span>
-                  <span className="tp-n">{it.nombre}</span>
-                  <span className="tp-p">{money((it.precio || 0) * it.cantidad)}</span>
-                </div>
-              ))}
+              <div className="tp-items">
+                {o.items.map((it) => {
+                  const lbl = modo === "cocina" ? comandaCorto(it) : it.nombre;
+                  const wide = modo === "cocina" && lbl.length > 9;
+                  return (
+                    <div key={it.key} className={"tp-item" + (wide ? " wide" : "")}>
+                      <span className="tp-q">{it.cantidad}×</span>
+                      <span className="tp-n">{lbl}</span>
+                      <span className="tp-p">{money((it.precio || 0) * it.cantidad)}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ))}
           {ex.length > 0 && (
             <>
               <div className="tp-line" />
               <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
-              {ex.map((it) => (
-                <div key={it.key} className="tp-item">
-                  <span className="tp-q">{it.cantidad}×</span>
-                  <span className="tp-n">{it.corto || it.nombre}</span>
-                  <span className="tp-p">{it.precio > 0 ? money(it.precio * it.cantidad) : ""}</span>
-                </div>
-              ))}
+              <div className="tp-items">
+                {ex.map((it) => {
+                  const lbl = it.corto || (modo === "cocina" ? comandaCorto(it) : it.nombre);
+                  const wide = modo === "cocina" && lbl.length > 9;
+                  return (
+                    <div key={it.key} className={"tp-item" + (wide ? " wide" : "")}>
+                      <span className="tp-q">{it.cantidad}×</span>
+                      <span className="tp-n">{lbl}</span>
+                      <span className="tp-p">{it.precio > 0 ? money(it.precio * it.cantidad) : ""}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </>
           )}
           <div className="tp-line" />
@@ -1992,8 +2020,17 @@ button{font-family:inherit;cursor:pointer;}
 #print-area.cocina .cuenta-foot{display:none;}
 #print-area.cuenta .tp-tacos,
 #print-area.cuenta .cocina-foot{display:none;}
-#print-area.cocina .tp-item{font-size:15px;}
-#print-area.cocina .tp-oname{font-size:15px;}
+
+/* COMANDA: grande y legible de lejos, en 2 columnas */
+#print-area.cocina .tp-tipo{font-size:17px;}
+#print-area.cocina .tp-sub{font-size:14px;font-weight:700;}
+#print-area.cocina .tp-oname{font-size:16px;}
+#print-area.cocina .tp-prep{font-size:14px;}
+#print-area.cocina .tp-items{display:grid;grid-template-columns:1fr 1fr;gap:1px 8px;align-items:baseline;}
+#print-area.cocina .tp-item{font-size:18px;font-weight:800;line-height:1.25;gap:4px;}
+#print-area.cocina .tp-item.wide{grid-column:1 / -1;}
+#print-area.cocina .tp-q{min-width:30px;}
+#print-area.cocina .tp-tacos{font-size:18px;}
 
 @media print{
   @page{ size:58mm auto; margin:0; }
