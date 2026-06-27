@@ -3,7 +3,7 @@ import {
   Plus, Minus, Trash2, X, Printer, Send, LogOut, ArrowLeft,
   Bike, Package, Wallet, Utensils, ShoppingBag, ChefHat, Check, Pencil, Settings
 } from "lucide-react";
-import { loadAll, subscribeTables, saveBlob, login as dbLogin, supabaseReady, setStatusHandler, io } from "./store.js";
+import { loadAll, subscribeTables, saveBlob, login as dbLogin, supabaseReady, setStatusHandler, io, claimCocina, latidoCocina, liberarCocina } from "./store.js";
 
 /* ============================================================
    LA TEQUERÍA — Sistema de comandas
@@ -329,6 +329,46 @@ function ChoiceHost() {
   );
 }
 
+/* ============================== AVISOS DE COCINA ============================== */
+function CocinaAlertas({ data, onAbrir }) {
+  const seen = useRef(null);
+  const [nuevos, setNuevos] = useState([]);
+  const [permiso, setPermiso] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+
+  useEffect(() => {
+    const pend = (data.cocina || []).filter((t) => t.estado !== "listo");
+    const ids = new Set(pend.map((t) => t.id));
+    if (seen.current === null) { seen.current = ids; return; }   // primer render: no avisar
+    const recien = pend.filter((t) => !seen.current.has(t.id));
+    seen.current = ids;
+    if (recien.length > 0) {
+      const t0 = recien[0];
+      notificar("Nuevo pedido", (t0.esExtra ? "Orden extra · " : "") + t0.origen + (recien.length > 1 ? ` (+${recien.length - 1})` : ""));
+      setNuevos((xs) => [...recien, ...xs].slice(0, 8));
+      if (getAutoprint()) recien.forEach((t) => onAbrir(t, true));
+    }
+  }, [data.cocina]);
+
+  const pedirPermiso = async () => { try { setPermiso(await Notification.requestPermission()); } catch {} };
+  const quitar = (id) => setNuevos((xs) => xs.filter((x) => x.id !== id));
+
+  if (nuevos.length === 0 && permiso !== "default") return null;
+  return (
+    <div className="cocina-alertas">
+      {permiso === "default" && (
+        <button className="alerta-permiso" onClick={pedirPermiso}>🔔 Activar avisos de nuevos pedidos</button>
+      )}
+      {nuevos.map((t) => (
+        <div key={t.id} className={"alerta-pedido" + (t.esExtra ? " extra" : "")}>
+          <span className="alerta-txt">🔔 {t.esExtra ? "Orden extra" : "Nuevo pedido"}: <b>{t.origen}</b></span>
+          <button className="btn btn-primary btn-sm" onClick={() => { onAbrir(t); quitar(t.id); }}><Printer size={14} /> Imprimir</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => quitar(t.id)}><X size={14} /></button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ============================================================ */
 export default function App() {
   const [data, setData] = useState(null);
@@ -336,6 +376,8 @@ export default function App() {
   const [view, setView] = useState("mesas");
   const [ctx, setCtx] = useState(null);
   const [conn, setConn] = useState(supabaseReady ? "reconnecting" : "local");
+  const [printTicket, setPrintTicket] = useState(null);   // ticket que el cocinero va a imprimir
+  const [printAuto, setPrintAuto] = useState(false);
   const dataRef = useRef(null);
   dataRef.current = data;
 
@@ -367,6 +409,18 @@ export default function App() {
     return () => clearTimeout(t);
   }, [data]);
 
+  // Sesión única de cocina: latido mientras el cocinero esté dentro; libera al salir
+  useEffect(() => {
+    if (!user || user.rol !== "cocinero") return;
+    const sid = getSid();
+    let vivo = true;
+    const beat = async () => { const ok = await latidoCocina(sid); if (!ok && vivo) { toast("Otra cocina tomó la sesión en otro dispositivo.", "error"); setUser(null); } };
+    const iv = setInterval(beat, 15000);
+    const bye = () => liberarCocina(sid);
+    window.addEventListener("beforeunload", bye);
+    return () => { vivo = false; clearInterval(iv); window.removeEventListener("beforeunload", bye); liberarCocina(sid); };
+  }, [user?.id, user?.rol]);
+
   // Acciones: actualizan la pantalla al instante y escriben en la base (o respaldo local)
   const db = makeDb(setData, dataRef);
 
@@ -380,11 +434,13 @@ export default function App() {
 
   const go = (v, c = null) => { setView(v); setCtx(c); };
   const props = { data, db, user: userActual, go, ctx };
+  const abrirImpresion = (t, auto = false) => { setPrintAuto(!!auto); setPrintTicket(t); };
 
   return (
     <div className="app">
       <style>{CSS}</style>
       <TopBar data={data} user={userActual} view={view} go={go} conn={conn} onLogout={() => setUser(null)} />
+      {userActual.rol === "cocinero" && <CocinaAlertas data={data} onAbrir={abrirImpresion} />}
       <main className="main">
         {view === "mesas"      && <Mesas {...props} />}
         {view === "comanda"    && (puede(userActual, "comanda") ? <Comanda {...props} /> : <SinAcceso />)}
@@ -393,6 +449,8 @@ export default function App() {
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
       </main>
+      {printTicket && <TicketModal t={printTicket} negocio={data.nombreNegocio} autoPrint={printAuto}
+        onClose={() => { setPrintTicket(null); setPrintAuto(false); }} />}
       <Toaster />
       <ConfirmHost />
       <ChoiceHost />
@@ -497,13 +555,20 @@ function Login({ data, onLogin, conn, aviso }) {
     if (busy || !sel) return;
     setBusy(true); setErr("");
     try {
+      let u = null;
       if (supabaseReady) {
-        const u = await dbLogin(sel, pin);
-        if (u) onLogin(u); else { setErr("PIN incorrecto"); setPin(""); }
+        u = await dbLogin(sel, pin);
       } else {
-        const u = data.usuarios.find((x) => x.id === sel);
-        if (u && u.pin === pin) onLogin(u); else { setErr("PIN incorrecto"); setPin(""); }
+        const local = data.usuarios.find((x) => x.id === sel);
+        if (local && local.pin === pin) u = local;
       }
+      if (!u) { setErr("PIN incorrecto"); setPin(""); return; }
+      // Solo un dispositivo cocinero a la vez
+      if (u.rol === "cocinero") {
+        const ok = await claimCocina(getSid());
+        if (!ok) { setErr("Ya hay una cocina abierta en otro dispositivo."); setPin(""); return; }
+      }
+      onLogin(u);
     } finally { setBusy(false); }
   };
   const online = conn === "online";
@@ -757,8 +822,8 @@ function Comanda({ data, db, user, go, ctx }) {
       total: totalDinero,
     };
     db.enviarTicket(t, { esExtra, mesaId, pedido: clone(pedido), userNombre: user.nombre });
-    toast(esExtra ? "Orden extra enviada" : "Comanda enviada a cocina", "ok");
-    setTicket(t);
+    toast(esExtra ? "Orden extra enviada a cocina" : "Comanda enviada a cocina", "ok");
+    go("mesas");
   };
 
   const liberarMesa = () => {
@@ -1048,7 +1113,7 @@ function Comanda({ data, db, user, go, ctx }) {
           }}
           onClose={() => { setModalDom(false); if (!domOk && tipo === "domicilio") setTipo("llevar"); }} />
       )}
-      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} recienEnviado={!!ticket.estado}
+      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio}
         onClose={() => { setTicket(null); if (ticket.estado) go("mesas"); }} />}
     </div>
   );
@@ -1195,16 +1260,47 @@ const AUTOPRINT_KEY = "tequeria_autoprint";
 const getAutoprint = () => { try { return localStorage.getItem(AUTOPRINT_KEY) === "1"; } catch { return false; } };
 const setAutoprintLS = (v) => { try { localStorage.setItem(AUTOPRINT_KEY, v ? "1" : "0"); } catch {} };
 
-function TicketModal({ t, negocio, onClose, recienEnviado }) {
+// Identificador estable de este dispositivo (para la sesión única de cocina)
+const SID_KEY = "tequeria_cocina_sid";
+function getSid() {
+  let s = null;
+  try { s = localStorage.getItem(SID_KEY); } catch {}
+  if (!s) { s = Math.random().toString(36).slice(2) + Date.now().toString(36); try { localStorage.setItem(SID_KEY, s); } catch {} }
+  return s;
+}
+
+// Sonido corto (beep) sin archivos
+function beep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return;
+    const ac = new Ctx(); const o = ac.createOscillator(); const g = ac.createGain();
+    o.type = "sine"; o.frequency.value = 880; o.connect(g); g.connect(ac.destination);
+    g.gain.setValueAtTime(0.001, ac.currentTime); g.gain.exponentialRampToValueAtTime(0.3, ac.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.35);
+    o.start(); o.stop(ac.currentTime + 0.36);
+    setTimeout(() => { try { ac.close(); } catch {} }, 600);
+  } catch {}
+}
+function notificar(titulo, cuerpo) {
+  try { if (navigator.vibrate) navigator.vibrate([120, 60, 120]); } catch {}
+  beep();
+  try {
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification(titulo, { body: cuerpo, tag: "tequeria-pedido" });
+    }
+  } catch {}
+}
+
+function TicketModal({ t, negocio, onClose, recienEnviado, autoPrint }) {
   const ex = t.extras || [];
   const ordenes = t.ordenes || [];
   const [modo, setModo] = useState(t.cuenta || "junta");   // "junta" | "separada"
   const [auto, setAuto] = useState(getAutoprint());
   const doPrint = () => { setTimeout(() => window.print(), 80); };
 
-  // Auto-imprimir al enviar (si está activado)
+  // Auto-imprimir al abrir (cuando el cocinero activa auto-imprimir)
   useEffect(() => {
-    if (recienEnviado && getAutoprint()) {
+    if (autoPrint || (recienEnviado && getAutoprint())) {
       const id = setTimeout(() => window.print(), 350);
       return () => clearTimeout(id);
     }
@@ -1302,7 +1398,7 @@ function TicketModal({ t, negocio, onClose, recienEnviado }) {
         )}
         <label className="auto-print no-print">
           <input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); setAutoprintLS(e.target.checked); }} />
-          Auto-imprimir al enviar
+          Auto-imprimir nuevos pedidos (cocina)
         </label>
         <div className="modal-actions no-print">
           <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
@@ -1372,6 +1468,7 @@ function Cocina({ data, db }) {
                   </div>
                   <div className="kt-tacos">🌮 Tacos en total: <b>{tacos}</b></div>
                   <div className="kt-actions">
+                    <button className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} /> Imprimir</button>
                     {t.estado === "pendiente" && <button className="btn btn-line btn-sm" onClick={() => setEstado(t.id, "preparando")}>Preparando</button>}
                     <button className="btn btn-primary btn-sm" onClick={() => setEstado(t.id, "listo")}><Check size={14} /> Listo</button>
                   </div>
@@ -1807,6 +1904,12 @@ button{font-family:inherit;cursor:pointer;}
 .topbar{display:flex;align-items:center;gap:14px;background:var(--agave);color:#fff;padding:10px 16px;flex-wrap:wrap;}
 .topbar-brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:18px;}
 .conn-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 2px rgba(255,255,255,.2);}
+/* ---- Avisos de cocina ---- */
+.cocina-alertas{position:sticky;top:0;z-index:30;display:flex;flex-direction:column;gap:6px;padding:8px 12px;background:var(--crema);border-bottom:1px solid var(--linea);}
+.alerta-permiso{background:var(--maiz);color:#fff;border:0;border-radius:10px;padding:10px;font-weight:700;cursor:pointer;}
+.alerta-pedido{display:flex;align-items:center;gap:8px;background:#fff;border:1.5px solid var(--ok);border-radius:12px;padding:8px 10px;animation:toastIn .2s ease;}
+.alerta-pedido.extra{border-color:var(--especial);}
+.alerta-txt{flex:1;font-size:14px;}
 .topbar-cactus{font-size:22px;}
 .topbar-nav{display:flex;gap:6px;flex:1;flex-wrap:wrap;}
 .nav-btn{display:flex;align-items:center;gap:7px;background:transparent;border:none;color:#cfe3d8;padding:9px 13px;border-radius:11px;font-size:14px;font-weight:600;position:relative;}

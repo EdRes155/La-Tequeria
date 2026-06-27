@@ -129,6 +129,22 @@ export async function login(id, pin) {
   return data && data.length ? data[0] : null;
 }
 
+/* ===================== sesión única de cocina ===================== */
+export async function claimCocina(sessionId) {
+  if (!supabase) return true;
+  try { const { data, error } = await supabase.rpc("claim_cocina", { p_session: sessionId }); if (error) { console.error("claim_cocina:", error.message); return true; } return !!data; }
+  catch (e) { console.error(e); return true; }
+}
+export async function latidoCocina(sessionId) {
+  if (!supabase) return true;
+  try { const { data } = await supabase.rpc("latido_cocina", { p_session: sessionId }); return data !== false; }
+  catch { return true; }
+}
+export async function liberarCocina(sessionId) {
+  if (!supabase) return;
+  try { await supabase.rpc("liberar_cocina", { p_session: sessionId }); } catch {}
+}
+
 /* ===================== acciones de escritura ===================== */
 async function w(promise, etiqueta) {
   if (!supabase) return;
