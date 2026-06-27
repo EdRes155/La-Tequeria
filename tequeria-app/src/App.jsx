@@ -246,6 +246,62 @@ const nuevaOrden = (n) => ({ id: uid(), nombre: `Orden ${n}`, items: [], prep: "
 const nuevoPedido = () => ({ ordenes: [nuevaOrden(1)], extras: [] });
 const domVacio = () => ({ nombre: "", direccion: "", referencia: "", telefono: "", pago: "efectivo", tiempo: "" });
 
+/* ============================== AVISOS (toasts) y CONFIRMACIÓN ============================== */
+let _toastSeq = 0;
+const _toastListeners = new Set();
+function toast(mensaje, tipo = "info") {
+  const t = { id: ++_toastSeq, mensaje, tipo };
+  _toastListeners.forEach((fn) => fn(t));
+}
+function Toaster() {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    const add = (t) => {
+      setItems((xs) => [...xs, t]);
+      setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== t.id)), 2800);
+    };
+    _toastListeners.add(add);
+    return () => _toastListeners.delete(add);
+  }, []);
+  const quitar = (id) => setItems((xs) => xs.filter((x) => x.id !== id));
+  return (
+    <div className="toaster">
+      {items.map((t) => (
+        <div key={t.id} className={"toast " + t.tipo} onClick={() => quitar(t.id)}>
+          {t.tipo === "ok" ? "✓ " : t.tipo === "error" ? "⚠ " : ""}{t.mensaje}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+let _confirmListener = null;
+function confirmDialog(opts) {
+  const o = typeof opts === "string" ? { mensaje: opts } : (opts || {});
+  return new Promise((resolve) => {
+    if (_confirmListener) _confirmListener({ ...o, resolve });
+    else resolve(window.confirm(o.mensaje || "¿Confirmar?"));
+  });
+}
+function ConfirmHost() {
+  const [state, setState] = useState(null);
+  useEffect(() => { _confirmListener = setState; return () => { _confirmListener = null; }; }, []);
+  if (!state) return null;
+  const cerrar = (val) => { state.resolve(val); setState(null); };
+  return (
+    <div className="modal-bg" onClick={() => cerrar(false)}>
+      <div className="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
+        {state.titulo && <h3 className="confirm-title">{state.titulo}</h3>}
+        <p className="confirm-msg">{state.mensaje}</p>
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={() => cerrar(false)}>{state.cancelar || "Cancelar"}</button>
+          <button className={"btn " + (state.peligro ? "btn-danger" : "btn-primary")} onClick={() => cerrar(true)}>{state.confirmar || "Confirmar"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================================================ */
 export default function App() {
   const [data, setData] = useState(null);
@@ -310,6 +366,8 @@ export default function App() {
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
       </main>
+      <Toaster />
+      <ConfirmHost />
     </div>
   );
 }
@@ -621,14 +679,15 @@ function Comanda({ data, db, user, go, ctx }) {
 
   const guardarMesa = () => {
     db.guardarMesa(mesaId, clone(pedido), user.nombre);
+    toast(totalProd > 0 ? `Mesa ${mesaId} guardada` : `Mesa ${mesaId} liberada`, "ok");
     go("mesas");
   };
 
   const finalizar = () => {
     if (sending.current) return;            // evita doble toque / doble ticket
-    if (vacio) { alert("Agrega al menos un producto."); return; }
+    if (vacio) { toast("Agrega al menos un producto.", "error"); return; }
     if (!esExtra && entrada === "domicilio" && (!dom.direccion.trim() || !dom.telefono.trim())) {
-      setModalDom(true); alert("Captura dirección y teléfono del domicilio."); return;
+      setModalDom(true); toast("Captura dirección y teléfono del domicilio.", "error"); return;
     }
     sending.current = true;
     setTimeout(() => { sending.current = false; }, 1200);
@@ -655,11 +714,13 @@ function Comanda({ data, db, user, go, ctx }) {
       total: totalDinero,
     };
     db.enviarTicket(t, { esExtra, mesaId, pedido: clone(pedido), userNombre: user.nombre });
+    toast(esExtra ? "Orden extra enviada" : "Comanda enviada a cocina", "ok");
     setTicket(t);
   };
 
   const liberarMesa = () => {
     db.liberarMesa(mesaId);
+    toast(`Mesa ${mesaId} liberada`, "ok");
     go("mesas");
   };
 
@@ -667,8 +728,8 @@ function Comanda({ data, db, user, go, ctx }) {
   const mesaInfo = mesaId ? data.mesas.find((m) => m.id === mesaId) : null;
   const mesaOcupada = entrada === "aqui" && mesaInfo?.estado === "ocupada";
 
-  const confirmLiberar = () => {
-    if (confirm(`¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.`)) liberarMesa();
+  const confirmLiberar = async () => {
+    if (await confirmDialog({ titulo: "Liberar mesa", mensaje: `¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.`, confirmar: "Liberar", peligro: true })) liberarMesa();
   };
 
   const dispLabel = tipo === "aqui" ? "Para esta mesa" : tipo === "llevar" ? "Para llevar" : "Domicilio";
@@ -939,7 +1000,7 @@ function Comanda({ data, db, user, go, ctx }) {
       {modalDom && (
         <DomicilioModal dom={dom} setDom={setDom}
           onAgregar={() => {
-            if (!dom.direccion.trim() || !dom.telefono.trim()) { alert("Dirección y teléfono son obligatorios."); return; }
+            if (!dom.direccion.trim() || !dom.telefono.trim()) { toast("Dirección y teléfono son obligatorios.", "error"); return; }
             setDomOk(true); setTipo("domicilio"); setModalDom(false);
           }}
           onClose={() => { setModalDom(false); if (!domOk && tipo === "domicilio") setTipo("llevar"); }} />
@@ -1169,10 +1230,11 @@ function Cocina({ data, db }) {
   const historial = data.historial || [];
   const totalDia = historial.reduce((s, t) => s + (t.total != null ? t.total : ticketTotal(t)), 0);
 
-  const hacerCorte = () => {
-    if (historial.length === 0) { alert("No hay ventas registradas hoy."); return; }
-    if (!confirm(`Hacer corte del día.\nVentas: ${historial.length}  ·  Total: ${money(totalDia)}\n\nSe guardará el corte y se limpiará el historial. ¿Continuar?`)) return;
+  const hacerCorte = async () => {
+    if (historial.length === 0) { toast("No hay ventas registradas hoy.", "info"); return; }
+    if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${historial.length} · Total: ${money(totalDia)}. Se guardará el corte y se limpiará el historial.`, confirmar: "Hacer corte" }))) return;
     db.hacerCorte();
+    toast("Corte del día guardado", "ok");
   };
 
   return (
@@ -1500,12 +1562,13 @@ function AdminProductos({ data, db }) {
   const addCarne = () => {
     const n = carne.trim(); if (!n) return;
     const id = slug(n);
-    if (data.carnes.some((c) => c.id === id)) { alert("Esa carne ya existe."); return; }
+    if (data.carnes.some((c) => c.id === id)) { toast("Esa carne ya existe.", "error"); return; }
     db.addCarne(n);
+    toast(`Carne "${n}" agregada`, "ok");
     setCarne("");
   };
-  const quitarCarne = (id) => {
-    if (!confirm("¿Quitar esta carne y todos sus productos del menú?")) return;
+  const quitarCarne = async (id) => {
+    if (!(await confirmDialog({ titulo: "Quitar carne", mensaje: "¿Quitar esta carne y todos sus productos del menú?", confirmar: "Quitar", peligro: true }))) return;
     db.removeCarne(id);
   };
 
@@ -1575,14 +1638,15 @@ function AdminMeseros({ data, db, user }) {
 
   const add = () => {
     const n = nuevo.nombre.trim(); const p = nuevo.pin.trim();
-    if (!n || p.length < 4) { alert("Nombre y PIN de al menos 4 dígitos."); return; }
+    if (!n || p.length < 4) { toast("Nombre y PIN de al menos 4 dígitos.", "error"); return; }
     db.crearUsuario({ id: uid(), nombre: n, pin: p, rol: nuevo.rol });
+    toast(`Usuario "${n}" creado`, "ok");
     setNuevo({ nombre: "", pin: "", rol: "mesero" });
   };
-  const quitar = (u) => {
-    if (u.id === user.id) { alert("No puedes eliminar tu propio usuario."); return; }
-    if (u.rol === "admin" && admins <= 1) { alert("Debe quedar al menos un administrador."); return; }
-    if (!confirm(`¿Eliminar a ${u.nombre}?`)) return;
+  const quitar = async (u) => {
+    if (u.id === user.id) { toast("No puedes eliminar tu propio usuario.", "error"); return; }
+    if (u.rol === "admin" && admins <= 1) { toast("Debe quedar al menos un administrador.", "error"); return; }
+    if (!(await confirmDialog({ titulo: "Eliminar usuario", mensaje: `¿Eliminar a ${u.nombre}?`, confirmar: "Eliminar", peligro: true }))) return;
     db.eliminarUsuario(u.id);
   };
 
@@ -1781,6 +1845,7 @@ button{font-family:inherit;cursor:pointer;}
 .btn-line{background:#fff;border:1.5px solid var(--agave);color:var(--agave);}
 .btn-ghost{background:var(--crema);color:var(--tinta);border:1px solid var(--linea);}
 .btn-danger-ghost{background:#fff;border:1.5px solid var(--alerta);color:var(--alerta);}
+.btn-danger{background:var(--alerta);color:#fff;}
 
 /* INPUTS */
 .inp{border:1.5px solid var(--linea);border-radius:10px;padding:11px 12px;font-size:15px;width:100%;background:#fff;}
@@ -1861,6 +1926,19 @@ button{font-family:inherit;cursor:pointer;}
 .modal-body label{font-size:12px;font-weight:700;color:var(--tinta2);margin-top:8px;}
 .dom-row{display:flex;gap:10px;}
 .modal-actions{display:flex;gap:8px;padding:14px;border-top:1px solid var(--linea);} .modal-actions .btn{flex:1;}
+
+/* ---- Modal de confirmación ---- */
+.modal-confirm{width:min(360px,92vw);}
+.confirm-title{margin:0;padding:18px 18px 0;font-size:18px;}
+.confirm-msg{margin:0;padding:10px 18px 4px;color:var(--tinta);line-height:1.5;}
+
+/* ---- Toasts ---- */
+.toaster{position:fixed;left:0;right:0;bottom:18px;display:flex;flex-direction:column;align-items:center;gap:8px;z-index:90;pointer-events:none;padding:0 16px;}
+.toast{pointer-events:auto;max-width:440px;width:fit-content;background:var(--tinta);color:#fff;padding:12px 18px;border-radius:12px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.25);animation:toastIn .22s ease;cursor:pointer;}
+.toast.ok{background:var(--ok);}
+.toast.error{background:var(--alerta);}
+.toast.info{background:var(--agave2);}
+@keyframes toastIn{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
 .ticket-total{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-top:2px solid var(--agave);background:var(--crema);font-size:16px;font-weight:700;}
 .ticket-total b{font-size:22px;color:var(--agave);}
 
