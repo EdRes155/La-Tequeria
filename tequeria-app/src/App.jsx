@@ -302,6 +302,33 @@ function ConfirmHost() {
   );
 }
 
+let _choiceListener = null;
+function choiceDialog(opts) {
+  return new Promise((resolve) => {
+    if (_choiceListener) _choiceListener({ ...opts, resolve });
+    else resolve(null);
+  });
+}
+function ChoiceHost() {
+  const [state, setState] = useState(null);
+  useEffect(() => { _choiceListener = setState; return () => { _choiceListener = null; }; }, []);
+  if (!state) return null;
+  const pick = (v) => { state.resolve(v); setState(null); };
+  return (
+    <div className="modal-bg" onClick={() => pick(null)}>
+      <div className="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
+        {state.titulo && <h3 className="confirm-title">{state.titulo}</h3>}
+        {state.mensaje && <p className="confirm-msg">{state.mensaje}</p>}
+        <div className="modal-actions choice-actions">
+          {state.opciones.map((o) => (
+            <button key={o.val} className={"btn " + (o.tipo || "btn-primary")} onClick={() => pick(o.val)}>{o.label}</button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================================================ */
 export default function App() {
   const [data, setData] = useState(null);
@@ -368,6 +395,7 @@ export default function App() {
       </main>
       <Toaster />
       <ConfirmHost />
+      <ChoiceHost />
     </div>
   );
 }
@@ -627,7 +655,6 @@ function Comanda({ data, db, user, go, ctx }) {
   const [refLlevar, setRefLlevar] = useState(""); // nombre de referencia (pestaña Para llevar)
   const [esExtra, setEsExtra] = useState(false);  // orden extra sobre una mesa ya ocupada
   const [ticket, setTicket] = useState(null);
-  const [cuentasSep, setCuentasSep] = useState(false); // modal de cuentas separadas
   const [pane, setPane] = useState("menu"); // celular: menu | orden
   const sending = useRef(false);
 
@@ -684,12 +711,27 @@ function Comanda({ data, db, user, go, ctx }) {
     go("mesas");
   };
 
-  const finalizar = () => {
+  const finalizar = async () => {
     if (sending.current) return;            // evita doble toque / doble ticket
     if (vacio) { toast("Agrega al menos un producto.", "error"); return; }
     if (!esExtra && entrada === "domicilio" && (!dom.direccion.trim() || !dom.telefono.trim())) {
       setModalDom(true); toast("Captura dirección y teléfono del domicilio.", "error"); return;
     }
+    // ¿Cuenta junta o separada? Solo tiene sentido preguntar con más de una orden.
+    let cuenta = "junta";
+    if (!esExtra && pedido.ordenes.length > 1) {
+      const sel = await choiceDialog({
+        titulo: "¿Cómo va la cuenta?",
+        mensaje: "Así saldrá impreso el ticket.",
+        opciones: [
+          { label: "Junta (un solo total)", val: "junta", tipo: "btn-primary" },
+          { label: "Separada (total por orden)", val: "separada", tipo: "btn-line" },
+        ],
+      });
+      if (!sel) return;     // cerró sin elegir: no se envía
+      cuenta = sel;
+    }
+    if (sending.current) return;
     sending.current = true;
     setTimeout(() => { sending.current = false; }, 1200);
     let ticketTipo = "aqui", origen, paraLlevar = false, referencia = null;
@@ -707,7 +749,7 @@ function Comanda({ data, db, user, go, ctx }) {
       origen = dom.nombre.trim() || "Domicilio";
     }
     const t = {
-      id: uid(), tipo: ticketTipo, esExtra, origen, paraLlevar, referencia,
+      id: uid(), tipo: ticketTipo, esExtra, origen, paraLlevar, referencia, cuenta,
       mesaId: (esExtra || entrada === "aqui") ? mesaId : null,
       ordenes: clone(pedido.ordenes), extras: clone(pedido.extras || []),
       mesero: user.nombre, hora: hora(), fecha: fecha(), estado: "pendiente",
@@ -955,48 +997,9 @@ function Comanda({ data, db, user, go, ctx }) {
           <button className="btn btn-barro btn-block" onClick={() => { setEsExtra(true); setPedido(nuevoPedido()); setActiva(0); setPane("menu"); }}>
             <Plus size={16} /> Agregar orden extra
           </button>
-          <button className="btn btn-line btn-block" onClick={() => setCuentasSep(true)} disabled={todasOrdenes.length === 0}>
-            Cuentas separadas
-          </button>
-          <button className="btn btn-line btn-block" onClick={reimprimir}><Printer size={16} /> Reimprimir ticket (todo)</button>
+          <button className="btn btn-line btn-block" onClick={reimprimir}><Printer size={16} /> Reimprimir ticket</button>
           <button className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
         </div>
-        {cuentasSep && (
-          <div className="modal-bg" onClick={() => setCuentasSep(false)}>
-            <div className="modal" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-head"><h3>Cuentas separadas</h3>
-                <button className="icon-btn" onClick={() => setCuentasSep(false)}><X size={18} /></button></div>
-              <div className="cuentas-list">
-                <p className="muted" style={{ margin: "0 0 8px" }}>Una cuenta por cada orden (comida + bebida). Toca para imprimir.</p>
-                {todasOrdenes.map((o, i) => {
-                  const sub = o.items.reduce((s, it) => s + it.cantidad * (it.precio || 0), 0);
-                  return (
-                    <button key={o.id || i} className="cuenta-row" onClick={() => {
-                      setCuentasSep(false);
-                      setTicket({ id: "sep-" + (o.id || i), tipo: "aqui", origen: `Mesa ${mesaId} · ${o.nombre}`, paraLlevar: false,
-                        ordenes: [o], extras: [], mesero: mesaInfo.mesero, hora: mesaInfo.hora, fecha: fecha(), domicilio: null });
-                    }}>
-                      <span className="cuenta-name">{o.nombre}</span>
-                      <span className="cuenta-sub">{money(sub)}</span>
-                      <Printer size={16} />
-                    </button>
-                  );
-                })}
-                {todosExtras.length > 0 && (
-                  <button className="cuenta-row" onClick={() => {
-                    setCuentasSep(false);
-                    setTicket({ id: "sep-gen", tipo: "aqui", origen: `Mesa ${mesaId} · Generales`, paraLlevar: false,
-                      ordenes: [], extras: todosExtras, mesero: mesaInfo.mesero, hora: mesaInfo.hora, fecha: fecha(), domicilio: null });
-                  }}>
-                    <span className="cuenta-name">Generales (para todo el pedido)</span>
-                    <span className="cuenta-sub">{money(todosExtras.reduce((s, e) => s + e.cantidad * (e.precio || 0), 0))}</span>
-                    <Printer size={16} />
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
         {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
       </div>
     );
@@ -1169,60 +1172,23 @@ function ticketView(t) {
   return { label: Tb.label, color: Tb.color };
 }
 
-/* impresión térmica 58mm */
-// La COMANDA de cocina se agrupa por TIPO con su conteo; las bebidas van aparte.
-const TIPOS_COMANDA = [
-  { pre: "taco-queso-", label: "TACOS C/QUESO", ord: 1 },
-  { pre: "taco-",       label: "TACOS",         ord: 2 },
-  { pre: "gringa-",     label: "GRINGAS",       ord: 3 },
-  { pre: "llenadora-",  label: "LLENADORAS",    ord: 4 },
-  { pre: "volcan-",     label: "VOLCANES",      ord: 5 },
-  { pre: "media-costra-", label: "MEDIA COSTRA", ord: 6, full: true },
-  { pre: "costra-",     label: "COSTRAS",       ord: 7, full: true },
-  { pre: "quesa-",      label: "QUESADILLAS",   ord: 8 },
-  { pre: "beb-",        label: "BEBIDAS",       ord: 20, beb: true },
-];
-function tipoDe(item) {
-  const k = item.key || "";
-  for (const d of TIPOS_COMANDA) if (k.startsWith(d.pre)) return d;
-  return { label: "EXTRAS", ord: 15, otros: true };
-}
-function carneCorto(item, def) {
-  const n = (item.nombre || "").trim();
-  if (def.full) return n.replace(/^Media costra\s+/i, "").replace(/^Costra\s+/i, "");   // carne completa
-  if (def.beb || def.otros) return item.corto || n;
-  const r = n.replace(/^(Taco de queso|Taco|Gringa|Llenadora|Volcán|Quesadilla de)\s+/i, "")
-             .replace(/\s*\(queso\)/i, "").replace(/^de\s+/i, "").trim();
-  return def.pre === "quesa-" ? r : r.slice(0, 3);    // 3 letras del nombre de la carne
-}
-function agruparComanda(items) {
-  const map = {}; const arr = [];
-  for (const it of items) {
-    const def = tipoDe(it);
-    if (!map[def.label]) { map[def.label] = { label: def.label, ord: def.ord, beb: def.beb, total: 0, partes: [] }; arr.push(map[def.label]); }
-    const g = map[def.label];
-    g.total += it.cantidad;
-    g.partes.push({ nombre: carneCorto(it, def), cantidad: it.cantidad });
-  }
-  arr.sort((a, b) => a.ord - b.ord);
-  return arr;
-}
-function ComandaGrupo({ g }) {
-  return (
-    <div className={"cg" + (g.beb ? " cg-beb" : "")}>
-      <span className="cg-h">{g.label} {g.total}</span>{" "}
-      <span className="cg-bd">{g.partes.map((p, i) => <span key={i} className="cg-p">{p.cantidad} {p.nombre}</span>)}</span>
-    </div>
-  );
-}
-function ComandaOrden({ o }) {
-  const grupos = agruparComanda(o.items);
-  return (
-    <div className="tp-orden">
-      <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
-      {grupos.map((g) => <ComandaGrupo key={g.label} g={g} />)}
-    </div>
-  );
+/* impresión térmica 58mm — un solo ticket (estilo cuenta) sirve para cocina y cliente */
+const esBebida = (it) => it.cat === "bebida" || (it.key || "").startsWith("beb-");
+const itemPrecio = (it) => (it.precio || 0) * it.cantidad;
+
+// Nombre completo, pero recortado con reglas para que SIEMPRE quepa en un renglón de 58mm.
+function nombreTicket(item) {
+  let n = (item.corto || item.nombre || "").trim();
+  n = n
+    .replace(/^Quesadilla de\s+/i, "Quesa. ")
+    .replace(/^Quesadilla\b/i, "Quesa.")
+    .replace(/^Media costra\b/i, "½ Costra")
+    .replace(/\bde queso\b/i, "queso")
+    .replace(/\bextra\b/i, "")
+    .replace(/\s*\(([^)]*)\)/g, " $1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return n;
 }
 
 const AUTOPRINT_KEY = "tequeria_autoprint";
@@ -1230,33 +1196,48 @@ const getAutoprint = () => { try { return localStorage.getItem(AUTOPRINT_KEY) ==
 const setAutoprintLS = (v) => { try { localStorage.setItem(AUTOPRINT_KEY, v ? "1" : "0"); } catch {} };
 
 function TicketModal({ t, negocio, onClose, recienEnviado }) {
-  const tv = ticketView(t);
   const ex = t.extras || [];
-  const total = t.ordenes.reduce((s, o) => s + o.items.reduce((a, i) => a + i.cantidad * (i.precio || 0), 0), 0)
-    + ex.reduce((a, e) => a + e.cantidad * (e.precio || 0), 0);
-  const tacos = contarTacos(t);
-  const [modo, setModo] = useState("cuenta");        // "cocina" | "cuenta"
+  const ordenes = t.ordenes || [];
+  const [modo, setModo] = useState(t.cuenta || "junta");   // "junta" | "separada"
   const [auto, setAuto] = useState(getAutoprint());
-  const doPrint = (m) => { setModo(m); setTimeout(() => window.print(), 80); };
+  const doPrint = () => { setTimeout(() => window.print(), 80); };
 
-  // Auto-imprimir la comanda de cocina al enviar (si está activado)
+  // Auto-imprimir al enviar (si está activado)
   useEffect(() => {
     if (recienEnviado && getAutoprint()) {
-      setModo("cocina");
       const id = setTimeout(() => window.print(), 350);
       return () => clearTimeout(id);
     }
   }, []);
 
+  const total = ordenes.reduce((s, o) => s + o.items.reduce((a, i) => a + itemPrecio(i), 0), 0)
+    + ex.reduce((a, e) => a + itemPrecio(e), 0);
+
+  // En modo JUNTA agrupamos las bebidas de todas las órdenes hasta abajo
+  const bebidasJuntas = [];
+  if (modo === "junta") {
+    const map = {};
+    ordenes.forEach((o) => o.items.forEach((it) => {
+      if (esBebida(it)) { if (!map[it.key]) { map[it.key] = { ...it }; bebidasJuntas.push(map[it.key]); } else map[it.key].cantidad += it.cantidad; }
+    }));
+  }
+
+  const Item = ({ it }) => (
+    <div className="tp-item">
+      <span className="tp-q">{it.cantidad}</span>
+      <span className="tp-n">{nombreTicket(it)}</span>
+      <span className="tp-p">{itemPrecio(it) > 0 ? money(itemPrecio(it)) : ""}</span>
+    </div>
+  );
+
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal modal-ticket" onClick={(e) => e.stopPropagation()}>
-        <div id="print-area" className={"ticket-print t58 " + modo}>
-          <div className="tp-tipo">{tv.label.toUpperCase()}</div>
+        <div id="print-area" className="ticket-print t58">
           <div className="tp-name">{negocio}</div>
           <div className="tp-sub">{t.origen}{t.paraLlevar ? " · para llevar" : ""}</div>
           <div className="tp-meta"><span>Mesero: {t.mesero}</span><span>{t.hora}</span></div>
-          <div className="tp-meta"><span>{t.fecha}</span><span className="tp-modo-tag">{modo === "cocina" ? "COMANDA" : "CUENTA"}</span></div>
+          <div className="tp-meta"><span>{t.fecha}</span><span className="tp-modo-tag">{modo === "separada" ? "CUENTA SEPARADA" : "CUENTA"}</span></div>
           {t.domicilio && (
             <div className="tp-dom">
               {t.domicilio.nombre && <div>Cliente: {t.domicilio.nombre}</div>}
@@ -1267,66 +1248,65 @@ function TicketModal({ t, negocio, onClose, recienEnviado }) {
             </div>
           )}
           <div className="tp-line" />
-          {modo === "cocina" ? (
-            <>
-              {t.ordenes.map((o) => <ComandaOrden key={o.id} o={o} />)}
-              {ex.length > 0 && (
-                <div className="tp-orden">
-                  <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
-                  {agruparComanda(ex).map((g) => <ComandaGrupo key={g.label} g={g} />)}
+
+          {modo === "separada" ? (
+            ordenes.map((o) => {
+              const sub = o.items.reduce((a, i) => a + itemPrecio(i), 0);
+              return (
+                <div key={o.id} className="tp-orden">
+                  <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
+                  <div className="tp-items">{o.items.map((it) => <Item key={it.key} it={it} />)}</div>
+                  <div className="tp-suborden"><span>Subtotal {o.nombre}</span><span>{money(sub)}</span></div>
                 </div>
-              )}
-            </>
+              );
+            })
           ) : (
             <>
-              {t.ordenes.map((o) => (
-                <div key={o.id} className="tp-orden"><div className="tp-oname">{o.nombre}</div>
-                  {o.prep && <div className="tp-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
-                  <div className="tp-items">
-                    {o.items.map((it) => (
-                      <div key={it.key} className="tp-item">
-                        <span className="tp-q">{it.cantidad}×</span>
-                        <span className="tp-n">{it.nombre}</span>
-                        <span className="tp-p">{money((it.precio || 0) * it.cantidad)}</span>
-                      </div>
-                    ))}
+              {ordenes.map((o) => {
+                const comida = o.items.filter((it) => !esBebida(it));
+                if (comida.length === 0) return null;
+                return (
+                  <div key={o.id} className="tp-orden">
+                    <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
+                    <div className="tp-items">{comida.map((it) => <Item key={it.key} it={it} />)}</div>
                   </div>
+                );
+              })}
+              {bebidasJuntas.length > 0 && (
+                <div className="tp-orden tp-bebidas">
+                  <div className="tp-oname">BEBIDAS</div>
+                  <div className="tp-items">{bebidasJuntas.map((it) => <Item key={it.key} it={it} />)}</div>
                 </div>
-              ))}
-              {ex.length > 0 && (
-                <>
-                  <div className="tp-line" />
-                  <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
-                  <div className="tp-items">
-                    {ex.map((it) => (
-                      <div key={it.key} className="tp-item">
-                        <span className="tp-q">{it.cantidad}×</span>
-                        <span className="tp-n">{it.corto || it.nombre}</span>
-                        <span className="tp-p">{it.precio > 0 ? money(it.precio * it.cantidad) : ""}</span>
-                      </div>
-                    ))}
-                  </div>
-                </>
               )}
             </>
           )}
+
+          {ex.length > 0 && (
+            <>
+              <div className="tp-line" />
+              <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
+              <div className="tp-items">{ex.map((it) => <Item key={it.key} it={it} />)}</div>
+            </>
+          )}
+
           <div className="tp-line" />
-          <div className="tp-tacos">{agruparComanda(t.ordenes.flatMap((o) => o.items)).map((g) => (
-            <span key={g.label} className="tt"><b>{g.total}</b> {g.label}</span>
-          ))}</div>
           <div className="tp-total"><span>TOTAL</span><span>{money(total)}</span></div>
-          <div className="tp-foot cuenta-foot">¡Gracias por su compra!</div>
-          <div className="tp-foot cocina-foot">— COCINA —</div>
+          <div className="tp-foot">¡Gracias por su compra!</div>
         </div>
 
+        {ordenes.length > 1 && (
+          <div className="ticket-modos no-print">
+            <button className={"seg-b" + (modo === "junta" ? " on" : "")} onClick={() => setModo("junta")}>Junta</button>
+            <button className={"seg-b" + (modo === "separada" ? " on" : "")} onClick={() => setModo("separada")}>Separada</button>
+          </div>
+        )}
         <label className="auto-print no-print">
           <input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); setAutoprintLS(e.target.checked); }} />
-          Auto-imprimir comanda al enviar
+          Auto-imprimir al enviar
         </label>
         <div className="modal-actions no-print">
           <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
-          <button className="btn btn-line" onClick={() => doPrint("cocina")}><Printer size={16} /> Comanda</button>
-          <button className="btn btn-primary" onClick={() => doPrint("cuenta")}><Printer size={16} /> Cuenta</button>
+          <button className="btn btn-primary" onClick={doPrint}><Printer size={16} /> Imprimir</button>
         </div>
       </div>
     </div>
@@ -2108,25 +2088,19 @@ button{font-family:inherit;cursor:pointer;}
 .auto-print{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--tinta2);padding:10px 4px 0;cursor:pointer;}
 .auto-print input{width:18px;height:18px;}
 
-/* modo cocina (comanda, sin precios) vs cuenta (con precios) */
-#print-area.cocina .tp-p,
-#print-area.cocina .tp-total,
-#print-area.cocina .cuenta-foot{display:none;}
-#print-area.cuenta .tp-tacos,
-#print-area.cuenta .cocina-foot{display:none;}
+/* cada producto en un solo renglón (recorta si es larguísimo) */
+.tp-item{display:flex;gap:6px;font-size:14px;align-items:baseline;line-height:1.4;}
+.tp-q{min-width:20px;font-weight:800;text-align:right;}
+.tp-n{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tp-p{font-weight:700;white-space:nowrap;}
+.tp-suborden{display:flex;justify-content:space-between;font-weight:700;font-size:13px;border-top:1px dotted #000;margin-top:3px;padding-top:2px;}
+.tp-bebidas{margin-top:5px;padding-top:4px;border-top:1px dashed #000;}
+.tp-bebidas .tp-oname{letter-spacing:1px;}
 
-/* COMANDA: agrupada por tipo, grande y legible de lejos */
-#print-area.cocina .tp-tipo{font-size:17px;}
-#print-area.cocina .tp-sub{font-size:14px;font-weight:700;}
-#print-area.cocina .tp-oname{font-size:15px;font-weight:800;margin-top:3px;}
-#print-area.cocina .tp-prep{font-size:14px;}
-.cg{font-size:17px;line-height:1.3;margin:1px 0;}
-.cg-h{font-weight:800;}
-.cg-bd{font-weight:700;}
-.cg-p{margin-right:10px;white-space:nowrap;}
-.cg-beb{margin-top:3px;padding-top:3px;border-top:1px dotted #000;}
-#print-area.cocina .tp-tacos{font-size:15px;font-weight:700;display:flex;flex-wrap:wrap;gap:2px 14px;justify-content:center;}
-.tp-tacos .tt b{font-size:18px;}
+/* selector junta/separada dentro del modal */
+.ticket-modos{display:flex;gap:0;margin:10px 4px 0;border:1px solid var(--linea);border-radius:10px;overflow:hidden;}
+.seg-b{flex:1;padding:10px;background:#fff;border:0;font-weight:700;color:var(--tinta2);cursor:pointer;}
+.seg-b.on{background:var(--agave);color:#fff;}
 
 @media print{
   @page{ size:58mm auto; margin:0; }
