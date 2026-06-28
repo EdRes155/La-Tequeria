@@ -1137,7 +1137,13 @@ function Comanda({ data, db, user, go, ctx }) {
           </div>
           <div className="pane-scroll">{pane === "menu" ? menuPane : ordenPane}</div>
           <div className="phone-footer">
-            {pane === "menu" ? accionesIzq : accionesDer}
+            <div className="footer-der">
+              {pane === "menu"
+                ? (!esExtra && <button className="btn btn-add" onClick={addOrden}><Plus size={16} /> Orden</button>)
+                : <button className="btn btn-line" disabled={vacio} onClick={() => setTicket(previewTicket)}><Printer size={16} /> Ver ticket</button>}
+              <button className={"btn " + (esExtra ? "btn-barro" : "btn-primary")} disabled={vacio} onClick={finalizar}>
+                <Send size={16} /> {esExtra ? "Enviar orden extra" : "Enviar a cocina"}</button>
+            </div>
           </div>
         </>
       ) : (
@@ -2021,10 +2027,10 @@ const CSS = `
   --linea:#E6DEC9; --ok:#2E7D5B; --alerta:#C0392B;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
-html,body,#root{height:100%;margin:0;}
-.app{height:100vh;display:flex;flex-direction:column;background:var(--crema);
+html,body,#root{height:100%;margin:0;overflow:hidden;overscroll-behavior:none;}
+.app{height:100vh;height:100dvh;display:flex;flex-direction:column;background:var(--crema);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--tinta);}
-.loading{display:flex;height:100vh;align-items:center;justify-content:center;color:var(--tinta2);}
+.loading{display:flex;height:100vh;height:100dvh;align-items:center;justify-content:center;color:var(--tinta2);}
 button{font-family:inherit;cursor:pointer;}
 .muted{color:var(--tinta2);} .small{font-size:12px;}
 
