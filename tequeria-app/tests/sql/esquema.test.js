@@ -154,6 +154,9 @@ d("actualización desde v2", () => {
     const est = await api.rpc("estado", { p_token: r.token });
     expect(est.precios["taco-pastor"]).toBe(21.5);
     expect(est.historial.map((t) => t.id).sort()).toEqual(["t-viejo-1", "t-viejo-2"]);
+    // lo que v2 ya había cortado no reaparece en cocina; lo abierto sí sigue ahí
+    expect(est.cocina.map((t) => t.id).sort()).toEqual(["t-viejo-1", "t-viejo-2"]);
+    expect((await falla(api.query("select * from public.app_state"))).message).toMatch(/permission denied/);
     expect(est.gastos).toHaveLength(1);
     expect(est.mesas.find((m) => m.id === 2).estado).toBe("ocupada");
   });

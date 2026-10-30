@@ -28,5 +28,13 @@ insert into public.tickets (id, tipo, origen, mesa_id, ordenes, mesero, hora, fe
    'Edwin', '13:20', '30/10/2026', 'listo', 35, '{"nombre":"Ana","direccion":"Calle 1","telefono":"5550001111","pago":"efectivo"}')
 on conflict do nothing;
 
+-- ticket de un corte anterior que v2 ocultaba de cocina aunque no estaba archivado
+insert into public.cortes (id, fecha, hora, tickets, total) values ('corte-viejo', '01/07/2026', '23:00', 1, 20) on conflict do nothing;
+insert into public.tickets (id, tipo, origen, ordenes, mesero, hora, fecha, estado, total, corte_id) values
+  ('t-cortado-1', 'llevar', 'Para llevar', '[]', 'Edwin', '22:00', '01/07/2026', 'listo', 20, 'corte-viejo')
+on conflict do nothing;
+create table if not exists public.app_state (id int primary key, data jsonb);
+grant all on public.app_state to anon;
+
 insert into public.gastos (id, concepto, monto, fecha, hora, usuario) values ('g-viejo-1', 'Gas', 250, '30/10/2026', '09:00', 'Edwin')
 on conflict do nothing;

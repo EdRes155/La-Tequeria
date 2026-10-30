@@ -60,6 +60,15 @@ create table if not exists public.tickets (
   archivado_cocina boolean default false, total numeric default 0,
   domicilio jsonb, corte_id text, created_at timestamptz default now()
 );
+-- Solo al actualizar desde v2 (aún sin creado_por): v2 ocultaba de cocina lo que ya tenía corte;
+-- en v3 la cocina depende únicamente de archivado_cocina, así que se archivan una sola vez.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                 where table_schema = 'public' and table_name = 'tickets' and column_name = 'creado_por') then
+    update public.tickets set archivado_cocina = true where corte_id is not null and archivado_cocina is not true;
+  end if;
+end $$;
 alter table public.tickets add column if not exists reenvio boolean default false;
 alter table public.tickets add column if not exists cuenta text default 'junta';
 alter table public.tickets add column if not exists para_llevar boolean default false;
@@ -1255,6 +1264,19 @@ begin
   end loop;
 end $$;
 revoke all on sequence public.bitacora_id_seq from public, anon, authenticated;
+
+-- Tabla de la versión 1 (estado en un solo bloque): ya no se usa; se cierra sin borrarla
+do $$
+begin
+  if to_regclass('public.app_state') is not null then
+    execute 'alter table public.app_state enable row level security';
+    execute 'revoke all on public.app_state from public, anon, authenticated';
+    begin
+      execute 'alter publication supabase_realtime drop table public.app_state';
+    exception when others then null;
+    end;
+  end if;
+end $$;
 
 do $$
 declare f record;
