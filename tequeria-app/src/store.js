@@ -1,185 +1,183 @@
+/* ============================================================
+   Acceso a datos. Con Supabase configurado todo pasa por las
+   funciones de supabase-schema.sql con el token de la sesión;
+   sin Supabase se usa el adaptador local (localStore.js), que
+   expone exactamente la misma interfaz.
+   Cada acción devuelve una promesa: si el servidor rechaza o no
+   responde, la promesa falla con un ErrorApi y nada se da por hecho.
+   ============================================================ */
 import { supabase } from "./supabaseClient.js";
+import { crearLocal } from "./localStore.js";
 
-const LS_KEY = "tequeria_state";
-export const supabaseReady = !!supabase;
-
-let onStatus = null;
-export function setStatusHandler(fn) { onStatus = fn; }
-function status(s) { if (onStatus) onStatus(s); }
-
-/* ===================== mapeos fila <-> objeto de la app ===================== */
-const ticketFromRow = (r) => ({
-  id: r.id, tipo: r.tipo, esExtra: !!r.es_extra, origen: r.origen, mesaId: r.mesa_id,
-  ordenes: r.ordenes || [], extras: r.extras || [], mesero: r.mesero, hora: r.hora, fecha: r.fecha,
-  estado: r.estado, total: Number(r.total) || 0, domicilio: r.domicilio || null, reenvio: !!r.reenvio,
-});
-const ticketToRow = (t) => ({
-  id: t.id, tipo: t.tipo, es_extra: !!t.esExtra, origen: t.origen, mesa_id: t.mesaId ?? null,
-  ordenes: t.ordenes || [], extras: t.extras || [], mesero: t.mesero, hora: t.hora, fecha: t.fecha,
-  estado: t.estado || "pendiente", total: t.total || 0, domicilio: t.domicilio || null,
-  archivado_cocina: false, reenvio: !!t.reenvio,
-});
-
-function assemble(rows) {
-  const cfg = rows.config || {};
-  const open = (rows.tickets || []);
-  return {
-    nombreNegocio: cfg.nombre_negocio || "La Tequería",
-    precios: cfg.precios || {}, extras: cfg.extras || [], ocultos: cfg.ocultos || [],
-    carnes: (rows.carnes || []).map((c) => ({ id: c.id, nombre: c.nombre, activo: c.activo })),
-    bebidas: (rows.bebidas || []).map((b) => ({ id: b.id, nombre: b.nombre, cantidad: b.cantidad, activo: b.activo, precio: Number(b.precio) || 0 })),
-    usuarios: (rows.usuarios || []).map((u) => ({ id: u.id, nombre: u.nombre, rol: u.rol })),
-    mesas: (rows.mesas || []).map((m) => ({ id: m.id, estado: m.estado, mesero: m.mesero, hora: m.hora, pedido: m.pedido, extras: m.extras || [] })),
-    gastos: (rows.gastos || []).map((g) => ({ id: g.id, concepto: g.concepto, monto: Number(g.monto) || 0, fecha: g.fecha, hora: g.hora, user: g.usuario })),
-    cocina: open.filter((t) => !t.archivado_cocina).map(ticketFromRow),
-    historial: open.filter((t) => !t.reenvio).map(ticketFromRow),
-    cortes: (rows.cortes || []).map((c) => ({ id: c.id, fecha: c.fecha, hora: c.hora, tickets: c.tickets, total: Number(c.total) || 0, detalle: c.detalle || null })),
-    domicilios: [],
-  };
+export class ErrorApi extends Error {
+  constructor(codigo, mensaje, extra = {}) {
+    super(mensaje);
+    this.codigo = codigo;
+    Object.assign(this, extra);
+  }
 }
 
-async function fetchAll() {
-  const q = (t, sel, order) => {
-    let r = supabase.from(t).select(sel || "*");
-    if (order) r = r.order(order.col, { ascending: order.asc });
+// Qué partes del estado hay que recargar cuando cambia cada tabla
+export const TODAS = ["config", "carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos"];
+export const TABLA_PARTES = {
+  config: ["config"], carnes: ["carnes"], bebidas: ["bebidas"], usuarios: ["usuarios"], mesas: ["mesas"],
+  tickets: ["cocina", "historial"], cortes: ["cortes", "historial"], gastos: ["gastos", "historial"],
+};
+
+const SESION_KEY = "tequeria_sesion";
+const DISP_KEY = "tequeria_dispositivo";
+
+export function dispositivo() {
+  let s = null;
+  try { s = localStorage.getItem(DISP_KEY) || localStorage.getItem("tequeria_cocina_sid"); } catch {}
+  if (!s) {
+    s = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try { localStorage.setItem(DISP_KEY, s); } catch {}
+  }
+  return s.slice(0, 64);
+}
+
+export const leerSesion = () => { try { return JSON.parse(sessionStorage.getItem(SESION_KEY) || "null"); } catch { return null; } };
+export const guardarSesion = (s) => {
+  try { if (s) sessionStorage.setItem(SESION_KEY, JSON.stringify(s)); else sessionStorage.removeItem(SESION_KEY); } catch {}
+};
+
+function traducir(error, status) {
+  if (!error) return null;
+  if (status === 0 || /fetch|network|Load failed/i.test(error.message || "")) {
+    return new ErrorApi("RED", "Sin conexión con el servidor. Revisa el internet e inténtalo de nuevo.", { incierto: true });
+  }
+  if (error.code === "PGRST202" || error.code === "42883") {
+    return new ErrorApi("ESQUEMA", "La base de datos no está actualizada. Ejecuta supabase-schema.sql (v3) en Supabase.");
+  }
+  if (error.code === "P0001" && error.hint) return new ErrorApi(error.message, error.hint);
+  console.error("Supabase:", error);
+  return new ErrorApi("SERVIDOR", "El servidor rechazó la operación. Inténtalo de nuevo.");
+}
+
+function crearRemoto() {
+  let sesion = leerSesion();
+  const token = () => sesion?.token || null;
+
+  async function rpc(fn, args = {}) {
+    let res;
+    try { res = await supabase.rpc(fn, args); }
+    catch (e) { throw traducir(e, 0); }
+    if (res.error) throw traducir(res.error, res.status);
+    return res.data;
+  }
+  const conToken = (fn, args = {}) => rpc(fn, { p_token: token(), ...args });
+  // Las acciones con PIN de administrador devuelven {ok:false,error} en vez de fallar
+  const conPin = async (fn, args) => {
+    const r = await conToken(fn, args);
+    if (r && r.ok === false) throw new ErrorApi(r.error, mensajePin(r), r);
     return r;
   };
-  const [config, carnes, bebidas, usuarios, mesas, tickets, cortes, gastos] = await Promise.all([
-    supabase.from("config").select("*").eq("id", 1).maybeSingle(),
-    q("carnes", "*", { col: "orden", asc: true }),
-    q("bebidas", "*", { col: "nombre", asc: true }),
-    q("usuarios", "id, nombre, rol"),
-    q("mesas", "*", { col: "id", asc: true }),
-    supabase.from("tickets").select("*").is("corte_id", null).order("created_at", { ascending: false }),
-    q("cortes", "*", { col: "created_at", asc: false }),
-    q("gastos", "*", { col: "created_at", asc: false }),
-  ]);
-  return assemble({
-    config: config.data, carnes: carnes.data, bebidas: bebidas.data, usuarios: usuarios.data,
-    mesas: mesas.data, tickets: tickets.data, cortes: cortes.data, gastos: gastos.data,
-  });
-}
 
-/* ===================== respaldo local (sin Supabase) ===================== */
-function lsLoad() { try { const v = localStorage.getItem(LS_KEY); return v ? JSON.parse(v) : null; } catch { return null; } }
-export function saveBlob(d) { try { localStorage.setItem(LS_KEY, JSON.stringify(d)); } catch {} }
+  return {
+    modo: "remoto",
+    pantallaLogin: () => rpc("usuarios_login"),
+    async entrar(id, pin) {
+      const r = await rpc("login", { p_id: id, p_pin: pin, p_dispositivo: dispositivo() });
+      if (r.ok) {
+        sesion = { token: r.token, usuario: r.usuario, debeCambiarPin: !!r.debeCambiarPin };
+        guardarSesion(sesion);
+      }
+      return r.ok ? { ok: true, usuario: r.usuario, debeCambiarPin: !!r.debeCambiarPin } : r;
+    },
+    sesionGuardada: () => (sesion ? { usuario: sesion.usuario, debeCambiarPin: sesion.debeCambiarPin } : null),
+    async salir() {
+      const t = token();
+      sesion = null; guardarSesion(null);
+      if (t) { try { await rpc("logout", { p_token: t }); } catch {} }
+    },
+    async cambiarPin(actual, nuevo) {
+      const r = await conToken("cambiar_pin", { p_pin_actual: actual, p_pin_nuevo: nuevo });
+      if (r.ok && sesion) { sesion = { ...sesion, debeCambiarPin: false }; guardarSesion(sesion); }
+      return r;
+    },
+    cargar: (partes = null) => conToken("estado", { p_partes: partes }),
+    latido: () => conToken("latido_cocina"),
+    liberarCocina: () => conToken("liberar_cocina").catch(() => {}),
 
-/* ===================== carga + sembrado inicial ===================== */
-async function seedIfEmpty(seed) {
-  const cfg = await supabase.from("config").select("id").eq("id", 1).maybeSingle();
-  if (!cfg.data) await supabase.from("config").insert({ id: 1, nombre_negocio: seed.config.nombreNegocio, precios: seed.config.precios, extras: seed.config.extras, ocultos: seed.config.ocultos });
+    suscribir(onCambio, onConexion) {
+      let pendientes = new Set(), timer = null, suscrito = false, ultimo = Date.now();
+      const disparar = (partes) => {
+        partes.forEach((p) => pendientes.add(p));
+        clearTimeout(timer);
+        timer = setTimeout(() => { const ps = [...pendientes]; pendientes = new Set(); ultimo = Date.now(); onCambio(ps); }, 250);
+      };
+      const ch = supabase.channel("tequeria")
+        .on("broadcast", { event: "cambio" }, (m) => disparar(TABLA_PARTES[m?.payload?.t] || TODAS))
+        .subscribe((st) => {
+          suscrito = st === "SUBSCRIBED";
+          onConexion(suscrito ? "online" : "reconnecting");
+          if (suscrito) disparar(TODAS); // al (re)conectar, ponerse al día
+        });
+      // Respaldo si el tiempo real no llega: más frecuente mientras no hay suscripción
+      const iv = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        if (Date.now() - ultimo > (suscrito ? 45000 : 10000)) disparar(TODAS);
+      }, 5000);
+      const recuperar = () => { if (document.visibilityState === "visible") disparar(TODAS); };
+      window.addEventListener("online", recuperar);
+      document.addEventListener("visibilitychange", recuperar);
+      return () => {
+        clearTimeout(timer); clearInterval(iv);
+        window.removeEventListener("online", recuperar);
+        document.removeEventListener("visibilitychange", recuperar);
+        supabase.removeChannel(ch);
+      };
+    },
 
-  const car = await supabase.from("carnes").select("id");
-  if (!car.data || car.data.length === 0) await supabase.from("carnes").insert(seed.carnes.map((c, i) => ({ id: c.id, nombre: c.nombre, activo: c.activo !== false, orden: i })));
-
-  const beb = await supabase.from("bebidas").select("id");
-  if (!beb.data || beb.data.length === 0) await supabase.from("bebidas").insert(seed.bebidas.map((b) => ({ id: b.id, nombre: b.nombre, cantidad: b.cantidad, activo: b.activo !== false, precio: b.precio || 0 })));
-
-  const mes = await supabase.from("mesas").select("id");
-  if (!mes.data || mes.data.length === 0) await supabase.from("mesas").insert(seed.mesas.map((m) => ({ id: m.id, estado: "libre" })));
-
-  const usr = await supabase.from("usuarios").select("id");
-  if (!usr.data || usr.data.length === 0) {
-    for (const u of seed.usuarios) await supabase.rpc("crear_usuario", { p_id: u.id, p_nombre: u.nombre, p_pin: u.pin, p_rol: u.rol });
-  }
-}
-
-export async function loadAll(seed) {
-  if (!supabase) {
-    const l = lsLoad();
-    if (l) return l;
-    saveBlob(seed.blob);
-    return seed.blob;
-  }
-  try { await seedIfEmpty(seed); } catch (e) { console.error("seed:", e.message || e); }
-  try {
-    return await fetchAll();
-  } catch (e) {
-    console.error("loadAll/fetch:", e.message || e);
-    status("reconnecting");
-    return seed.blob; // no dejar la app colgada: arranca con datos locales
-  }
-}
-
-export function subscribeTables(onData) {
-  if (!supabase) { status("local"); return () => {}; }
-  let timer = null;
-  const refresh = () => { clearTimeout(timer); timer = setTimeout(async () => { try { onData(await fetchAll()); } catch (e) { console.error(e); } }, 250); };
-  const tablas = ["config", "carnes", "bebidas", "usuarios", "mesas", "tickets", "cortes", "gastos"];
-  let ch = supabase.channel("tequeria_all");
-  tablas.forEach((t) => ch.on("postgres_changes", { event: "*", schema: "public", table: t }, refresh));
-  ch.subscribe((st) => { status(st === "SUBSCRIBED" ? "online" : "reconnecting"); });
-
-  const recover = () => refresh();
-  const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") recover(); };
-  if (typeof window !== "undefined") window.addEventListener("online", recover);
-  if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVis);
-  return () => {
-    if (typeof window !== "undefined") window.removeEventListener("online", recover);
-    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVis);
-    supabase.removeChannel(ch);
+    acciones: {
+      guardarBorrador: (mesaId, pedido, version) => conToken("guardar_borrador_mesa", { p_mesa_id: mesaId, p_pedido: pedido, p_version: version ?? null }),
+      liberarMesa: (mesaId) => conToken("liberar_mesa", { p_mesa_id: mesaId }),
+      enviar: (t) => conToken("enviar_comanda", { p_ticket: t }),
+      reenviar: (id, mesaId) => conToken("reenviar_cocina", { p_id: id, p_mesa_id: mesaId }),
+      estadoTicket: (id, estado) => conToken("cambiar_estado_ticket", { p_id: id, p_estado: estado }),
+      archivar: (id) => conToken("archivar_ticket", { p_id: id }),
+      corte: (adminPin) => conPin("hacer_corte", { p_admin_pin: adminPin }),
+      ajustarBebida: (id, delta) => conToken("ajustar_bebida", { p_id: id, p_delta: delta }),
+      actualizarBebida: (id, cambios) => conToken("actualizar_bebida", { p_id: id, p_cambios: cambios }),
+      agregarBebida: (nombre, precio, cantidad) => conToken("agregar_bebida", { p_nombre: nombre, p_precio: precio, p_cantidad: cantidad }),
+      eliminarBebida: (id) => conToken("eliminar_bebida", { p_id: id }),
+      actualizarCarne: (id, activo) => conToken("actualizar_carne", { p_id: id, p_activo: activo }),
+      agregarCarne: (nombre) => conToken("agregar_carne", { p_nombre: nombre }),
+      eliminarCarne: (id) => conToken("eliminar_carne", { p_id: id }),
+      fijarPrecio: (clave, precio) => conToken("fijar_precio", { p_clave: clave, p_precio: precio }),
+      fijarPrecioExtra: (id, precio) => conToken("fijar_precio_extra", { p_id: id, p_precio: precio }),
+      agregarExtra: (cat, nombre, precio) => conToken("agregar_extra", { p_cat: cat, p_nombre: nombre, p_precio: precio }),
+      eliminarExtra: (id) => conToken("eliminar_extra", { p_id: id }),
+      alternarOculto: (clave) => conToken("alternar_oculto", { p_clave: clave }),
+      agregarGasto: (id, concepto, monto) => conToken("agregar_gasto", { p_id: id, p_concepto: concepto, p_monto: monto }),
+      eliminarGasto: (id) => conToken("eliminar_gasto", { p_id: id }),
+      crearUsuario: (adminPin, nombre, pin, rol) => conPin("crear_usuario", { p_admin_pin: adminPin, p_nombre: nombre, p_pin: pin, p_rol: rol }),
+      eliminarUsuario: (adminPin, id) => conPin("eliminar_usuario", { p_admin_pin: adminPin, p_id: id }),
+      restablecerPin: (adminPin, id, pin) => conPin("restablecer_pin", { p_admin_pin: adminPin, p_id: id, p_pin_nuevo: pin }),
+    },
   };
 }
 
-/* ===================== login ===================== */
-export async function login(id, pin) {
-  if (!supabase) return null; // offline: el login se valida con el respaldo local en App
-  const { data, error } = await supabase.rpc("login", { p_id: id, p_pin: pin });
-  if (error) { console.error("login:", error.message); return null; }
-  return data && data.length ? data[0] : null;
+// Texto para las respuestas {ok:false, error} de login, PIN y administración
+export function mensajePin(r) {
+  const min = Math.max(1, Math.ceil((r?.espera || 0) / 60));
+  switch (r?.error) {
+    case "pin": return r.restantes > 0 && r.restantes <= 3
+      ? `PIN incorrecto. Te quedan ${r.restantes} intento(s) antes de un bloqueo temporal.` : "PIN incorrecto.";
+    case "bloqueado": return `Demasiados intentos. Espera ${min} min e inténtalo de nuevo.`;
+    case "cocina_ocupada": return "Ya hay una cocina abierta en otro dispositivo.";
+    case "formato": return "El PIN debe tener de 4 a 8 dígitos.";
+    case "debil": return "Ese PIN es muy fácil de adivinar (por ejemplo 1234 o 1111). Elige otro.";
+    case "rol": return "Rol no válido.";
+    case "nombre": return "Escribe un nombre.";
+    case "propio": return "No puedes eliminar tu propio usuario.";
+    case "ultimo_admin": return "Debe quedar al menos un administrador.";
+    case "no_existe": return "Ese usuario ya no existe.";
+    case "vacio": return "No hay ventas en este periodo.";
+    default: return "No se pudo completar la operación.";
+  }
 }
 
-/* ===================== sesión única de cocina ===================== */
-export async function claimCocina(sessionId) {
-  if (!supabase) return true;
-  try { const { data, error } = await supabase.rpc("claim_cocina", { p_session: sessionId }); if (error) { console.error("claim_cocina:", error.message); return true; } return !!data; }
-  catch (e) { console.error(e); return true; }
-}
-export async function latidoCocina(sessionId) {
-  if (!supabase) return true;
-  try { const { data } = await supabase.rpc("latido_cocina", { p_session: sessionId }); return data !== false; }
-  catch { return true; }
-}
-export async function liberarCocina(sessionId) {
-  if (!supabase) return;
-  try { await supabase.rpc("liberar_cocina", { p_session: sessionId }); } catch {}
-}
-
-/* ===================== acciones de escritura ===================== */
-async function w(promise, etiqueta) {
-  if (!supabase) return;
-  try { const { error } = await promise; if (error) throw error; status("online"); }
-  catch (e) { console.error(etiqueta + ":", e.message || e); status("reconnecting"); }
-}
-// Igual que w() pero devuelve true/false (para acciones que requieren confirmar éxito, p.ej. PIN admin)
-async function wbool(promise, etiqueta) {
-  if (!supabase) return true;
-  try { const { error } = await promise; if (error) throw error; status("online"); return true; }
-  catch (e) { console.error(etiqueta + ":", e.message || e); status("reconnecting"); return false; }
-}
-
-export const io = {
-  // config
-  saveConfig: (patch) => w(supabase.from("config").upsert({ id: 1, ...patch }), "config"),
-  // carnes
-  addCarne: (c, orden) => w(supabase.from("carnes").insert({ id: c.id, nombre: c.nombre, activo: true, orden: orden || 0 }), "addCarne"),
-  updateCarne: (id, patch) => w(supabase.from("carnes").update(patch).eq("id", id), "updateCarne"),
-  removeCarne: (id) => w(supabase.from("carnes").delete().eq("id", id), "removeCarne"),
-  // bebidas
-  addBebida: (b) => w(supabase.from("bebidas").insert({ id: b.id, nombre: b.nombre, cantidad: b.cantidad, activo: true, precio: b.precio }), "addBebida"),
-  updateBebida: (id, patch) => w(supabase.from("bebidas").update(patch).eq("id", id), "updateBebida"),
-  removeBebida: (id) => w(supabase.from("bebidas").delete().eq("id", id), "removeBebida"),
-  // mesas
-  updateMesa: (id, patch) => w(supabase.from("mesas").update(patch).eq("id", id), "updateMesa"),
-  // tickets
-  addTicket: (t) => w(supabase.from("tickets").insert(ticketToRow(t)), "addTicket"),
-  updateTicket: (id, patch) => w(supabase.from("tickets").update(patch).eq("id", id), "updateTicket"),
-  // gastos
-  addGasto: (g) => w(supabase.from("gastos").insert({ id: g.id, concepto: g.concepto, monto: g.monto, fecha: g.fecha, hora: g.hora, usuario: g.user }), "addGasto"),
-  removeGasto: (id) => w(supabase.from("gastos").delete().eq("id", id), "removeGasto"),
-  // usuarios (vía funciones, requieren PIN de administrador)
-  crearUsuario: (u, adminPin) => wbool(supabase.rpc("crear_usuario", { p_admin_pin: adminPin, p_id: u.id, p_nombre: u.nombre, p_pin: u.pin, p_rol: u.rol }), "crearUsuario"),
-  eliminarUsuario: (id, adminPin) => wbool(supabase.rpc("eliminar_usuario", { p_admin_pin: adminPin, p_id: id }), "eliminarUsuario"),
-  // corte (requiere PIN de administrador)
-  hacerCorte: (adminPin, id, fechaStr, horaStr, detalle) => wbool(supabase.rpc("hacer_corte", { p_admin_pin: adminPin, p_id: id, p_fecha: fechaStr, p_hora: horaStr, p_detalle: detalle || null }), "hacerCorte"),
-};
+export const api = supabase ? crearRemoto() : crearLocal({ ErrorApi, mensajePin });
+export const remoto = api.modo === "remoto";

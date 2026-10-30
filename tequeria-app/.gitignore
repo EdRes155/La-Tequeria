@@ -1,3 +1,11 @@
 node_modules
 dist
 .DS_Store
+# configuración local: nunca se versiona (se conserva el ejemplo)
+.env
+.env.*
+!.env.example
+# resultados de pruebas
+test-results
+playwright-report
+coverage

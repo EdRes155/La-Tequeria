@@ -1,145 +1,33 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback, useId } from "react";
 import {
-  Plus, Minus, Trash2, X, Printer, Send, LogOut, ArrowLeft,
-  Bike, Package, Wallet, Utensils, ShoppingBag, ChefHat, Check, Pencil, Settings
+  Plus, Minus, Trash2, Printer, Send, LogOut, ArrowLeft, Bike, Package, Wallet, Utensils, ShoppingBag,
+  ChefHat, Check, Pencil, Settings, KeyRound, Save, Undo2, Loader2, RefreshCw, X,
 } from "lucide-react";
-import { loadAll, subscribeTables, saveBlob, login as dbLogin, supabaseReady, setStatusHandler, io, claimCocina, latidoCocina, liberarCocina } from "./store.js";
+import { api, remoto, ErrorApi, mensajePin, TODAS } from "./store.js";
+import {
+  ROLES, puede, puedeEditar, money, ticketTotal, contarTacos, contarProductos, CATS, PREPS, PREP_LABEL,
+  empaqueItems, catalogoBase, buildMenu, uid, clone, nuevaOrden, nuevoPedido, domVacio, telefonoValido,
+  pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, pinDebil, hora, fecha,
+} from "./dominio.js";
+import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
+import { CSS } from "./estilos.js";
 
 /* ============================================================
    LA TEQUERÍA — Sistema de comandas
    Una sola página web. iPad / tablet / celular (Safari · Chrome).
-   En pantallas grandes: columnas + lista al lado.
-   En celular: una sola columna deslizable con pestañas.
+   En pantallas grandes: menú + órdenes lado a lado.
+   En celular: pestañas Menú / Órdenes.
    ============================================================ */
 
-const STORAGE_KEY = "tequeria_v6";
-const NUM_MESAS = 8;
-
-const CARNES_DEFAULT = [
-  { id: "pastor",  nombre: "Pastor",  activo: true },
-  { id: "bistec",  nombre: "Bistec",  activo: true },
-  { id: "tripa",   nombre: "Tripa",   activo: true },
-  { id: "chorizo", nombre: "Chorizo", activo: true },
-];
-const BEBIDAS_DEFAULT = [
-  { id: "coca",     nombre: "Coca-Cola",        cantidad: 24, activo: true, precio: 25 },
-  { id: "sprite",   nombre: "Sprite",           cantidad: 12, activo: true, precio: 25 },
-  { id: "fanta",    nombre: "Fanta",            cantidad: 12, activo: true, precio: 25 },
-  { id: "jamaica",  nombre: "Agua de Jamaica",  cantidad: 20, activo: true, precio: 20 },
-  { id: "horchata", nombre: "Agua de Horchata", cantidad: 20, activo: true, precio: 20 },
-  { id: "mineral",  nombre: "Agua Mineral",     cantidad: 10, activo: true, precio: 25 },
-  { id: "botella",  nombre: "Agua Embotellada", cantidad: 30, activo: true, precio: 15 },
-];
-const USUARIOS_DEFAULT = [
-  { id: "u1", nombre: "Edwin",    pin: "1234", rol: "admin" },
-  { id: "u2", nombre: "Mesero 1", pin: "1111", rol: "mesero" },
-];
-
-/* precios base de comida según las carnes iniciales */
-function preciosDefault(carnes) {
-  const p = {
-    "quesa-maiz-queso": 25, "quesa-queso": 35, "volcan-queso": 35,
-    "costra-queso": 45, "media-costra-queso": 25,
-    "bolsa-verdura": 15, "tortilla-harina": 10, "tortilla-maiz": 10,
-  };
-  carnes.forEach((c) => {
-    p[`taco-${c.id}`] = 20;
-    p[`taco-queso-${c.id}`] = 30;
-    p[`gringa-${c.id}`] = 45;
-    p[`llenadora-${c.id}`] = 55;
-    p[`volcan-${c.id}`] = 40;
-    p[`costra-${c.id}`] = 50;
-    p[`media-costra-${c.id}`] = 28;
-  });
-  return p;
-}
-
-function defaultData() {
-  return {
-    nombreNegocio: "La Tequería",
-    usuarios: USUARIOS_DEFAULT,
-    carnes: CARNES_DEFAULT,
-    bebidas: BEBIDAS_DEFAULT,
-    extras: [],                       // productos personalizados que agrega el admin
-    ocultos: [],                      // claves de productos estándar ocultos del menú
-    precios: preciosDefault(CARNES_DEFAULT),
-    mesas: Array.from({ length: NUM_MESAS }, (_, i) => ({
-      id: i + 1, estado: "libre", pedido: null, mesero: null, hora: null,
-    })),
-    domicilios: [],
-    cocina: [],
-    gastos: [],
-    historial: [],                    // todos los tickets enviados (para reimprimir y corte)
-    cortes: [],                       // cortes de caja guardados
-  };
-}
-
-const esAdmin = (u) => u?.rol === "admin";
-
-// Asegura que cualquier estado (incluido uno viejo de la BD) tenga todos los campos
-function normalize(d) {
-  if (!d || typeof d !== "object") return d;
-  d.nombreNegocio = d.nombreNegocio || "La Tequería";
-  d.usuarios = d.usuarios || [];
-  d.carnes = d.carnes || [];
-  d.bebidas = d.bebidas || [];
-  d.extras = d.extras || [];
-  d.ocultos = d.ocultos || [];
-  d.precios = d.precios || {};
-  d.mesas = (d.mesas || []).map((m) => ({ ...m, extras: m.extras || [] }));
-  d.domicilios = d.domicilios || [];
-  d.cocina = d.cocina || [];
-  d.gastos = d.gastos || [];
-  d.historial = d.historial || [];
-  d.cortes = d.cortes || [];
-  return d;
-}
-
-const ROLES = { admin: "Administrador", mesero: "Mesero", cocinero: "Cocinero" };
-// Permisos por rol: "ver" = pantallas visibles; "edita" = dónde puede modificar.
-// - admin: todo.  - mesero: mesas y comanda (su trabajo); cocina solo lectura.
-// - cocinero: cocina (completo) y mesas solo lectura (no toma ni edita órdenes).
-const PERMISOS = {
-  admin:    { ver: ["mesas", "comanda", "cocina", "inventario", "gastos", "admin"], edita: ["mesas", "comanda", "cocina", "inventario", "gastos", "admin"] },
-  mesero:   { ver: ["mesas", "comanda", "cocina"],                                  edita: ["mesas", "comanda"] },
-  cocinero: { ver: ["mesas", "cocina"],                                             edita: ["cocina"] },
-};
-const puede = (u, v) => !!(PERMISOS[u?.rol]?.ver || []).includes(v);
-const puedeEditar = (u, v) => !!(PERMISOS[u?.rol]?.edita || []).includes(v);
-const money = (n) => "$" + (Number(n) || 0).toFixed(0);
-const ticketTotal = (t) =>
-  (t.ordenes || []).reduce((s, o) => s + o.items.reduce((a, i) => a + i.cantidad * (i.precio || 0), 0), 0)
-  + (t.extras || []).reduce((a, e) => a + e.cantidad * (e.precio || 0), 0);
-const contarTacos = (t) =>
-  (t.ordenes || []).reduce((s, o) => s + o.items.reduce((a, i) => a + (i.cat === "taco" ? i.cantidad : 0), 0), 0);
-
-/* ---------- persistencia ---------- */
-async function loadData() {
-  try {
-    if (typeof window === "undefined" || !window.storage) return null;
-    const r = await window.storage.get(STORAGE_KEY);
-    return r ? JSON.parse(r.value) : null;
-  } catch { return null; }
-}
-async function saveData(d) {
-  try {
-    if (typeof window === "undefined" || !window.storage) return;
-    await window.storage.set(STORAGE_KEY, JSON.stringify(d));
-  } catch {}
-}
-
-/* ---------- helpers ---------- */
-const uid = () => Math.random().toString(36).slice(2, 9);
-const hora = () => new Date().toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
-const fecha = () => new Date().toLocaleDateString("es-MX", { day: "2-digit", month: "2-digit", year: "numeric" });
-const clone = (o) => (typeof structuredClone === "function" ? structuredClone(o) : JSON.parse(JSON.stringify(o)));
-
+const MQ_CELULAR = "(max-width: 759.98px)"; // mismo corte que el CSS
 function useIsPhone() {
-  const [phone, setPhone] = useState(typeof window !== "undefined" ? window.innerWidth < 760 : false);
+  const mq = typeof window !== "undefined" && window.matchMedia ? window.matchMedia(MQ_CELULAR) : null;
+  const [phone, setPhone] = useState(mq ? mq.matches : false);
   useEffect(() => {
-    const f = () => { const p = window.innerWidth < 760; setPhone((prev) => (prev === p ? prev : p)); };
-    window.addEventListener("resize", f);
-    return () => window.removeEventListener("resize", f);
+    if (!mq) return;
+    const f = () => setPhone(mq.matches);
+    mq.addEventListener ? mq.addEventListener("change", f) : mq.addListener(f);
+    return () => (mq.removeEventListener ? mq.removeEventListener("change", f) : mq.removeListener(f));
   }, []);
   return phone;
 }
@@ -151,438 +39,270 @@ const TIPOS = {
   domicilio: { label: "Domicilio",       corto: "Domicilio", color: "var(--barro)", icon: Bike },
 };
 
-/* categorías de comida y su color */
-const CATS = {
-  taco:    { color: "var(--lima)" },
-  quesa:   { color: "var(--maiz)" },
-  volcan:  { color: "var(--barro)" },
-  costra:  { color: "var(--especial)" },
-  bebida:  { color: "var(--agua)" },
-  empaque: { color: "var(--empaque)" },
-};
-
-/* preparación por orden (todos los casos) */
-const PREPS = [
-  { k: "con-todo", label: "Con todo" },
-  { k: "natural",  label: "Natural" },
-  { k: "cilantro", label: "Con cilantro" },
-  { k: "cebolla",  label: "Con cebolla" },
-];
-const PREP_LABEL = Object.fromEntries(PREPS.map((p) => [p.k, p.label]));
-
-/* extras de empaque (solo para llevar y domicilio) */
-function empaqueItems(precios = {}) {
-  return [
-    { key: "verdura-aparte", nombre: "Verdura aparte (sin costo)", corto: "Verdura aparte", cat: "empaque", precio: 0 },
-    { key: "bolsa-verdura", nombre: "Bolsa de verdura (zanahoria, pepino, limón)", corto: "Bolsa de verdura", cat: "empaque", precio: precios["bolsa-verdura"] ?? 0 },
-    { key: "tortilla-harina", nombre: "Tortillas extra (harina)", corto: "Tortillas harina", cat: "empaque", precio: precios["tortilla-harina"] ?? 0 },
-    { key: "tortilla-maiz", nombre: "Tortillas extra (maíz)", corto: "Tortillas maíz", cat: "empaque", precio: precios["tortilla-maiz"] ?? 0 },
-  ];
-}
-
-/* catálogo estándar (productos generados por las carnes) por categoría */
-function catalogoBase(carnes) {
+/* borradores de comanda: viven en App para no perderse al cambiar de pantalla */
+const normalizarPedido = (p) => ({
+  ordenes: (p?.ordenes?.length ? p.ordenes : [nuevaOrden(1)]).map((o) => ({ prep: "con-todo", ...o, items: o.items || [] })),
+  extras: p?.extras || [],
+});
+function borradorInicial(ctx, mesa) {
+  const desdeMesa = ctx.tipo === "aqui" && mesa?.estado === "borrador" && mesa.pedido;
   return {
-    taco: [
-      ...carnes.map((c) => ({ key: `taco-${c.id}`, nombre: `Taco ${c.nombre}` })),
-      { key: "quesa-maiz-queso", nombre: "Quesadilla de maíz (queso)" },
-      ...carnes.map((c) => ({ key: `taco-queso-${c.id}`, nombre: `Taco de queso ${c.nombre}` })),
-    ],
-    quesa: [
-      ...carnes.map((c) => ({ key: `gringa-${c.id}`, nombre: `Gringa ${c.nombre}` })),
-      ...carnes.map((c) => ({ key: `llenadora-${c.id}`, nombre: `Llenadora ${c.nombre}` })),
-      { key: "quesa-queso", nombre: "Quesadilla de queso" },
-    ],
-    volcan: [
-      ...carnes.map((c) => ({ key: `volcan-${c.id}`, nombre: `Volcán ${c.nombre}` })),
-      { key: "volcan-queso", nombre: "Volcán de queso" },
-    ],
-    costra: [
-      ...carnes.map((c) => ({ key: `costra-${c.id}`, nombre: `Costra ${c.nombre}` })),
-      { key: "costra-queso", nombre: "Costra de queso" },
-      ...carnes.map((c) => ({ key: `media-costra-${c.id}`, nombre: `Media costra ${c.nombre}` })),
-      { key: "media-costra-queso", nombre: "Media costra de queso" },
-    ],
+    pedido: desdeMesa ? normalizarPedido(clone(mesa.pedido)) : nuevoPedido(),
+    version: mesa ? (mesa.version ?? 0) : null,
+    activa: 0, tipo: ctx.tipo, dom: domVacio(), domOk: false, refLlevar: "", esExtra: false,
+    envio: null, envioId: null, sucio: false,
   };
 }
-
-function buildMenu(carnes, bebidas, extras = [], precios = {}, ocultos = []) {
-  const cAct = carnes.filter((c) => c.activo);
-  const P = (k) => precios[k] ?? 0;
-  const ex = (cat) => extras.filter((e) => e.activo && e.cat === cat)
-    .map((e) => ({ key: `extra-${e.id}`, nombre: e.nombre, cat, precio: Number(e.precio) || 0, extraId: e.id }));
-
-  const tacos = [
-    ...cAct.map((c) => ({ key: `taco-${c.id}`, nombre: `Taco ${c.nombre}`, cat: "taco", precio: P(`taco-${c.id}`) })),
-    { key: "quesa-maiz-queso", nombre: "Quesadilla de maíz (queso)", cat: "taco", precio: P("quesa-maiz-queso") },
-    ...cAct.map((c) => ({ key: `taco-queso-${c.id}`, nombre: `Taco de queso ${c.nombre}`, cat: "taco", precio: P(`taco-queso-${c.id}`) })),
-    ...ex("taco"),
-  ];
-  const quesa = [
-    ...cAct.map((c) => ({ key: `gringa-${c.id}`, nombre: `Gringa ${c.nombre}`, cat: "quesa", precio: P(`gringa-${c.id}`) })),
-    ...cAct.map((c) => ({ key: `llenadora-${c.id}`, nombre: `Llenadora ${c.nombre}`, cat: "quesa", precio: P(`llenadora-${c.id}`) })),
-    { key: "quesa-queso", nombre: "Quesadilla de queso", cat: "quesa", precio: P("quesa-queso") },
-    ...ex("quesa"),
-  ];
-  const volcan = [
-    ...cAct.map((c) => ({ key: `volcan-${c.id}`, nombre: `Volcán ${c.nombre}`, cat: "volcan", precio: P(`volcan-${c.id}`) })),
-    { key: "volcan-queso", nombre: "Volcán de queso", cat: "volcan", precio: P("volcan-queso") },
-    ...ex("volcan"),
-  ];
-  const costra = [
-    ...cAct.map((c) => ({ key: `costra-${c.id}`, nombre: `Costra ${c.nombre}`, cat: "costra", precio: P(`costra-${c.id}`) })),
-    { key: "costra-queso", nombre: "Costra de queso", cat: "costra", precio: P("costra-queso") },
-    ...cAct.map((c) => ({ key: `media-costra-${c.id}`, nombre: `Media costra ${c.nombre}`, cat: "costra", precio: P(`media-costra-${c.id}`) })),
-    { key: "media-costra-queso", nombre: "Media costra de queso", cat: "costra", precio: P("media-costra-queso") },
-    ...ex("costra"),
-  ];
-  const ocul = new Set(ocultos);
-  const f = (arr) => arr.filter((it) => !ocul.has(it.key));
-  const bebs = bebidas.filter((b) => b.activo && b.cantidad > 0)
-    .map((b) => ({ key: `beb-${b.id}`, nombre: b.nombre, cat: "bebida", invId: b.id, precio: Number(b.precio) || 0 }));
-  return { tacos: f(tacos), quesa: f(quesa), volcan: f(volcan), costra: f(costra), bebs };
-}
-
-const nuevaOrden = (n) => ({ id: uid(), nombre: `Orden ${n}`, items: [], prep: "con-todo" });
-const nuevoPedido = () => ({ ordenes: [nuevaOrden(1)], extras: [] });
-const domVacio = () => ({ nombre: "", direccion: "", referencia: "", telefono: "", pago: "efectivo", tiempo: "" });
-
-/* ============================== AVISOS (toasts) y CONFIRMACIÓN ============================== */
-let _toastSeq = 0;
-const _toastListeners = new Set();
-function toast(mensaje, tipo = "info") {
-  const t = { id: ++_toastSeq, mensaje, tipo };
-  _toastListeners.forEach((fn) => fn(t));
-}
-function Toaster() {
-  const [items, setItems] = useState([]);
-  useEffect(() => {
-    const add = (t) => {
-      setItems((xs) => [...xs, t]);
-      setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== t.id)), 2800);
-    };
-    _toastListeners.add(add);
-    return () => _toastListeners.delete(add);
-  }, []);
-  const quitar = (id) => setItems((xs) => xs.filter((x) => x.id !== id));
-  return (
-    <div className="toaster">
-      {items.map((t) => (
-        <div key={t.id} className={"toast " + t.tipo} onClick={() => quitar(t.id)}>
-          {t.tipo === "ok" ? "✓ " : t.tipo === "error" ? "⚠ " : ""}{t.mensaje}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-let _confirmListener = null;
-function confirmDialog(opts) {
-  const o = typeof opts === "string" ? { mensaje: opts } : (opts || {});
-  return new Promise((resolve) => {
-    if (_confirmListener) _confirmListener({ ...o, resolve });
-    else resolve(window.confirm(o.mensaje || "¿Confirmar?"));
-  });
-}
-function ConfirmHost() {
-  const [state, setState] = useState(null);
-  useEffect(() => { _confirmListener = setState; return () => { _confirmListener = null; }; }, []);
-  if (!state) return null;
-  const cerrar = (val) => { state.resolve(val); setState(null); };
-  return (
-    <div className="modal-bg" onClick={() => cerrar(false)}>
-      <div className="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
-        {state.titulo && <h3 className="confirm-title">{state.titulo}</h3>}
-        <p className="confirm-msg">{state.mensaje}</p>
-        <div className="modal-actions">
-          <button className="btn btn-ghost" onClick={() => cerrar(false)}>{state.cancelar || "Cancelar"}</button>
-          <button className={"btn " + (state.peligro ? "btn-danger" : "btn-primary")} onClick={() => cerrar(true)}>{state.confirmar || "Confirmar"}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-let _choiceListener = null;
-function choiceDialog(opts) {
-  return new Promise((resolve) => {
-    if (_choiceListener) _choiceListener({ ...opts, resolve });
-    else resolve(null);
-  });
-}
-function ChoiceHost() {
-  const [state, setState] = useState(null);
-  useEffect(() => { _choiceListener = setState; return () => { _choiceListener = null; }; }, []);
-  if (!state) return null;
-  const pick = (v) => { state.resolve(v); setState(null); };
-  return (
-    <div className="modal-bg" onClick={() => pick(null)}>
-      <div className="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
-        {state.titulo && <h3 className="confirm-title">{state.titulo}</h3>}
-        {state.mensaje && <p className="confirm-msg">{state.mensaje}</p>}
-        <div className="modal-actions choice-actions">
-          {state.opciones.map((o) => (
-            <button key={o.val} className={"btn " + (o.tipo || "btn-primary")} onClick={() => pick(o.val)}>{o.label}</button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-let _pinListener = null;
-function pedirPin(opts) {
-  const o = typeof opts === "string" ? { mensaje: opts } : (opts || {});
-  return new Promise((resolve) => {
-    if (_pinListener) _pinListener({ ...o, resolve });
-    else { const v = window.prompt(o.mensaje || "PIN de administrador:"); resolve(v ? v : null); }
-  });
-}
-function PinHost() {
-  const [state, setState] = useState(null);
-  const [pin, setPin] = useState("");
-  useEffect(() => { _pinListener = (s) => { setPin(""); setState(s); }; return () => { _pinListener = null; }; }, []);
-  if (!state) return null;
-  const cerrar = (val) => { state.resolve(val); setState(null); };
-  return (
-    <div className="modal-bg" onClick={() => cerrar(null)}>
-      <div className="modal modal-confirm" onClick={(e) => e.stopPropagation()}>
-        {state.titulo && <h3 className="confirm-title">{state.titulo}</h3>}
-        {state.mensaje && <p className="confirm-msg">{state.mensaje}</p>}
-        <input className="pin-input" type="password" inputMode="numeric" autoFocus value={pin}
-          onChange={(e) => setPin(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && pin) cerrar(pin); }} placeholder="PIN" />
-        <div className="modal-actions">
-          <button className="btn btn-ghost" onClick={() => cerrar(null)}>Cancelar</button>
-          <button className="btn btn-primary" disabled={!pin} onClick={() => cerrar(pin)}>Autorizar</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================== AVISOS DE COCINA ============================== */
-function CocinaAlertas({ data, onAbrir }) {
-  const seen = useRef(null);
-  const [nuevos, setNuevos] = useState([]);
-  const [permiso, setPermiso] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
-
-  useEffect(() => {
-    const pend = (data.cocina || []).filter((t) => t.estado !== "listo");
-    const ids = new Set(pend.map((t) => t.id));
-    if (seen.current === null) { seen.current = ids; return; }   // primer render: no avisar
-    const recien = pend.filter((t) => !seen.current.has(t.id));
-    seen.current = ids;
-    if (recien.length > 0) {
-      const t0 = recien[0];
-      notificar("Nuevo pedido", (t0.esExtra ? "Orden extra · " : "") + t0.origen + (recien.length > 1 ? ` (+${recien.length - 1})` : ""));
-      setNuevos((xs) => [...recien, ...xs].slice(0, 8));
-      if (getAutoprint()) recien.forEach((t) => onAbrir(t, true));
-    }
-  }, [data.cocina]);
-
-  const pedirPermiso = async () => { try { setPermiso(await Notification.requestPermission()); } catch {} };
-  const quitar = (id) => setNuevos((xs) => xs.filter((x) => x.id !== id));
-
-  if (nuevos.length === 0 && permiso !== "default") return null;
-  return (
-    <div className="cocina-alertas">
-      {permiso === "default" && (
-        <button className="alerta-permiso" onClick={pedirPermiso}>🔔 Activar avisos de nuevos pedidos</button>
-      )}
-      {nuevos.map((t) => (
-        <div key={t.id} className={"alerta-pedido" + (t.esExtra ? " extra" : "")}>
-          <span className="alerta-txt">🔔 {t.esExtra ? "Orden extra" : "Nuevo pedido"}: <b>{t.origen}</b></span>
-          <button className="btn btn-primary btn-sm" onClick={() => { onAbrir(t); quitar(t.id); }}><Printer size={14} /> Imprimir</button>
-          <button className="btn btn-ghost btn-sm" onClick={() => quitar(t.id)}><X size={14} /></button>
-        </div>
-      ))}
-    </div>
-  );
-}
+const tieneProductos = (b) => !!b && (contarProductos(b.pedido) > 0 || (b.pedido.extras || []).length > 0);
+const tieneCambios = (b) => !!b && b.sucio && tieneProductos(b);
+const claveBorrador = (ctx) => (ctx.tipo === "aqui" ? `mesa-${ctx.mesaId}` : ctx.tipo);
 
 /* ============================================================ */
 export default function App() {
+  const [sesion, setSesion] = useState(() => api.sesionGuardada());
+  const [pantalla, setPantalla] = useState(null);
+  const [errorPantalla, setErrorPantalla] = useState(null);
+  const [aviso, setAviso] = useState(null);
   const [data, setData] = useState(null);
-  const [user, setUser] = useState(null);
+  const [errorCarga, setErrorCarga] = useState(null);
+  const [conn, setConn] = useState(remoto ? "reconnecting" : "local");
+  const [sinRed, setSinRed] = useState(false);
   const [view, setView] = useState("mesas");
   const [ctx, setCtx] = useState(null);
-  const [conn, setConn] = useState(supabaseReady ? "reconnecting" : "local");
-  const [printTicket, setPrintTicket] = useState(null);   // ticket que el cocinero va a imprimir
+  const [borradores, setBorradores] = useState({});
+  const [printTicket, setPrintTicket] = useState(null);
   const [printAuto, setPrintAuto] = useState(false);
-  const dataRef = useRef(null);
-  dataRef.current = data;
+  const [cocinaIncierta, setCocinaIncierta] = useState(false);
+  const [cambiandoPin, setCambiandoPin] = useState(false);
+  const borradoresRef = useRef(borradores);
+  borradoresRef.current = borradores;
 
-  // Objeto semilla para el primer arranque (sirve para sembrar la BD o el respaldo local)
-  const seed = useMemo(() => ({
-    config: { nombreNegocio: "La Tequería", precios: preciosDefault(CARNES_DEFAULT), extras: [], ocultos: [] },
-    carnes: CARNES_DEFAULT, bebidas: BEBIDAS_DEFAULT,
-    mesas: Array.from({ length: NUM_MESAS }, (_, i) => ({ id: i + 1 })),
-    usuarios: USUARIOS_DEFAULT,
-    blob: normalize(defaultData()),
-  }), []);
+  const usuario = sesion?.usuario || null;
+  const debeCambiar = !!sesion?.debeCambiarPin;
 
-  // Cargar estado + suscribirse a cambios por tabla
-  useEffect(() => {
-    let unsub = () => {};
-    setStatusHandler(setConn);
-    (async () => {
-      const d = await loadAll(seed);
-      setData(d);
-      unsub = subscribeTables((fresh) => setData(fresh));
-    })();
-    return () => { setStatusHandler(null); unsub(); };
+  const cargarPantalla = useCallback(async () => {
+    setErrorPantalla(null);
+    try { setPantalla(await api.pantallaLogin()); setSinRed(false); }
+    catch (e) { setErrorPantalla(e); if (e.codigo === "RED") setSinRed(true); }
+  }, []);
+  useEffect(() => { if (!usuario) cargarPantalla(); }, [usuario, cargarPantalla]);
+
+  const cerrarSesion = useCallback((mensaje = null) => {
+    api.salir();
+    setSesion(null); setData(null); setBorradores({}); setView("mesas"); setCtx(null);
+    setAviso(mensaje); setCocinaIncierta(false); setErrorCarga(null); setCambiandoPin(false);
   }, []);
 
-  // Sin Supabase: persistimos el respaldo local en cada cambio
-  useEffect(() => {
-    if (!data || supabaseReady) return;
-    const t = setTimeout(() => saveBlob(data), 250);
-    return () => clearTimeout(t);
-  }, [data]);
+  const manejarError = useCallback((e) => {
+    if (!(e instanceof ErrorApi)) { console.error(e); toast("Ocurrió un error inesperado.", "error"); return; }
+    if (e.codigo === "SESION") { cerrarSesion(e.message); return; }
+    if (e.codigo === "CAMBIAR_PIN") { setSesion((s) => s && { ...s, debeCambiarPin: true }); return; }
+    if (e.codigo === "RED") setSinRed(true);
+    toast(e.message, "error");
+  }, [cerrarSesion]);
 
-  // Sesión única de cocina: latido mientras el cocinero esté dentro; libera al salir
+  // Cada parte del estado solo se reemplaza con la respuesta más reciente que se pidió para ella
+  const pedidas = useRef({});
+  const contador = useRef(0);
+  const refrescar = useCallback(async (partes = null) => {
+    const n = ++contador.current;
+    (partes || TODAS).forEach((p) => { pedidas.current[p] = n; });
+    try {
+      const r = await api.cargar(partes);
+      const vigente = (p) => pedidas.current[p] === n;
+      const parche = { yo: r.yo };
+      if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, precios: r.precios, extras: r.extras, ocultos: r.ocultos });
+      ["carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos"].forEach((p) => { if (p in r && vigente(p)) parche[p] = r[p]; });
+      if ("periodo" in r && vigente("historial")) parche.periodo = r.periodo;
+      setData((d) => ({ ...(d || {}), ...parche }));
+      setErrorCarga(null); setSinRed(false);
+      if (r.yo?.cambiarPin) setSesion((s) => (s && !s.debeCambiarPin ? { ...s, debeCambiarPin: true } : s));
+    } catch (e) {
+      if (e.codigo === "SESION") { cerrarSesion(e.message); return; }
+      if (e.codigo === "RED") setSinRed(true);
+      setErrorCarga(e);
+    }
+  }, [cerrarSesion]);
+
+  // Cargar estado y escuchar cambios mientras haya sesión
   useEffect(() => {
-    if (!user || user.rol !== "cocinero") return;
-    const sid = getSid();
+    if (!usuario || debeCambiar) return;
     let vivo = true;
-    const beat = async () => { const ok = await latidoCocina(sid); if (!ok && vivo) { toast("Otra cocina tomó la sesión en otro dispositivo.", "error"); setUser(null); } };
+    refrescar(null);
+    const unsub = api.suscribir((partes) => { if (vivo) refrescar(partes); }, (st) => { if (vivo) setConn(st); });
+    return () => { vivo = false; unsub(); };
+  }, [usuario?.id, debeCambiar, refrescar]);
+
+  // Sesión única de cocina: latido mientras el cocinero esté dentro
+  useEffect(() => {
+    if (!usuario || usuario.rol !== "cocinero" || debeCambiar) return;
+    let vivo = true;
+    const beat = async () => {
+      try {
+        const ok = await api.latido();
+        if (!vivo) return;
+        setCocinaIncierta(false);
+        if (ok === false) cerrarSesion("Otra cocina tomó la sesión en otro dispositivo.");
+      } catch (e) {
+        if (!vivo) return;
+        if (e.codigo === "SESION") cerrarSesion(e.message); else setCocinaIncierta(true);
+      }
+    };
+    beat();
     const iv = setInterval(beat, 15000);
-    const bye = () => liberarCocina(sid);
-    window.addEventListener("beforeunload", bye);
-    return () => { vivo = false; clearInterval(iv); window.removeEventListener("beforeunload", bye); liberarCocina(sid); };
-  }, [user?.id, user?.rol]);
+    return () => { vivo = false; clearInterval(iv); };
+  }, [usuario?.id, usuario?.rol, debeCambiar, cerrarSesion]);
 
-  // Acciones: actualizan la pantalla al instante y escriben en la base (o respaldo local)
-  const db = useMemo(() => makeDb(setData, dataRef), []);
+  // Avisar antes de cerrar la pestaña con comandas sin enviar ni guardar
+  useEffect(() => {
+    const f = (e) => { if (Object.values(borradoresRef.current).some(tieneCambios)) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", f);
+    return () => window.removeEventListener("beforeunload", f);
+  }, []);
+
+  // Acciones: cada una confirma con el servidor; si falla se avisa y se recarga lo afectado
+  const db = useMemo(() => {
+    const a = api.acciones;
+    const ejecutar = async (llamada, { partes = null, optimista, ok, silenciar = [] } = {}) => {
+      if (optimista) setData((d) => { const nd = clone(d); optimista(nd); return nd; });
+      try {
+        const r = await llamada();
+        setSinRed(false);
+        if (ok) toast(ok, "ok");
+        refrescar(partes);
+        return { ok: true, r };
+      } catch (e) {
+        if (!silenciar.includes(e.codigo)) manejarError(e);
+        refrescar(partes);
+        return { ok: false, error: e };
+      }
+    };
+    const enCocina = (nd, id, fn) => [nd.cocina, nd.historial].forEach((arr) => { const x = (arr || []).find((t) => t.id === id); if (x) fn(x); });
+    return {
+      async enviar(t) {
+        try {
+          const r = await a.enviar(t);
+          setSinRed(false);
+          refrescar(["mesas", "bebidas", "cocina", "historial"]);
+          return r;
+        } catch (e) {
+          if (e.codigo === "SESION" || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (e.codigo === "RED") setSinRed(true);
+          if (e.codigo === "MESA_OCUPADA" || e.codigo === "SIN_EXISTENCIA" || e.codigo === "PRODUCTO") refrescar(["mesas", "bebidas", "config", "carnes"]);
+          throw e;
+        }
+      },
+      guardarBorrador: (mesaId, pedido, version) => ejecutar(() => a.guardarBorrador(mesaId, pedido, version), { partes: ["mesas"], silenciar: ["CONFLICTO"] }),
+      liberarMesa: (mesaId) => ejecutar(() => a.liberarMesa(mesaId), { partes: ["mesas"] }),
+      reenviar: (mesaId) => ejecutar(() => a.reenviar(uid(), mesaId), { partes: ["cocina"], ok: "Reenviado a cocina" }),
+      setTicketEstado: (id, estado) => ejecutar(() => a.estadoTicket(id, estado), { partes: ["cocina", "historial"], optimista: (nd) => enCocina(nd, id, (x) => { x.estado = estado; }) }),
+      archivarTicket: (id) => ejecutar(() => a.archivar(id), { partes: ["cocina"], optimista: (nd) => { nd.cocina = nd.cocina.filter((t) => t.id !== id); } }),
+      corte: (adminPin) => ejecutar(() => a.corte(adminPin), { partes: ["cocina", "historial", "cortes", "gastos"] }),
+      ajustarBebida: (id, delta) => ejecutar(() => a.ajustarBebida(id, delta), { partes: ["bebidas"], optimista: (nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) b.cantidad = Math.max(0, b.cantidad + delta); } }),
+      updateBebida: (id, cambios) => ejecutar(() => a.actualizarBebida(id, cambios), { partes: ["bebidas"], optimista: (nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) Object.assign(b, cambios); } }),
+      addBebida: (nombre, precio, cantidad) => ejecutar(() => a.agregarBebida(nombre, precio, cantidad), { partes: ["bebidas"], ok: `Bebida "${nombre}" agregada` }),
+      removeBebida: (id) => ejecutar(() => a.eliminarBebida(id), { partes: ["bebidas"], optimista: (nd) => { nd.bebidas = nd.bebidas.filter((x) => x.id !== id); } }),
+      updateCarne: (id, activo) => ejecutar(() => a.actualizarCarne(id, activo), { partes: ["carnes"], optimista: (nd) => { const c = nd.carnes.find((x) => x.id === id); if (c) c.activo = activo; } }),
+      addCarne: (nombre) => ejecutar(() => a.agregarCarne(nombre), { partes: ["carnes", "config"], ok: `Carne "${nombre}" agregada` }),
+      removeCarne: (id) => ejecutar(() => a.eliminarCarne(id), { partes: ["carnes"], optimista: (nd) => { nd.carnes = nd.carnes.filter((x) => x.id !== id); } }),
+      setPrecio: (clave, precio) => ejecutar(() => a.fijarPrecio(clave, precio), { partes: ["config"], optimista: (nd) => { nd.precios = { ...nd.precios, [clave]: precio }; } }),
+      setExtraPrecio: (id, precio) => ejecutar(() => a.fijarPrecioExtra(id, precio), { partes: ["config"], optimista: (nd) => { nd.extras = nd.extras.map((e) => (e.id === id ? { ...e, precio } : e)); } }),
+      addExtra: (cat, nombre, precio) => ejecutar(() => a.agregarExtra(cat, nombre, precio), { partes: ["config"], ok: `"${nombre}" agregado` }),
+      removeExtra: (id) => ejecutar(() => a.eliminarExtra(id), { partes: ["config"], optimista: (nd) => { nd.extras = nd.extras.filter((e) => e.id !== id); } }),
+      toggleOculto: (clave) => ejecutar(() => a.alternarOculto(clave), { partes: ["config"], optimista: (nd) => { const s = new Set(nd.ocultos); s.has(clave) ? s.delete(clave) : s.add(clave); nd.ocultos = [...s]; } }),
+      addGasto: (concepto, monto) => ejecutar(() => a.agregarGasto(uid(), concepto, monto), { partes: ["gastos", "historial"], ok: "Gasto registrado" }),
+      removeGasto: (id) => ejecutar(() => a.eliminarGasto(id), { partes: ["gastos", "historial"], optimista: (nd) => { nd.gastos = nd.gastos.filter((g) => g.id !== id); } }),
+      crearUsuario: (adminPin, nombre, pin, rol) => ejecutar(() => a.crearUsuario(adminPin, nombre, pin, rol), { partes: ["usuarios"] }),
+      eliminarUsuario: (adminPin, id) => ejecutar(() => a.eliminarUsuario(adminPin, id), { partes: ["usuarios"] }),
+      restablecerPin: (adminPin, id, pin) => ejecutar(() => a.restablecerPin(adminPin, id, pin), { partes: ["usuarios"] }),
+    };
+  }, [manejarError, refrescar]);
+
   const go = useCallback((v, c = null) => { setView(v); setCtx(c); }, []);
+  const salir = async () => {
+    const n = Object.values(borradores).filter(tieneCambios).length;
+    if (n > 0 && !(await confirmDialog({ titulo: "Cerrar sesión", mensaje: `Hay ${n} comanda(s) sin enviar ni guardar en este dispositivo. Si sales se perderán.`, confirmar: "Salir y descartar", peligro: true }))) return;
+    cerrarSesion(null);
+  };
 
-  if (!data) return <div className="loading">Cargando…</div>;
-  if (!user) return <Login data={data} onLogin={setUser} conn={conn} />;
+  const hosts = (<><Toaster /><ConfirmHost /><ChoiceHost /><PinHost /></>);
 
-  // Si el usuario fue eliminado/cambiado desde otro dispositivo, cerrar sesión
-  const yo = data.usuarios.find((u) => u.id === user.id);
-  if (!yo) return <Login data={data} onLogin={setUser} conn={conn} aviso="Tu usuario ya no existe. Inicia sesión de nuevo." />;
-  const userActual = yo;
+  if (!usuario) {
+    return (<>
+      <Login pantalla={pantalla} error={errorPantalla} reintentar={cargarPantalla} aviso={aviso} sinRed={sinRed}
+        onEntrar={(r) => { setAviso(null); setSesion({ usuario: r.usuario, debeCambiarPin: r.debeCambiarPin }); }} />
+      {hosts}
+    </>);
+  }
+  if (debeCambiar) {
+    return (<>
+      <CambiarPin forzado usuario={usuario} onSalir={cerrarSesion}
+        onListo={() => { toast("PIN actualizado", "ok"); setSesion((s) => ({ ...s, debeCambiarPin: false })); }} />
+      {hosts}
+    </>);
+  }
+  if (!data || !data.mesas) {
+    return (<>
+      <style>{CSS}</style>
+      <div className="loading" role="status">
+        {errorCarga ? (<>
+          <p>No se pudieron cargar los datos: {errorCarga.message}</p>
+          <button className="btn btn-primary" onClick={() => refrescar(null)}><RefreshCw size={16} aria-hidden="true" /> Reintentar</button>
+          <button className="btn btn-ghost" onClick={() => cerrarSesion(null)}>Cerrar sesión</button>
+        </>) : "Cargando…"}
+      </div>
+      {hosts}
+    </>);
+  }
 
+  const userActual = data.yo || usuario;
   const props = { data, db, user: userActual, go, ctx };
   const abrirImpresion = (t, auto = false) => { setPrintAuto(!!auto); setPrintTicket(t); };
+  const claveCtx = ctx && view === "comanda" ? claveBorrador(ctx) : null;
 
   return (
     <div className="app">
       <style>{CSS}</style>
-      <TopBar data={data} user={userActual} view={view} go={go} conn={conn} onLogout={() => setUser(null)} />
+      <TopBar data={data} user={userActual} view={view} go={go} conn={sinRed ? "sinred" : conn}
+        onLogout={salir} onCambiarPin={() => setCambiandoPin(true)} />
+      {(errorCarga || sinRed) && (
+        <div className={"aviso-barra" + (sinRed ? " error" : "")} role="alert">
+          <span>{sinRed ? "Sin conexión con el servidor. Lo que ves puede no estar actualizado; los envíos no se confirmarán hasta reconectar."
+            : `No se pudieron actualizar los datos (${errorCarga.message}). Se muestra la última información válida.`}</span>
+          <button className="btn btn-sm btn-line" onClick={() => refrescar(null)}><RefreshCw size={14} aria-hidden="true" /> Reintentar</button>
+        </div>
+      )}
+      {cocinaIncierta && (
+        <div className="aviso-barra" role="status">
+          <span>No se pudo confirmar que este dispositivo siga siendo la cocina activa. Revisa la conexión.</span>
+        </div>
+      )}
       {userActual.rol === "cocinero" && <CocinaAlertas data={data} onAbrir={abrirImpresion} />}
       <main className="main">
-        {view === "mesas"      && (puede(userActual, "mesas") ? <Mesas {...props} /> : <SinAcceso />)}
-        {view === "comanda"    && (puede(userActual, "comanda") ? <Comanda {...props} /> : <SinAcceso />)}
-        {view === "cocina"     && (puede(userActual, "cocina") ? <Cocina {...props} /> : <SinAcceso />)}
+        {view === "mesas"      && (puede(userActual, "mesas") ? <Mesas {...props} borradores={borradores} /> : <SinAcceso />)}
+        {view === "comanda"    && (puede(userActual, "comanda") && ctx
+          ? <Comanda key={claveCtx} {...props} borrador={borradores[claveCtx]}
+              setBorrador={(fn) => setBorradores((bs) => ({ ...bs, [claveCtx]: fn(bs[claveCtx]) }))}
+              quitarBorrador={(soloSiLimpio) => setBorradores((bs) => {
+                const b = bs[claveCtx];
+                if (!b || (soloSiLimpio && (b.sucio || b.envio))) return bs;
+                const n = { ...bs }; delete n[claveCtx]; return n;
+              })} />
+          : <SinAcceso />)}
+        {view === "cocina"     && (puede(userActual, "cocina") ? <Cocina {...props} errorCarga={errorCarga || (sinRed ? { message: "sin conexión" } : null)} /> : <SinAcceso />)}
         {view === "inventario" && (puede(userActual, "inventario") ? <Inventario {...props} /> : <SinAcceso />)}
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
       </main>
       {printTicket && <TicketModal t={printTicket} negocio={data.nombreNegocio} autoPrint={printAuto}
         onClose={() => { setPrintTicket(null); setPrintAuto(false); }} />}
-      <Toaster />
-      <ConfirmHost />
-      <ChoiceHost />
-      <PinHost />
+      {cambiandoPin && (
+        <CambiarPin usuario={userActual} onSalir={cerrarSesion} onCancelar={() => setCambiandoPin(false)}
+          onListo={() => { setCambiandoPin(false); toast("PIN actualizado", "ok"); }} />
+      )}
+      {hosts}
     </div>
   );
-}
-
-/* ============================== ACCIONES (db) ============================== */
-function makeDb(setData, dataRef) {
-  const local = (fn) => setData((d) => { const nd = clone(d); fn(nd); return nd; });
-  const capHist = (nd) => { if (nd.historial.length > 400) nd.historial = nd.historial.slice(0, 400); };
-
-  return {
-    // ---- mesas ----
-    guardarMesa(mesaId, pedido, userNombre) {
-      const ocupa = pedido.ordenes.some((o) => o.items.length > 0);
-      const patch = { pedido: ocupa ? pedido : null, estado: ocupa ? "ocupada" : "libre", mesero: ocupa ? userNombre : null, hora: ocupa ? hora() : null };
-      local((nd) => { const m = nd.mesas.find((x) => x.id === mesaId); if (m) Object.assign(m, patch); });
-      io.updateMesa(mesaId, patch);
-    },
-    liberarMesa(mesaId) {
-      const patch = { pedido: null, estado: "libre", mesero: null, hora: null, extras: [] };
-      local((nd) => { const m = nd.mesas.find((x) => x.id === mesaId); if (m) Object.assign(m, patch); });
-      io.updateMesa(mesaId, patch);
-    },
-    // ---- tickets ----
-    enviarTicket(t, { esExtra, mesaId, pedido, userNombre }) {
-      // bebidas consumidas
-      const consumo = {};
-      (t.ordenes || []).forEach((o) => o.items.forEach((i) => { if (i.cat === "bebida" && i.invId) consumo[i.invId] = (consumo[i.invId] || 0) + i.cantidad; }));
-      local((nd) => {
-        nd.cocina.unshift(clone(t)); nd.historial.unshift(clone(t)); capHist(nd);
-        Object.entries(consumo).forEach(([bid, q]) => { const b = nd.bebidas.find((x) => x.id === bid); if (b) b.cantidad = Math.max(0, b.cantidad - q); });
-        if (esExtra) { const m = nd.mesas.find((x) => x.id === mesaId); if (m) { m.extras = m.extras || []; m.extras.push({ id: t.id, ordenes: clone(pedido.ordenes), extras: clone(pedido.extras || []), hora: t.hora, total: t.total }); } }
-        else if (t.tipo === "aqui" && mesaId) { const m = nd.mesas.find((x) => x.id === mesaId); if (m) { m.pedido = clone(pedido); m.estado = "ocupada"; m.mesero = userNombre; m.hora = t.hora; } }
-      });
-      io.addTicket(t);
-      const cur = dataRef.current;
-      Object.entries(consumo).forEach(([bid, q]) => { const b = cur.bebidas.find((x) => x.id === bid); if (b) io.updateBebida(bid, { cantidad: Math.max(0, b.cantidad - q) }); });
-      if (esExtra) { const m = cur.mesas.find((x) => x.id === mesaId); const ex = [...((m && m.extras) || []), { id: t.id, ordenes: pedido.ordenes, extras: pedido.extras || [], hora: t.hora, total: t.total }]; io.updateMesa(mesaId, { extras: ex }); }
-      else if (t.tipo === "aqui" && mesaId) io.updateMesa(mesaId, { pedido, estado: "ocupada", mesero: userNombre, hora: t.hora });
-    },
-    setTicketEstado(id, estado) {
-      local((nd) => { [nd.cocina, nd.historial].forEach((arr) => { const x = arr.find((t) => t.id === id); if (x) x.estado = estado; }); });
-      io.updateTicket(id, { estado });
-    },
-    archivarTicket(id) {
-      local((nd) => { nd.cocina = nd.cocina.filter((t) => t.id !== id); });
-      io.updateTicket(id, { archivado_cocina: true });
-    },
-    // Reenvía la orden de una mesa a la cocina para reimprimir (NO cuenta como venta)
-    reenviarCocina(t) {
-      const copia = { ...clone(t), id: uid(), estado: "pendiente", reenvio: true, total: 0, hora: hora(), fecha: fecha() };
-      local((nd) => { nd.cocina.unshift(clone(copia)); });
-      io.addTicket(copia);
-    },
-    async hacerCorte(adminPin, detalle) {
-      const cur = dataRef.current; const h = cur.historial || [];
-      const total = h.reduce((s, t) => s + (t.total != null ? t.total : 0), 0);
-      const id = uid(), f = fecha(), hr = hora();
-      if (supabaseReady) { const ok = await io.hacerCorte(adminPin, id, f, hr, detalle); if (!ok) return false; }
-      local((nd) => { nd.cortes.unshift({ id, fecha: f, hora: hr, tickets: h.length, total, detalle }); nd.historial = []; nd.cocina = []; });
-      return true;
-    },
-    // ---- bebidas ----
-    updateBebida(id, patch) { local((nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) Object.assign(b, patch); }); io.updateBebida(id, patch); },
-    addBebida(b) { local((nd) => nd.bebidas.push({ ...b })); io.addBebida(b); },
-    removeBebida(id) { local((nd) => { nd.bebidas = nd.bebidas.filter((x) => x.id !== id); }); io.removeBebida(id); },
-    // ---- carnes ----
-    addCarne(nombre) {
-      const id = slug(nombre);
-      const precios = { [`taco-${id}`]: 20, [`taco-queso-${id}`]: 30, [`gringa-${id}`]: 45, [`llenadora-${id}`]: 55, [`volcan-${id}`]: 40, [`costra-${id}`]: 50, [`media-costra-${id}`]: 28 };
-      local((nd) => { nd.carnes.push({ id, nombre, activo: true }); nd.precios = { ...nd.precios, ...precios }; });
-      io.addCarne({ id, nombre }, (dataRef.current.carnes.length));
-      io.saveConfig({ precios: { ...dataRef.current.precios } });
-    },
-    updateCarne(id, patch) { local((nd) => { const c = nd.carnes.find((x) => x.id === id); if (c) Object.assign(c, patch); }); io.updateCarne(id, patch); },
-    removeCarne(id) { local((nd) => { nd.carnes = nd.carnes.filter((x) => x.id !== id); }); io.removeCarne(id); },
-    // ---- config (precios / extras / ocultos) ----
-    setPrecio(key, val) { const precios = { ...dataRef.current.precios, [key]: val }; local((nd) => { nd.precios = precios; }); io.saveConfig({ precios }); },
-    setExtraPrecio(id, val) { const extras = dataRef.current.extras.map((e) => e.id === id ? { ...e, precio: val } : e); local((nd) => { nd.extras = extras; }); io.saveConfig({ extras }); },
-    addExtra(cat, nombre, precio) { const extras = [...dataRef.current.extras, { id: uid(), nombre, cat, precio, activo: true }]; local((nd) => { nd.extras = extras; }); io.saveConfig({ extras }); },
-    removeExtra(id) { const extras = dataRef.current.extras.filter((e) => e.id !== id); local((nd) => { nd.extras = extras; }); io.saveConfig({ extras }); },
-    toggleOculto(key) { const set = new Set(dataRef.current.ocultos || []); set.has(key) ? set.delete(key) : set.add(key); const ocultos = [...set]; local((nd) => { nd.ocultos = ocultos; }); io.saveConfig({ ocultos }); },
-    // ---- gastos ----
-    addGasto(g) { local((nd) => nd.gastos.unshift({ ...g })); io.addGasto(g); },
-    removeGasto(id) { local((nd) => { nd.gastos = nd.gastos.filter((x) => x.id !== id); }); io.removeGasto(id); },
-    // ---- usuarios ----
-    async crearUsuario(u, adminPin) {
-      if (supabaseReady) { const ok = await io.crearUsuario(u, adminPin); if (!ok) return false; }
-      local((nd) => nd.usuarios.push({ id: u.id, nombre: u.nombre, rol: u.rol, pin: u.pin }));
-      return true;
-    },
-    async eliminarUsuario(id, adminPin) {
-      if (supabaseReady) { const ok = await io.eliminarUsuario(id, adminPin); if (!ok) return false; }
-      local((nd) => { nd.usuarios = nd.usuarios.filter((x) => x.id !== id); });
-      return true;
-    },
-  };
 }
 
 function SinAcceso() {
@@ -594,90 +314,187 @@ function SinAcceso() {
 }
 
 /* ============================== LOGIN ============================== */
-function Login({ data, onLogin, conn, aviso }) {
+function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
   const [sel, setSel] = useState(null);
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const entrar = async () => {
-    if (busy || !sel) return;
+  const idPin = useId();
+
+  const entrar = async (e) => {
+    e?.preventDefault();
+    if (busy || !sel || !pin) return;
     setBusy(true); setErr("");
     try {
-      let u = null;
-      if (supabaseReady) {
-        u = await dbLogin(sel, pin);
-      } else {
-        const local = data.usuarios.find((x) => x.id === sel);
-        if (local && local.pin === pin) u = local;
-      }
-      if (!u) { setErr("PIN incorrecto"); setPin(""); return; }
-      // Solo un dispositivo cocinero a la vez
-      if (u.rol === "cocinero") {
-        const ok = await claimCocina(getSid());
-        if (!ok) { setErr("Ya hay una cocina abierta en otro dispositivo."); setPin(""); return; }
-      }
-      onLogin(u);
+      const r = await api.entrar(sel, pin);
+      if (!r.ok) { setErr(mensajePin(r)); setPin(""); return; }
+      onEntrar(r);
+    } catch (ex) {
+      setErr(ex instanceof ErrorApi ? ex.message : "No se pudo entrar. Inténtalo de nuevo.");
     } finally { setBusy(false); }
   };
-  const online = conn === "online";
-  const connTxt = conn === "online" ? "● En línea — sincronizado entre dispositivos"
-    : conn === "reconnecting" ? "● Conectando…"
-    : "● Modo local (configura Supabase para sincronizar)";
-  const connCol = conn === "online" ? "var(--ok)" : conn === "reconnecting" ? "var(--maiz)" : "var(--alerta)";
+
+  const connTxt = !remoto ? "● Modo local: los datos se guardan solo en este navegador"
+    : sinRed || error ? "● Sin conexión con el servidor" : "● Conectado al servidor";
+  const connCol = !remoto ? "var(--alerta)" : sinRed || error ? "var(--alerta)" : "var(--ok)";
+
+  let cuerpo;
+  if (error) {
+    cuerpo = (<div role="alert">
+      <div className="login-err">{error.message}</div>
+      <button className="btn btn-primary btn-block" onClick={reintentar}><RefreshCw size={16} aria-hidden="true" /> Reintentar</button>
+    </div>);
+  } else if (!pantalla) {
+    cuerpo = <p role="status">Cargando…</p>;
+  } else if (!pantalla.hayAdmin) {
+    cuerpo = remoto ? (
+      <div className="login-setup">
+        <b>Falta el primer administrador.</b> Ejecuta en Supabase → SQL Editor:
+        <code>select public.crear_admin_inicial('Tu nombre', 'tu PIN');</code>
+        Después recarga esta página.
+      </div>
+    ) : <CrearAdminLocal onListo={reintentar} />;
+  } else {
+    cuerpo = (<>
+      <div className="login-users" role="group" aria-label="¿Quién eres?">
+        {pantalla.usuarios.map((u) => (
+          <button key={u.id} type="button" className={"user-chip" + (sel === u.id ? " on" : "")} aria-pressed={sel === u.id}
+            onClick={() => { setSel(u.id); setErr(""); setPin(""); }}>{u.nombre}</button>
+        ))}
+      </div>
+      {sel && (
+        <form onSubmit={entrar}>
+          <label className="sr-only" htmlFor={idPin}>PIN</label>
+          <input id={idPin} className="pin-input" type="password" inputMode="numeric" autoComplete="off" placeholder="PIN" autoFocus
+            aria-invalid={!!err} aria-describedby={err ? idPin + "-e" : undefined}
+            value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))} />
+          {err && <div className="login-err" id={idPin + "-e"} role="alert">{err}</div>}
+          <button type="submit" className="btn btn-primary btn-block" disabled={busy || !pin}>{busy ? "Entrando…" : "Entrar"}</button>
+        </form>
+      )}
+    </>);
+  }
+
   return (
     <div className="login">
       <style>{CSS}</style>
       <div className="login-card">
-        <div className="brand-mark">🌵</div>
-        <h1 className="brand-title">{data.nombreNegocio}</h1>
+        <div className="brand-mark" aria-hidden="true">🌵</div>
+        <h1 className="brand-title">{pantalla?.negocio || "La Tequería"}</h1>
         <p className="brand-sub">Sistema de comandas</p>
-        {aviso && <div className="login-err">{aviso}</div>}
-        <div className="login-users">
-          {data.usuarios.map((u) => (
-            <button key={u.id} className={"user-chip" + (sel === u.id ? " on" : "")}
-              onClick={() => { setSel(u.id); setErr(""); setPin(""); }}>{u.nombre}</button>
-          ))}
-        </div>
-        {sel && (
-          <>
-            <input className="pin-input" type="password" inputMode="numeric" placeholder="PIN"
-              value={pin} onChange={(e) => setPin(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && entrar()} />
-            {err && <div className="login-err">{err}</div>}
-            <button className="btn btn-primary btn-block" disabled={busy} onClick={entrar}>{busy ? "Entrando…" : "Entrar"}</button>
-          </>
-        )}
-        <p className="login-hint" style={{ marginTop: 10, color: connCol }}>{connTxt}</p>
+        {aviso && <div className="login-err" role="alert">{aviso}</div>}
+        {cuerpo}
+        <p className="login-hint" style={{ color: connCol }}>{connTxt}</p>
+      </div>
+    </div>
+  );
+}
+
+function CrearAdminLocal({ onListo }) {
+  const [nombre, setNombre] = useState("");
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const id = useId();
+  const crear = async (e) => {
+    e.preventDefault(); setErr("");
+    try { await api.crearAdminInicial(nombre, pin); onListo(); }
+    catch (ex) { setErr(ex.message); }
+  };
+  return (
+    <form onSubmit={crear}>
+      <p className="login-setup">Primera vez en este navegador: crea el administrador.</p>
+      <div className="campo"><label htmlFor={id + "n"}>Nombre</label>
+        <input id={id + "n"} className="inp" value={nombre} onChange={(e) => setNombre(e.target.value)} autoComplete="off" /></div>
+      <div className="campo"><label htmlFor={id + "p"}>PIN (4 a 8 dígitos, no trivial)</label>
+        <input id={id + "p"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={pin}
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))} /></div>
+      {err && <div className="login-err" role="alert">{err}</div>}
+      <button type="submit" className="btn btn-primary btn-block">Crear administrador</button>
+    </form>
+  );
+}
+
+/* ============================== CAMBIO DE PIN ============================== */
+function CambiarPin({ forzado, usuario, onListo, onCancelar, onSalir }) {
+  const [actual, setActual] = useState("");
+  const [nuevo, setNuevo] = useState("");
+  const [conf, setConf] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const id = useId();
+  const soloDigitos = (fn) => (e) => fn(e.target.value.replace(/\D/g, "").slice(0, 8));
+
+  const guardar = async (e) => {
+    e.preventDefault(); setErr("");
+    if (!PIN_RE.test(nuevo)) { setErr("El PIN nuevo debe tener de 4 a 8 dígitos."); return; }
+    if (pinDebil(nuevo)) { setErr(mensajePin({ error: "debil" })); return; }
+    if (nuevo !== conf) { setErr("La confirmación no coincide con el PIN nuevo."); return; }
+    setBusy(true);
+    try {
+      const r = await api.cambiarPin(actual, nuevo);
+      if (r.ok) onListo(); else setErr(mensajePin(r));
+    } catch (ex) {
+      if (ex.codigo === "SESION") onSalir(ex.message); else setErr(ex.message);
+    } finally { setBusy(false); }
+  };
+
+  const form = (
+    <form onSubmit={guardar} className="modal-body">
+      {forzado && <p style={{ margin: "0 0 8px" }}>Hola, <b>{usuario.nombre}</b>. Tu PIN es de demostración o muy fácil de adivinar: elige uno nuevo para continuar.</p>}
+      <label htmlFor={id + "a"}>PIN actual</label>
+      <input id={id + "a"} className="inp" type="password" inputMode="numeric" autoComplete="off" data-autofocus value={actual} onChange={soloDigitos(setActual)} />
+      <label htmlFor={id + "n"}>PIN nuevo (4 a 8 dígitos)</label>
+      <input id={id + "n"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={nuevo} onChange={soloDigitos(setNuevo)} />
+      <label htmlFor={id + "c"}>Confirma el PIN nuevo</label>
+      <input id={id + "c"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={conf} onChange={soloDigitos(setConf)} />
+      {err && <div className="login-err" role="alert" style={{ marginTop: 8 }}>{err}</div>}
+      <div className="modal-actions" style={{ padding: "12px 0 0", border: 0 }}>
+        {forzado
+          ? <button type="button" className="btn btn-ghost" onClick={() => onSalir(null)}>Salir</button>
+          : <button type="button" className="btn btn-ghost" onClick={onCancelar}>Cancelar</button>}
+        <button type="submit" className="btn btn-primary" disabled={busy || !actual || !nuevo || !conf}>{busy ? "Guardando…" : "Cambiar PIN"}</button>
+      </div>
+    </form>
+  );
+
+  if (!forzado) return <Modal titulo="Cambiar mi PIN" icono={<KeyRound size={20} aria-hidden="true" />} onClose={onCancelar}>{form}</Modal>;
+  return (
+    <div className="login">
+      <style>{CSS}</style>
+      <div className="login-card" style={{ textAlign: "left" }}>
+        <h1 className="brand-title" style={{ fontSize: 24 }}>Cambia tu PIN</h1>
+        {form}
       </div>
     </div>
   );
 }
 
 /* ============================== TOPBAR ============================== */
-function TopBar({ data, user, view, go, conn, onLogout }) {
+function TopBar({ data, user, view, go, conn, onLogout, onCambiarPin }) {
   const items = [
-    { id: "mesas", label: "Mesas", icon: Utensils },
-    { id: "cocina", label: "Cocina", icon: ChefHat },
-    { id: "inventario", label: "Inventario", icon: Package },
-    { id: "gastos", label: "Gastos", icon: Wallet },
-    { id: "admin", label: "Administración", icon: Settings },
+    { id: "mesas", label: "Mesas", corto: "Mesas", icon: Utensils },
+    { id: "cocina", label: "Cocina", corto: "Cocina", icon: ChefHat },
+    { id: "inventario", label: "Inventario", corto: "Invent.", icon: Package },
+    { id: "gastos", label: "Gastos", corto: "Gastos", icon: Wallet },
+    { id: "admin", label: "Administración", corto: "Admin", icon: Settings },
   ].filter((it) => puede(user, it.id));
-  const pendientes = data.cocina.filter((t) => t.estado !== "listo").length;
+  const pendientes = (data.cocina || []).filter((t) => t.estado !== "listo").length;
   const connCol = conn === "online" ? "var(--ok)" : conn === "reconnecting" ? "var(--maiz)" : "var(--alerta)";
-  const connTitle = conn === "online" ? "En línea" : conn === "reconnecting" ? "Conectando…" : "Modo local";
+  const connTitle = conn === "online" ? "En línea, sincronizado" : conn === "reconnecting" ? "Conectando al tiempo real…"
+    : conn === "sinred" ? "Sin conexión con el servidor" : "Modo local (solo este navegador)";
   return (
     <header className="topbar">
-      <div className="topbar-brand"><span className="topbar-cactus">🌵</span>
+      <div className="topbar-brand"><span className="topbar-cactus" aria-hidden="true">🌵</span>
         <span className="topbar-name">{data.nombreNegocio}</span>
-        <span className="conn-dot" title={connTitle} style={{ background: connCol }} /></div>
-      <nav className="topbar-nav">
+        <span className="conn-dot" role="img" aria-label={connTitle} title={connTitle} style={{ background: connCol }} /></div>
+      <nav className="topbar-nav" aria-label="Secciones" style={{ "--n": items.length }}>
         {items.map((it) => {
           const I = it.icon;
           const active = view === it.id || (view === "comanda" && it.id === "mesas");
           return (
-            <button key={it.id} className={"nav-btn" + (active ? " on" : "")} onClick={() => go(it.id)}>
-              <I size={18} /><span>{it.label}</span>
-              {it.id === "cocina" && pendientes > 0 && <em className="badge">{pendientes}</em>}
+            <button key={it.id} type="button" className={"nav-btn" + (active ? " on" : "")} aria-current={active ? "page" : undefined} onClick={() => go(it.id)}>
+              <I size={18} aria-hidden="true" /><span className="nav-largo">{it.label}</span><span className="nav-corto">{it.corto}</span>
+              {it.id === "cocina" && pendientes > 0 && <em className="badge" aria-label={`${pendientes} pendientes`}>{pendientes}</em>}
             </button>
           );
         })}
@@ -685,39 +502,48 @@ function TopBar({ data, user, view, go, conn, onLogout }) {
       <div className="topbar-user">
         <span className="user-name">{user.nombre}</span>
         <span className={"rol-tag " + user.rol}>{ROLES[user.rol] || user.rol}</span>
-        <button className="nav-btn ghost" onClick={onLogout}><LogOut size={18} /></button></div>
+        <button type="button" className="nav-btn ghost" onClick={onCambiarPin} aria-label="Cambiar mi PIN" title="Cambiar mi PIN"><KeyRound size={18} aria-hidden="true" /></button>
+        <button type="button" className="nav-btn ghost" onClick={onLogout} aria-label={`Cerrar sesión de ${user.nombre}`} title="Cerrar sesión"><LogOut size={18} aria-hidden="true" /></button>
+      </div>
     </header>
   );
 }
 
 /* ============================== MESAS ============================== */
-function Mesas({ data, go, user }) {
+function Mesas({ data, go, user, borradores }) {
   const puedeComanda = puede(user, "comanda");
-  const domsActivos = data.cocina.filter((t) => t.tipo === "domicilio" && t.estado !== "listo").length;
+  const domsActivos = (data.cocina || []).filter((t) => t.tipo === "domicilio" && t.estado !== "listo").length;
+  const capturando = (k) => tieneCambios(borradores[k]);
   return (
     <div className="screen">
       <div className="screen-head">
         <div>
           <h2>Mesas</h2>
           <p className="muted">{puedeComanda
-            ? "Toca una mesa para tomar su orden. Para llevar y Domicilio están abajo como un cuadro más."
+            ? "Toca una mesa para tomar su orden. Para llevar y Domicilio están al final."
             : "Vista de mesas (solo lectura)."}</p>
         </div>
       </div>
       <div className="mesas-grid">
         {data.mesas.map((m) => {
-          const ocupada = m.estado === "ocupada";
+          const estado = m.estado === "ocupada" ? "ocupada" : m.estado === "borrador" ? "borrador" : "libre";
           const ordenes = m.pedido?.ordenes?.length || 0;
-          const items = m.pedido?.ordenes?.reduce((s, p) => s + p.items.reduce((a, i) => a + i.cantidad, 0), 0) || 0;
+          const items = contarProductos(m.pedido);
+          const etiqueta = { ocupada: "Ocupada", borrador: "Borrador", libre: "Libre" }[estado];
+          const local = capturando(`mesa-${m.id}`);
           return (
-            <button key={m.id} className={"mesa-card" + (ocupada ? " ocupada" : "") + (puedeComanda ? "" : " solo-ver")}
+            <button key={m.id} type="button" className={"mesa-card " + estado + (puedeComanda ? "" : " solo-ver")}
+              aria-disabled={!puedeComanda}
+              aria-label={`Mesa ${m.id}, ${etiqueta}${estado === "borrador" ? " (guardado, no enviado a cocina)" : ""}${local ? ", con cambios sin guardar en este dispositivo" : ""}`}
               onClick={() => puedeComanda && go("comanda", { tipo: "aqui", mesaId: m.id })}>
-              <div className="mesa-num">{m.id}</div>
-              <div className="mesa-estado">{ocupada ? "Ocupada" : "Libre"}</div>
-              {ocupada && (
-                <div className="mesa-info">
+              {local && <span className="sin-guardar" aria-hidden="true">Sin guardar</span>}
+              <div className="mesa-num" aria-hidden="true">{m.id}</div>
+              <div className="mesa-estado" aria-hidden="true">{etiqueta}</div>
+              {estado !== "libre" && (
+                <div className="mesa-info" aria-hidden="true">
                   {m.mesero && <span className="mesa-mesero">{m.mesero}</span>}
                   <span>{items} prod. · {ordenes} órd.{m.hora ? ` · ${m.hora}` : ""}</span>
+                  {estado === "borrador" && <span>No enviado a cocina</span>}
                 </div>
               )}
             </button>
@@ -725,15 +551,16 @@ function Mesas({ data, go, user }) {
         })}
 
         {puedeComanda && (
-          <button className="mesa-card especial-card llevar" onClick={() => go("comanda", { tipo: "llevar" })}>
-            <ShoppingBag size={34} />
+          <button type="button" className="mesa-card especial-card llevar" onClick={() => go("comanda", { tipo: "llevar" })}>
+            {capturando("llevar") && <span className="sin-guardar">Sin enviar</span>}
+            <ShoppingBag size={34} aria-hidden="true" />
             <div className="especial-card-label">Para llevar</div>
           </button>
         )}
-
         {puedeComanda && (
-          <button className="mesa-card especial-card domicilio" onClick={() => go("comanda", { tipo: "domicilio" })}>
-            <Bike size={34} />
+          <button type="button" className="mesa-card especial-card domicilio" onClick={() => go("comanda", { tipo: "domicilio" })}>
+            {capturando("domicilio") && <span className="sin-guardar">Sin enviar</span>}
+            <Bike size={34} aria-hidden="true" />
             <div className="especial-card-label">Domicilio</div>
             {domsActivos > 0 && <span className="especial-badge">{domsActivos} en curso</span>}
           </button>
@@ -744,182 +571,190 @@ function Mesas({ data, go, user }) {
 }
 
 /* ============================== COMANDA ============================== */
-function Comanda({ data, db, user, go, ctx }) {
+function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrador }) {
   const isPhone = useIsPhone();
   const menu = useMemo(() => buildMenu(data.carnes, data.bebidas, data.extras, data.precios, data.ocultos),
     [data.carnes, data.bebidas, data.extras, data.precios, data.ocultos]);
+  const entrada = ctx.tipo;               // cómo se abrió: mesa, llevar o domicilio
+  const mesaId = ctx.mesaId || null;
+  const mesaInfo = mesaId ? data.mesas.find((m) => m.id === mesaId) : null;
 
-  const [tipo, setTipo] = useState(ctx?.tipo || "aqui");
-  const [entrada] = useState(ctx?.tipo || "aqui"); // cómo se abrió: mesa, llevar o domicilio
-  const [mesaId, setMesaId] = useState(ctx?.mesaId || null);
-  const [pedido, setPedido] = useState(() => {
-    if (ctx?.tipo === "aqui" && ctx?.mesaId) {
-      const m = data.mesas.find((x) => x.id === ctx.mesaId);
-      // Mesa ocupada -> empezamos vacío (su orden se ve en el resumen / orden extra)
-      if (m && m.estado === "ocupada") return nuevoPedido();
-      if (m?.pedido) { const ped = clone(m.pedido); if (!ped.extras) ped.extras = []; return ped; }
-    }
-    return nuevoPedido();
+  const b = borrador || borradorInicial(ctx, mesaInfo);
+  const cambiar = (fn, sucio = true) => setBorrador((prev) => {
+    const nb = fn(prev || borradorInicial(ctx, mesaInfo));
+    return sucio ? { ...nb, sucio: true } : nb;
   });
-  const [activa, setActiva] = useState(0);
-  const [dom, setDom] = useState(domVacio());
-  const [domOk, setDomOk] = useState(false);
-  const [modalDom, setModalDom] = useState(ctx?.tipo === "domicilio");
-  const [refLlevar, setRefLlevar] = useState(""); // nombre de referencia (pestaña Para llevar)
-  const [esExtra, setEsExtra] = useState(false);  // orden extra sobre una mesa ya ocupada
+  const { pedido, tipo, dom, domOk, refLlevar, esExtra, envio } = b;
+  const activa = Math.min(b.activa, pedido.ordenes.length - 1);
+  const setPedido = (fn) => cambiar((d) => ({ ...d, pedido: fn(clone(d.pedido)) }));
+  const setActiva = (i) => cambiar((d) => ({ ...d, activa: i }), false);
+
+  const [modalDom, setModalDom] = useState(entrada === "domicilio" && !domOk);
   const [ticket, setTicket] = useState(null);
   const [pane, setPane] = useState("menu"); // celular: menu | orden
-  const sending = useRef(false);
+  const [q, setQ] = useState("");
+  const montado = useRef(true);
+  useEffect(() => {
+    // ids estables desde el primer render; al salir sin cambios no se conserva (manda lo del servidor)
+    if (!borrador) setBorrador((prev) => prev || borradorInicial(ctx, mesaInfo));
+    return () => { montado.current = false; quitarBorrador(true); };
+  }, []);
 
   const extras = pedido.extras || [];
-  const totalProd = pedido.ordenes.reduce((s, p) => s + p.items.reduce((a, i) => a + i.cantidad, 0), 0);
-  const totalExtras = extras.reduce((a, e) => a + e.cantidad * (e.precio || 0), 0);
-  const totalOrdenes = pedido.ordenes.reduce((s, p) => s + p.items.reduce((a, i) => a + i.cantidad * (i.precio || 0), 0), 0);
-  const totalDinero = totalOrdenes + totalExtras;
+  const totalProd = contarProductos(pedido);
+  const totalDinero = ticketTotal(pedido);
   const vacio = totalProd === 0 && extras.length === 0;
-
+  const enviando = envio?.estado === "enviando";
   const mostrarExtras = tipo === "llevar" || tipo === "domicilio";
   const empaqueCat = useMemo(() => empaqueItems(data.precios), [data.precios]);
+  const mesaOcupada = entrada === "aqui" && mesaInfo?.estado === "ocupada";
+  const mesaBorrador = entrada === "aqui" && mesaInfo?.estado === "borrador";
 
   const addExtraPedido = (item) => setPedido((p) => {
-    const np = clone(p); if (!np.extras) np.extras = [];
-    const ex = np.extras.find((e) => e.key === item.key);
-    if (ex) ex.cantidad += 1; else np.extras.push({ ...item, cantidad: 1 });
-    return np;
+    const ex = p.extras.find((e) => e.key === item.key);
+    if (ex) ex.cantidad += 1; else p.extras.push({ ...item, cantidad: 1 });
+    return p;
   });
   const setCantExtra = (key, delta) => setPedido((p) => {
-    const np = clone(p); const e = np.extras.find((x) => x.key === key); if (!e) return np;
-    e.cantidad += delta; if (e.cantidad <= 0) np.extras = np.extras.filter((x) => x.key !== key);
-    return np;
+    const e = p.extras.find((x) => x.key === key); if (!e) return p;
+    e.cantidad += delta; if (e.cantidad <= 0) p.extras = p.extras.filter((x) => x.key !== key);
+    return p;
   });
-
-  const addItemTo = (idx, item) => setPedido((p) => {
-    const np = clone(p); const o = np.ordenes[idx];
+  const addItem = (item) => setPedido((p) => {
+    const o = p.ordenes[Math.min(activa, p.ordenes.length - 1)];
     const ex = o.items.find((i) => i.key === item.key);
-    if (ex) ex.cantidad += 1; else o.items.push({ ...item, cantidad: 1 });
-    return np;
+    if (ex) ex.cantidad += 1; else o.items.push({ key: item.key, nombre: item.nombre, cat: item.cat, precio: item.precio, cantidad: 1, ...(item.invId ? { invId: item.invId } : {}) });
+    return p;
   });
-  const addItem = (item) => addItemTo(activa, item);
-  const setPrep = (idx, k) => setPedido((p) => { const np = clone(p); np.ordenes[idx].prep = k; return np; });
+  const setPrep = (idx, k) => setPedido((p) => { p.ordenes[idx].prep = k; return p; });
   const setCant = (idx, key, delta) => setPedido((p) => {
-    const np = clone(p); const o = np.ordenes[idx];
-    const it = o.items.find((i) => i.key === key); if (!it) return np;
+    const o = p.ordenes[idx];
+    const it = o.items.find((i) => i.key === key); if (!it) return p;
     it.cantidad += delta; if (it.cantidad <= 0) o.items = o.items.filter((i) => i.key !== key);
-    return np;
+    return p;
   });
-  const addOrden = () => {
-    setPedido((p) => { const np = clone(p); np.ordenes.push(nuevaOrden(np.ordenes.length + 1)); return np; });
-    setActiva(pedido.ordenes.length);
-    if (isPhone) setPane("orden");
+  const addOrden = () => cambiar((d) => {
+    const p = clone(d.pedido); p.ordenes.push(nuevaOrden(p.ordenes.length + 1));
+    return { ...d, pedido: p, activa: p.ordenes.length - 1 };
+  });
+  const borrarOrden = async (idx) => {
+    const o = pedido.ordenes[idx];
+    const n = o.items.reduce((a, i) => a + i.cantidad, 0);
+    if (n > 0 && !(await confirmDialog({ titulo: "Eliminar orden", mensaje: `¿Eliminar «${o.nombre}» con ${n} producto(s)?`, confirmar: "Eliminar", peligro: true }))) return;
+    cambiar((d) => {
+      const p = clone(d.pedido); if (p.ordenes.length === 1) return d;
+      p.ordenes.splice(idx, 1);
+      const a = d.activa === idx ? 0 : d.activa > idx ? d.activa - 1 : d.activa;
+      return { ...d, pedido: p, activa: a };
+    });
   };
-  const borrarOrden = (idx) => {
-    setPedido((p) => { if (p.ordenes.length === 1) return p; const np = clone(p); np.ordenes.splice(idx, 1); return np; });
-    setActiva(0);
-  };
-  const renombrar = (idx, nombre) => setPedido((p) => { const np = clone(p); np.ordenes[idx].nombre = nombre; return np; });
+  const renombrar = (idx, nombre) => setPedido((p) => { p.ordenes[idx].nombre = nombre.slice(0, 40); return p; });
 
-  const guardarMesa = () => {
-    db.guardarMesa(mesaId, clone(pedido), user.nombre);
-    toast(totalProd > 0 ? `Mesa ${mesaId} guardada` : `Mesa ${mesaId} liberada`, "ok");
+  const guardarBorrador = async (versionForzada) => {
+    const r = await db.guardarBorrador(mesaId, clone(pedido), versionForzada ?? b.version);
+    if (r.ok) {
+      quitarBorrador();
+      toast(totalProd > 0 ? `Mesa ${mesaId}: borrador guardado (no se envió a cocina)` : `Mesa ${mesaId} liberada`, "ok");
+      go("mesas");
+    } else if (r.error?.codigo === "CONFLICTO") {
+      const op = await choiceDialog({
+        titulo: "La mesa cambió", mensaje: `Otro dispositivo modificó la Mesa ${mesaId} mientras editabas.`,
+        opciones: [
+          { label: "Guardar mi versión", val: "mia", tipo: "btn-primary" },
+          { label: "Ver la versión guardada", val: "suya", tipo: "btn-line" },
+          { label: "Seguir editando", val: null, tipo: "btn-ghost" },
+        ],
+      });
+      if (op === "mia") guardarBorrador(mesaInfo?.version ?? 0);
+      if (op === "suya") quitarBorrador();
+    }
+  };
+  const descartar = async () => {
+    if (!(await confirmDialog({ titulo: "Descartar comanda", mensaje: "Se borrarán los productos capturados en este dispositivo.", confirmar: "Descartar", peligro: true }))) return;
+    quitarBorrador();
     go("mesas");
   };
 
   const finalizar = async () => {
-    if (sending.current) return;            // evita doble toque / doble ticket
+    if (enviando) return;
     if (vacio) { toast("Agrega al menos un producto.", "error"); return; }
-    if (!esExtra && entrada === "domicilio" && (!dom.direccion.trim() || !dom.telefono.trim())) {
-      setModalDom(true); toast("Captura dirección y teléfono del domicilio.", "error"); return;
+    if (!esExtra && entrada === "domicilio" && (!dom.direccion.trim() || !telefonoValido(dom.telefono))) {
+      setModalDom(true); toast("Captura dirección y un teléfono válido del domicilio.", "error"); return;
     }
-    // ¿Cuenta junta o separada? Solo tiene sentido preguntar con más de una orden.
+    // ¿Cuenta junta o separada? Solo tiene sentido preguntar con más de una orden con productos.
     let cuenta = "junta";
-    if (!esExtra && pedido.ordenes.length > 1) {
+    if (!esExtra && pedido.ordenes.filter((o) => o.items.length > 0).length > 1) {
       const sel = await choiceDialog({
-        titulo: "¿Cómo va la cuenta?",
-        mensaje: "Así saldrá impreso el ticket.",
+        titulo: "¿Cómo va la cuenta?", mensaje: "Así saldrá impreso el ticket.",
         opciones: [
           { label: "Junta (un solo total)", val: "junta", tipo: "btn-primary" },
           { label: "Separada (total por orden)", val: "separada", tipo: "btn-line" },
         ],
       });
-      if (!sel) return;     // cerró sin elegir: no se envía
+      if (!sel) return;
       cuenta = sel;
     }
-    if (sending.current) return;
-    sending.current = true;
-    setTimeout(() => { sending.current = false; }, 1200);
-    let ticketTipo = "aqui", origen, paraLlevar = false, referencia = null;
-    if (esExtra) {
-      origen = `Mesa ${mesaId}`;
-    } else if (entrada === "aqui") {
-      origen = `Mesa ${mesaId}`;
-      paraLlevar = tipo === "llevar";
-    } else if (entrada === "llevar") {
-      ticketTipo = "llevar";
-      referencia = refLlevar.trim();
-      origen = referencia ? `Para llevar · ${referencia}` : "Para llevar";
-    } else {
-      ticketTipo = "domicilio";
-      origen = dom.nombre.trim() || "Domicilio";
-    }
+    // El id se conserva entre reintentos: si el primer intento sí llegó, el servidor no lo duplica
+    const id = b.envioId || uid();
+    cambiar((d) => ({ ...d, envioId: id, envio: { estado: "enviando" } }), false);
+    let ticketTipo = "aqui", paraLlevar = false, referencia = null, domicilio = null;
+    if (!esExtra && entrada === "aqui") paraLlevar = tipo === "llevar";
+    else if (!esExtra && entrada === "llevar") { ticketTipo = "llevar"; referencia = refLlevar.trim() || null; }
+    else if (!esExtra) { ticketTipo = "domicilio"; domicilio = { ...dom }; }
     const t = {
-      id: uid(), tipo: ticketTipo, esExtra, origen, paraLlevar, referencia, cuenta,
-      mesaId: (esExtra || entrada === "aqui") ? mesaId : null,
-      ordenes: clone(pedido.ordenes), extras: clone(pedido.extras || []),
-      mesero: user.nombre, hora: hora(), fecha: fecha(), estado: "pendiente",
-      domicilio: (!esExtra && entrada === "domicilio") ? { ...dom } : null,
-      total: totalDinero,
+      id, tipo: ticketTipo, esExtra, mesaId: (esExtra || entrada === "aqui") ? mesaId : null,
+      paraLlevar, referencia, cuenta, domicilio, ...pedidoParaEnviar(pedido),
     };
-    db.enviarTicket(t, { esExtra, mesaId, pedido: clone(pedido), userNombre: user.nombre });
-    toast(esExtra ? "Orden extra enviada a cocina" : "Comanda enviada a cocina", "ok");
-    go("mesas");
+    try {
+      const r = await db.enviar(t);
+      quitarBorrador();
+      toast(r.duplicado ? "Esta comanda ya estaba registrada en cocina." : esExtra ? "Orden extra recibida en cocina" : "Comanda recibida en cocina", "ok");
+      if (montado.current) go("mesas");
+    } catch (e) {
+      cambiar((d) => ({ ...d, envio: { estado: "error", mensaje: e.message, incierto: !!e.incierto, codigo: e.codigo } }), false);
+      if (!montado.current) toast("No se pudo enviar una comanda: " + e.message, "error");
+    }
   };
 
-  const liberarMesa = () => {
-    db.liberarMesa(mesaId);
-    toast(`Mesa ${mesaId} liberada`, "ok");
-    go("mesas");
+  const liberarMesa = async () => {
+    const r = await db.liberarMesa(mesaId);
+    if (r.ok) { quitarBorrador(); toast(`Mesa ${mesaId} liberada`, "ok"); go("mesas"); }
   };
-
-  const Tb = TIPOS[tipo];
-  const mesaInfo = mesaId ? data.mesas.find((m) => m.id === mesaId) : null;
-  const mesaOcupada = entrada === "aqui" && mesaInfo?.estado === "ocupada";
-
   const confirmLiberar = async () => {
-    if (await confirmDialog({ titulo: "Liberar mesa", mensaje: `¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.`, confirmar: "Liberar", peligro: true })) liberarMesa();
+    const msg = mesaBorrador ? `¿Eliminar el borrador de la Mesa ${mesaId}? No se envió a cocina.` : `¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.`;
+    if (await confirmDialog({ titulo: mesaBorrador ? "Eliminar borrador" : "Liberar mesa", mensaje: msg, confirmar: mesaBorrador ? "Eliminar" : "Liberar", peligro: true })) liberarMesa();
   };
-
-  const dispLabel = tipo === "aqui" ? "Para esta mesa" : tipo === "llevar" ? "Para llevar" : "Domicilio";
 
   /* ---- bloques reutilizables ---- */
   const typeBar = (
     <div className="type-bar">
-      <button className="btn btn-ghost btn-sm" onClick={() => go("mesas")}><ArrowLeft size={16} /> Mesas</button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => go("mesas")}><ArrowLeft size={16} aria-hidden="true" /> Mesas</button>
       {entrada === "aqui" ? (
         esExtra ? (
           <div className="type-btns">
             <span className="type-fixed" style={{ "--tc": "var(--especial)" }}>Orden extra</span>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setEsExtra(false); setPedido(nuevoPedido()); setActiva(0); }}>Cancelar</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => cambiar((d) => ({ ...d, esExtra: false, pedido: nuevoPedido(), activa: 0, envio: null, envioId: null, sucio: false }), false)}>Cancelar orden extra</button>
           </div>
         ) : (
-          <div className="type-btns">
-            <button className={"type-btn" + (tipo === "aqui" ? " on" : "")} style={{ "--tc": TIPOS.aqui.color }} onClick={() => setTipo("aqui")}>
-              <Utensils size={16} /> Para esta mesa
+          <div className="type-btns" role="group" aria-label="Tipo de comanda">
+            <button type="button" className={"type-btn" + (tipo === "aqui" ? " on" : "")} aria-pressed={tipo === "aqui"} style={{ "--tc": TIPOS.aqui.color }} onClick={() => cambiar((d) => ({ ...d, tipo: "aqui" }), false)}>
+              <Utensils size={16} aria-hidden="true" /> <span className="nav-largo">Para esta mesa</span><span className="nav-corto">Aquí</span>
             </button>
-            <button className={"type-btn" + (tipo === "llevar" ? " on" : "")} style={{ "--tc": TIPOS.llevar.color }} onClick={() => setTipo("llevar")}>
-              <ShoppingBag size={16} /> Para llevar
+            <button type="button" className={"type-btn" + (tipo === "llevar" ? " on" : "")} aria-pressed={tipo === "llevar"} style={{ "--tc": TIPOS.llevar.color }} onClick={() => cambiar((d) => ({ ...d, tipo: "llevar" }), false)}>
+              <ShoppingBag size={16} aria-hidden="true" /> <span className="nav-largo">Para llevar</span><span className="nav-corto">Llevar</span>
             </button>
           </div>
         )
       ) : entrada === "domicilio" ? (
         <div className="type-btns">
-          <span className="type-fixed" style={{ "--tc": TIPOS.domicilio.color }}><Bike size={16} /> Domicilio {domOk && <Check size={15} />}</span>
-          <button className="btn btn-ghost btn-sm" onClick={() => setModalDom(true)}><Pencil size={14} /> Editar datos</button>
+          <span className="type-fixed" style={{ "--tc": TIPOS.domicilio.color }}><Bike size={16} aria-hidden="true" /> Domicilio {domOk && <Check size={15} aria-label="datos capturados" />}</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setModalDom(true)}><Pencil size={14} aria-hidden="true" /> Datos del domicilio</button>
         </div>
       ) : (
         <div className="type-btns">
-          <span className="type-fixed" style={{ "--tc": TIPOS.llevar.color }}><ShoppingBag size={16} /> Para llevar</span>
-          <input className="ref-input" placeholder="Nombre de referencia" value={refLlevar}
-            onChange={(e) => setRefLlevar(e.target.value)} />
+          <span className="type-fixed tf-ocultable" style={{ "--tc": TIPOS.llevar.color }}><ShoppingBag size={16} aria-hidden="true" /> Para llevar</span>
+          <input className="ref-input" aria-label="Nombre de referencia del cliente" placeholder="Nombre de referencia" value={refLlevar} maxLength={60}
+            onChange={(e) => cambiar((d) => ({ ...d, refLlevar: e.target.value }))} />
         </div>
       )}
       {entrada === "aqui" && <span className="mesa-chip">Mesa {mesaId}</span>}
@@ -928,10 +763,7 @@ function Comanda({ data, db, user, go, ctx }) {
 
   const banner = (
     <div className="type-banner" style={{
-      background: esExtra ? "var(--especial)"
-        : entrada === "aqui"
-          ? (tipo === "llevar" ? TIPOS.llevar.color : TIPOS.aqui.color)
-          : TIPOS[tipo].color,
+      background: esExtra ? "var(--especial)" : entrada === "aqui" ? (tipo === "llevar" ? TIPOS.llevar.color : TIPOS.aqui.color) : TIPOS[entrada].color,
     }}>
       {esExtra
         ? `Mesa ${mesaId} · ORDEN EXTRA`
@@ -943,52 +775,99 @@ function Comanda({ data, db, user, go, ctx }) {
     </div>
   );
 
-  const ocupadaBar = mesaOcupada ? (
+  const estadoBar = mesaOcupada ? (
     <div className="ocupada-bar">
-      <span>Ocupada por <b>{mesaInfo.mesero || "—"}</b>{mesaInfo.hora ? ` · ${mesaInfo.hora}` : ""}</span>
-      <button className="btn btn-danger-ghost btn-sm" onClick={confirmLiberar}>Marcar libre</button>
+      <span>Enviada a cocina por <b>{mesaInfo.mesero || "—"}</b>{mesaInfo.hora ? ` · ${mesaInfo.hora}` : ""}</span>
+      <button type="button" className="btn btn-danger-ghost btn-sm" onClick={confirmLiberar}>Marcar libre</button>
+    </div>
+  ) : mesaBorrador && !esExtra ? (
+    <div className="ocupada-bar borrador">
+      <span>Borrador guardado por <b>{mesaInfo.mesero || "—"}</b>{mesaInfo.hora ? ` · ${mesaInfo.hora}` : ""} · aún no se envía a cocina</span>
+      <button type="button" className="btn btn-danger-ghost btn-sm" onClick={confirmLiberar}>Eliminar borrador</button>
     </div>
   ) : null;
 
+  const scrollA = (id) => document.getElementById(id)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  const resultados = q.trim()
+    ? [...menu.tacos, ...menu.quesa, ...menu.volcan, ...menu.costra, ...menu.bebs]
+        .filter((it) => it.nombre.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+          .includes(q.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")))
+    : null;
+
+  const personaBar = (
+    <div className="persona-bar" role="group" aria-label="Persona a la que se agregan los productos">
+      <span className="persona-label" aria-hidden="true">Añadiendo a:</span>
+      {pedido.ordenes.map((o, i) => (
+        <button key={o.id} type="button" className="persona-chip" aria-pressed={activa === i} onClick={() => setActiva(i)}>
+          {o.nombre} <span className="persona-n" aria-label={`${o.items.reduce((a, x) => a + x.cantidad, 0)} productos`}>· {o.items.reduce((a, x) => a + x.cantidad, 0)}</span>
+        </button>
+      ))}
+      <button type="button" className="persona-add" onClick={addOrden} aria-label="Agregar orden para otra persona"><Plus size={16} aria-hidden="true" /> Persona</button>
+    </div>
+  );
+
   const menuPane = (
     <div className="menu-inner">
-      <div className="cols-3">
-        <MenuCol title="Tacos" cat="taco" items={menu.tacos} onAdd={addItem} />
-        <MenuCol title="Quesadillas / Gringas" cat="quesa" items={menu.quesa} onAdd={addItem} />
-        <MenuCol title="Volcanes" cat="volcan" items={menu.volcan} onAdd={addItem} />
+      {personaBar}
+      <div className="menu-tools">
+        <label className="sr-only" htmlFor={`buscar-${entrada}`}>Buscar producto</label>
+        <input id={`buscar-${entrada}`} type="search" className="inp buscar" placeholder="Buscar producto…" value={q} onChange={(e) => setQ(e.target.value)} />
+        {!resultados && (
+          <nav className="cat-jumps" aria-label="Ir a categoría">
+            <button type="button" onClick={() => scrollA("cat-tacos")}>Tacos</button>
+            <button type="button" onClick={() => scrollA("cat-quesa")}>Quesadillas</button>
+            <button type="button" onClick={() => scrollA("cat-volcan")}>Volcanes</button>
+            <button type="button" onClick={() => scrollA("cat-costra")}>Costra</button>
+            <button type="button" onClick={() => scrollA("cat-bebidas")}>Bebidas</button>
+          </nav>
+        )}
       </div>
-      <div className="especial">
-        <div className="especial-head">Especialidad — Costra</div>
-        <div className="especial-items">
-          {menu.costra.map((it) => <ItemBtn key={it.key} item={it} onAdd={addItem} />)}
+      {resultados ? (
+        <section className="resultados" aria-label="Resultados de búsqueda">
+          <div className="resultados-items">
+            {resultados.length === 0 && <p className="muted" style={{ margin: 6 }}>Sin resultados para «{q}».</p>}
+            {resultados.map((it) => <ItemBtn key={it.key} item={it} onAdd={addItem} />)}
+          </div>
+        </section>
+      ) : (<>
+        <div className="cols-3">
+          <MenuCol id="cat-tacos" title="Tacos" cat="taco" items={menu.tacos} onAdd={addItem} />
+          <MenuCol id="cat-quesa" title="Quesadillas / Gringas" cat="quesa" items={menu.quesa} onAdd={addItem} />
+          <MenuCol id="cat-volcan" title="Volcanes" cat="volcan" items={menu.volcan} onAdd={addItem} />
         </div>
-      </div>
-      <div className="bebidas-box">
-        <div className="bebidas-head">Refrescos y aguas {menu.bebs.length === 0 && <span className="muted">— sin existencias</span>}</div>
-        <div className="bebidas-items">
-          {menu.bebs.map((it) => <ItemBtn key={it.key} item={it} onAdd={addItem} />)}
-        </div>
-      </div>
+        <section className="especial" id="cat-costra" aria-labelledby="h-costra">
+          <h3 className="especial-head" id="h-costra">Especialidad — Costra</h3>
+          <div className="especial-items">
+            {menu.costra.map((it) => <ItemBtn key={it.key} item={it} onAdd={addItem} />)}
+          </div>
+        </section>
+        <section className="bebidas-box" id="cat-bebidas" aria-labelledby="h-bebidas">
+          <h3 className="bebidas-head" id="h-bebidas">Refrescos y aguas {menu.bebs.length === 0 && <span>— sin existencias</span>}</h3>
+          <div className="bebidas-items">
+            {menu.bebs.map((it) => <ItemBtn key={it.key} item={it} onAdd={addItem} />)}
+          </div>
+        </section>
+      </>)}
     </div>
   );
 
   const ordenPane = (
     <div className="ticket-inner">
       <div className="ticket-head">
-        <div><div className="ticket-origen">Órdenes</div>
+        <div><h3 className="ticket-origen">Órdenes</h3>
           <div className="ticket-mesero">{user.nombre} · {totalProd} producto(s)</div></div>
-        <button className="btn btn-add btn-sm" onClick={addOrden}><Plus size={16} /> Orden</button>
+        <button type="button" className="btn btn-add btn-sm" onClick={addOrden}><Plus size={16} aria-hidden="true" /> Persona</button>
       </div>
-      {tipo === "domicilio" && domOk && (
-        <button className="dom-resumen" onClick={() => setModalDom(true)}>
-          <Bike size={15} />
+      {entrada === "domicilio" && domOk && (
+        <button type="button" className="dom-resumen" onClick={() => setModalDom(true)} aria-label={`Editar datos del domicilio: ${dom.nombre || "cliente"}, ${dom.direccion}`}>
+          <Bike size={15} aria-hidden="true" />
           <span>{dom.nombre || "Domicilio"} · {dom.direccion}</span>
-          <Pencil size={13} />
+          <Pencil size={13} aria-hidden="true" />
         </button>
       )}
       <div className="ticket-scroll">
         {pedido.ordenes.map((o, idx) => (
-          <OrdenBlock key={o.id} o={o} idx={idx} activa={activa === idx}
+          <OrdenBlock key={o.id} o={o} activa={activa === idx}
             onSelect={() => setActiva(idx)} onRename={(v) => renombrar(idx, v)}
             onCant={(key, d) => setCant(idx, key, d)} onDelete={() => borrarOrden(idx)}
             canDelete={pedido.ordenes.length > 1}
@@ -1000,28 +879,32 @@ function Comanda({ data, db, user, go, ctx }) {
             <div className="pedido-extras-head">Para todo el pedido (llevar)</div>
             <div className="pedido-extras-add">
               {empaqueCat.map((it) => (
-                <button key={it.key} className="extra-chip" style={{ "--cat": CATS.empaque.color }}
-                  onClick={() => addExtraPedido(it)}>
-                  <Plus size={12} /> {it.corto}{it.precio > 0 ? ` ${money(it.precio)}` : ""}
+                <button type="button" key={it.key} className="extra-chip" style={{ "--cat": CATS.empaque.color }} onClick={() => addExtraPedido(it)}>
+                  <Plus size={12} aria-hidden="true" /> {it.corto}{it.precio > 0 ? ` ${money(it.precio)}` : ""}
                 </button>
               ))}
             </div>
             {extras.length > 0 && (
-              <ul className="orden-items">
+              <ul className="orden-items" style={{ marginTop: 8 }}>
                 {extras.map((it) => (
                   <li key={it.key} className="oitem" style={{ "--cat": CATS.empaque.color }}>
-                    <span className="oitem-dot" /><span className="oitem-name">{it.corto || it.nombre}</span>
+                    <span className="oitem-dot" aria-hidden="true" /><span className="oitem-name">{it.corto || it.nombre}</span>
                     <span className="oitem-precio">{it.precio > 0 ? money(it.precio * it.cantidad) : "sin costo"}</span>
                     <div className="stepper">
-                      <button onClick={() => setCantExtra(it.key, -1)}><Minus size={14} /></button>
+                      <button type="button" aria-label={`Quitar uno: ${it.corto || it.nombre}`} onClick={() => setCantExtra(it.key, -1)}><Minus size={16} aria-hidden="true" /></button>
                       <span>{it.cantidad}</span>
-                      <button onClick={() => setCantExtra(it.key, 1)}><Plus size={14} /></button>
+                      <button type="button" aria-label={`Agregar uno: ${it.corto || it.nombre}`} onClick={() => setCantExtra(it.key, 1)}><Plus size={16} aria-hidden="true" /></button>
                     </div>
                   </li>
                 ))}
               </ul>
             )}
           </div>
+        )}
+        {isPhone && tieneProductos(b) && (
+          <button type="button" className="btn btn-danger-ghost btn-sm" disabled={enviando} onClick={descartar}>
+            <Trash2 size={14} aria-hidden="true" /> Descartar comanda
+          </button>
         )}
       </div>
       <div className="ticket-total"><span>Total</span><b>{money(totalDinero)}</b></div>
@@ -1033,92 +916,82 @@ function Comanda({ data, db, user, go, ctx }) {
         ordenes: pedido.ordenes, extras: pedido.extras || [], mesero: user.nombre, hora: hora(), fecha: fecha(), domicilio: null }
     : buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user);
 
-  const accionesIzq = (
-    <div className="footer-izq">
-      <button className="btn btn-add btn-block" onClick={addOrden}><Plus size={16} /> Agregar orden (otra persona)</button>
+  const envioAlerta = envio?.estado === "error" ? (
+    <div className="envio-alerta" role="alert">
+      <span>{envio.incierto
+        ? `No se pudo confirmar el envío: ${envio.mensaje} Si ya había llegado, reintentar no la duplica.`
+        : `No se envió a cocina: ${envio.mensaje}`}</span>
+      <button type="button" className="btn btn-sm btn-danger" onClick={finalizar}><RefreshCw size={14} aria-hidden="true" /> Reintentar envío</button>
     </div>
-  );
-  const accionesDer = (
-    <div className="footer-der">
-      <button className="btn btn-line" disabled={vacio} onClick={() => setTicket(previewTicket)}>
-        <Printer size={16} /> Ver ticket</button>
-      <button className={"btn " + (esExtra ? "btn-barro" : "btn-primary")} disabled={vacio} onClick={finalizar}>
-        <Send size={16} /> {esExtra ? "Enviar orden extra" : "Enviar a cocina"}</button>
-    </div>
-  );
+  ) : null;
 
-  // Mesa ocupada: mostramos resumen + opción de Orden Extra (no se edita la orden original)
+  const botonEnviar = (
+    <button type="button" className={"btn " + (esExtra ? "btn-barro" : "btn-primary")} disabled={vacio || enviando} onClick={finalizar} aria-busy={enviando}
+      aria-label={enviando ? "Enviando a cocina" : esExtra ? "Enviar orden extra" : "Enviar a cocina"}>
+      {enviando ? <Loader2 size={16} className="girando" aria-hidden="true" /> : <Send size={16} aria-hidden="true" />}
+      {enviando ? "Enviando…" : isPhone ? (esExtra ? "Enviar extra" : "Enviar") : esExtra ? "Enviar orden extra" : "Enviar a cocina"}
+    </button>
+  );
+  const accionesBorrador = (entrada === "aqui" && !esExtra) || tieneProductos(b) ? (
+    <div className="ticket-extra">
+      {entrada === "aqui" && !esExtra && (
+        <button type="button" className="btn btn-ghost btn-sm" disabled={enviando || (vacio && !mesaBorrador)} onClick={() => guardarBorrador()}>
+          <Save size={14} aria-hidden="true" /> Guardar borrador
+        </button>
+      )}
+      {tieneProductos(b) && (
+        <button type="button" className="btn btn-danger-ghost btn-sm" disabled={enviando} onClick={descartar}>
+          <Trash2 size={14} aria-hidden="true" /> Descartar
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  // Mesa ya enviada: resumen + orden extra (la orden original no se edita)
   if (mesaOcupada && !esExtra) {
     const ped = mesaInfo.pedido || { ordenes: [], extras: [] };
     const extrasMesa = mesaInfo.extras || [];
-    const tot = ticketTotal(ped) + extrasMesa.reduce((s, e) => s + (e.total != null ? e.total : ticketTotal(e)), 0);
-    const todasOrdenes = [...(ped.ordenes || []), ...extrasMesa.flatMap((e) => e.ordenes || [])];
-    const todosExtras = [...(ped.extras || []), ...extrasMesa.flatMap((e) => e.extras || [])];
+    const tot = ticketTotal(ped) + extrasMesa.reduce((s, e) => s + (e.total != null ? Number(e.total) : ticketTotal(e)), 0);
     const reenviar = async () => {
-      if (todasOrdenes.length === 0) { toast("La mesa no tiene nada que reenviar.", "info"); return; }
       if (!(await confirmDialog({ titulo: "Reenviar a cocina", mensaje: "Se enviará de nuevo a la cocina para que la impriman. No vuelve a contar como venta.", confirmar: "Reenviar" }))) return;
-      db.reenviarCocina({
-        id: "x", tipo: "aqui", origen: `Mesa ${mesaId}`, paraLlevar: false,
-        ordenes: clone(todasOrdenes), extras: clone(todosExtras),
-        mesero: mesaInfo.mesero, hora: hora(), fecha: fecha(), domicilio: null,
-      });
-      toast("Reenviado a cocina", "ok");
+      db.reenviar(mesaId);
     };
+    const pendienteLocal = tieneCambios(b);
     return (
       <div className="comanda-wrap">
         <div className="type-bar">
-          <button className="btn btn-ghost btn-sm" onClick={() => go("mesas")}><ArrowLeft size={16} /> Mesas</button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => go("mesas")}><ArrowLeft size={16} aria-hidden="true" /> Mesas</button>
           <span className="mesa-chip">Mesa {mesaId}</span>
         </div>
         {banner}
-        {ocupadaBar}
+        {estadoBar}
+        {pendienteLocal && (
+          <div className="envio-alerta" role="alert" style={{ marginTop: 10 }}>
+            <span>Otro dispositivo ya envió esta mesa. Tienes {contarProductos(b.pedido)} producto(s) capturados aquí que no se enviaron.</span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className="btn btn-sm btn-barro" onClick={() => cambiar((d) => ({ ...d, esExtra: true, envio: null }), false)}>Enviarlos como orden extra</button>
+              <button type="button" className="btn btn-sm btn-ghost" onClick={() => quitarBorrador()}>Descartarlos</button>
+            </div>
+          </div>
+        )}
         <div className="resumen-scroll">
-          <h3 className="resumen-h">Lo que ya se pidió</h3>
-          {(ped.ordenes || []).map((o) => (
-            <div key={o.id} className="resumen-orden">
-              <div className="resumen-oname">{o.nombre}{o.prep ? ` · ${PREP_LABEL[o.prep] || o.prep}` : ""}</div>
-              {o.items.map((it) => (
-                <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.nombre}</div>
-              ))}
-            </div>
-          ))}
-          {(ped.extras || []).length > 0 && (
-            <div className="resumen-orden">
-              <div className="resumen-oname">Para todo el pedido</div>
-              {ped.extras.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.corto || it.nombre}</div>)}
-            </div>
-          )}
-
+          <h3 className="resumen-h">Lo que ya se envió a cocina</h3>
+          <ResumenPedido ped={ped} />
           {extrasMesa.map((ex, n) => (
             <div key={ex.id} className="resumen-extra">
               <div className="resumen-extra-h">Orden extra {n + 1}{ex.hora ? ` · ${ex.hora}` : ""}</div>
-              {(ex.ordenes || []).map((o) => (
-                <div key={o.id} className="resumen-orden">
-                  <div className="resumen-oname">{o.nombre}{o.prep ? ` · ${PREP_LABEL[o.prep] || o.prep}` : ""}</div>
-                  {o.items.map((it) => (
-                    <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.nombre}</div>
-                  ))}
-                </div>
-              ))}
-              {(ex.extras || []).length > 0 && (
-                <div className="resumen-orden">
-                  <div className="resumen-oname">Para todo el pedido</div>
-                  {ex.extras.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.corto || it.nombre}</div>)}
-                </div>
-              )}
+              <ResumenPedido ped={ex} />
             </div>
           ))}
-
           <div className="ticket-total"><span>Total</span><b>{money(tot)}</b></div>
         </div>
         <div className="resumen-actions">
-          <button className="btn btn-barro btn-block" onClick={() => { setEsExtra(true); setPedido(nuevoPedido()); setActiva(0); setPane("menu"); }}>
-            <Plus size={16} /> Agregar orden extra
+          <button type="button" className="btn btn-barro btn-block" onClick={() => { cambiar((d) => ({ ...d, esExtra: true, pedido: nuevoPedido(), activa: 0, envio: null, envioId: null, sucio: false }), false); setPane("menu"); }}>
+            <Plus size={16} aria-hidden="true" /> Agregar orden extra
           </button>
-          <button className="btn btn-line btn-block" onClick={reenviar}><Send size={16} /> Reenviar a cocina</button>
-          <button className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
+          <button type="button" className="btn btn-line btn-block" onClick={reenviar}><Send size={16} aria-hidden="true" /> Reenviar a cocina</button>
+          <button type="button" className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
         </div>
-        {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
       </div>
     );
   }
@@ -1127,55 +1000,73 @@ function Comanda({ data, db, user, go, ctx }) {
     <div className="comanda-wrap">
       {typeBar}
       {banner}
-      {ocupadaBar}
+      {estadoBar}
 
       {isPhone ? (
         <>
-          <div className="pane-toggle">
-            <button className={pane === "menu" ? "on" : ""} onClick={() => setPane("menu")}>Menú</button>
-            <button className={pane === "orden" ? "on" : ""} onClick={() => setPane("orden")}>Órdenes · {totalProd}</button>
+          <div className="pane-toggle" role="tablist" aria-label="Vista de la comanda">
+            <button type="button" role="tab" aria-selected={pane === "menu"} onClick={() => setPane("menu")}>Menú</button>
+            <button type="button" role="tab" aria-selected={pane === "orden"} onClick={() => setPane("orden")}>Órdenes · {totalProd}</button>
           </div>
-          <div className="pane-scroll">{pane === "menu" ? menuPane : ordenPane}</div>
+          <div className="pane-scroll" role="tabpanel">{pane === "menu" ? menuPane : ordenPane}</div>
           <div className="phone-footer">
+            {envioAlerta}
             <div className="footer-der">
-              {pane === "menu"
-                ? (!esExtra && <button className="btn btn-add" onClick={addOrden}><Plus size={16} /> Orden</button>)
-                : <button className="btn btn-line" disabled={vacio} onClick={() => setTicket(previewTicket)}><Printer size={16} /> Ver ticket</button>}
-              <button className={"btn " + (esExtra ? "btn-barro" : "btn-primary")} disabled={vacio} onClick={finalizar}>
-                <Send size={16} /> {esExtra ? "Enviar orden extra" : "Enviar a cocina"}</button>
+              {entrada === "aqui" && !esExtra && (
+                <button type="button" className="btn btn-ghost" disabled={enviando || (vacio && !mesaBorrador)} onClick={() => guardarBorrador()} aria-label="Guardar borrador">
+                  <Save size={16} aria-hidden="true" /> Guardar
+                </button>
+              )}
+              <button type="button" className="btn btn-line" disabled={vacio} onClick={() => setTicket(previewTicket)} aria-label="Ver ticket"><Printer size={16} aria-hidden="true" /> Ticket</button>
+              {botonEnviar}
             </div>
           </div>
         </>
       ) : (
         <div className="comanda">
-          <section className="menu-pane">
+          <section className="menu-pane" aria-label="Menú">
             <div className="menu-pane-scroll">{menuPane}</div>
-            {accionesIzq}
           </section>
-          <aside className="ticket-pane">
+          <aside className="ticket-pane" aria-label="Órdenes de la comanda">
             {ordenPane}
-            {accionesDer}
-            {entrada === "aqui" && !esExtra && !mesaOcupada && (
-              <div className="ticket-extra">
-                <button className="btn btn-ghost btn-sm btn-block" onClick={guardarMesa}>Guardar sin enviar</button>
-              </div>
-            )}
+            {envioAlerta}
+            <div className="footer-der">
+              <button type="button" className="btn btn-line" disabled={vacio} onClick={() => setTicket(previewTicket)}><Printer size={16} aria-hidden="true" /> Ver ticket</button>
+              {botonEnviar}
+            </div>
+            {accionesBorrador}
           </aside>
         </div>
       )}
 
       {modalDom && (
-        <DomicilioModal dom={dom} setDom={setDom}
+        <DomicilioModal dom={dom} setDom={(nd) => cambiar((d) => ({ ...d, dom: nd }))}
           onAgregar={() => {
-            if (!dom.direccion.trim() || !dom.telefono.trim()) { toast("Dirección y teléfono son obligatorios.", "error"); return; }
-            setDomOk(true); setTipo("domicilio"); setModalDom(false);
+            if (!dom.direccion.trim() || !telefonoValido(dom.telefono)) return false;
+            cambiar((d) => ({ ...d, domOk: true }), false); setModalDom(false); return true;
           }}
-          onClose={() => { setModalDom(false); if (!domOk && tipo === "domicilio") setTipo("llevar"); }} />
+          onClose={() => setModalDom(false)} />
       )}
-      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio}
-        onClose={() => { setTicket(null); if (ticket.estado) go("mesas"); }} />}
+      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
     </div>
   );
+}
+
+function ResumenPedido({ ped }) {
+  return (<>
+    {(ped.ordenes || []).map((o) => (
+      <div key={o.id} className="resumen-orden">
+        <div className="resumen-oname">{o.nombre}{o.prep ? ` · ${PREP_LABEL[o.prep] || o.prep}` : ""}</div>
+        {o.items.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.nombre}</div>)}
+      </div>
+    ))}
+    {(ped.extras || []).length > 0 && (
+      <div className="resumen-orden">
+        <div className="resumen-oname">Para todo el pedido</div>
+        {ped.extras.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.corto || it.nombre}</div>)}
+      </div>
+    )}
+  </>);
 }
 
 function buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user) {
@@ -1188,108 +1079,124 @@ function buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user)
 }
 
 /* columna de menú */
-function MenuCol({ title, cat, items, onAdd }) {
+function MenuCol({ id, title, cat, items, onAdd }) {
   return (
-    <div className="menu-col" style={{ "--cat": CATS[cat].color }}>
-      <div className="col-head">{title}</div>
+    <section className="menu-col" id={id} style={{ "--cat": CATS[cat].color }} aria-labelledby={id + "-h"}>
+      <h3 className="col-head" id={id + "-h"}>{title}</h3>
       <div className="col-items">{items.map((it) => <ItemBtn key={it.key} item={it} onAdd={onAdd} />)}</div>
-    </div>
+    </section>
   );
 }
 function ItemBtn({ item, onAdd }) {
   return (
-    <button className="item-btn" style={{ "--cat": CATS[item.cat].color }} onClick={() => onAdd(item)}>
-      <span className="item-nombre">{item.nombre}</span>
+    <button type="button" className="item-btn" style={{ "--cat": CATS[item.cat].color }} onClick={() => onAdd(item)}
+      aria-label={`Agregar ${item.nombre}, ${money(item.precio)}`}>
+      <span className="item-nombre">{item.nombre}
+        {item.cat === "bebida" && item.quedan != null && item.quedan <= 5 && <span className="item-quedan">quedan {item.quedan}</span>}</span>
       <span className="item-precio">{money(item.precio)}</span>
     </button>
   );
 }
 
-/* bloque de orden */
-function OrdenBlock({ o, idx, activa, onSelect, onRename, onCant, onDelete, canDelete, onPrep }) {
+/* bloque de orden (una persona) */
+function OrdenBlock({ o, activa, onSelect, onRename, onCant, onDelete, canDelete, onPrep }) {
   const [edit, setEdit] = useState(false);
   const total = o.items.reduce((a, i) => a + i.cantidad, 0);
+  const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
   return (
     <div className={"orden" + (activa ? " activa" : "")} onClick={onSelect}>
       <div className="orden-head">
         {edit ? (
-          <input className="orden-input" autoFocus value={o.nombre}
+          <input className="orden-input" autoFocus value={o.nombre} aria-label="Nombre de la orden" maxLength={40}
             onChange={(e) => onRename(e.target.value)} onBlur={() => setEdit(false)}
-            onKeyDown={(e) => e.key === "Enter" && setEdit(false)} onClick={(e) => e.stopPropagation()} />
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setEdit(false); } }}
+            onClick={(e) => e.stopPropagation()} />
         ) : (
-          <button className="orden-name" onClick={(e) => { e.stopPropagation(); setEdit(true); }}>
-            {o.nombre} <Pencil size={12} /></button>
+          <button type="button" className="orden-sel" aria-pressed={activa} onClick={stop(onSelect)}>
+            {o.nombre}{activa && <span className="marca">Añadiendo aquí</span>}
+          </button>
         )}
-        <div className="orden-right"><span className="orden-count">{total}</span>
-          {canDelete && <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onDelete(); }}><Trash2 size={15} /></button>}</div>
+        <div className="orden-right">
+          <span className="orden-count" aria-label={`${total} productos`}>{total}</span>
+          {!edit && <button type="button" className="icon-btn" aria-label={`Renombrar ${o.nombre}`} onClick={stop(() => setEdit(true))}><Pencil size={16} aria-hidden="true" /></button>}
+          {canDelete && <button type="button" className="icon-btn" aria-label={`Eliminar ${o.nombre}`} onClick={stop(onDelete)}><Trash2 size={17} aria-hidden="true" /></button>}
+        </div>
       </div>
       {o.items.length === 0 ? (
-        <div className="orden-empty">Toca un producto del menú para agregarlo aquí.</div>
+        <div className="orden-empty">{activa ? "Toca un producto del menú para agregarlo aquí." : "Sin productos. Selecciónala para agregar."}</div>
       ) : (
         <ul className="orden-items">
           {o.items.map((it) => (
-            <li key={it.key} className="oitem" style={{ "--cat": CATS[it.cat].color }}>
-              <span className="oitem-dot" /><span className="oitem-name">{it.nombre}</span>
+            <li key={it.key} className="oitem" style={{ "--cat": (CATS[it.cat] || CATS.taco).color }}>
+              <span className="oitem-dot" aria-hidden="true" /><span className="oitem-name">{it.nombre}</span>
               <span className="oitem-precio">{money((it.precio || 0) * it.cantidad)}</span>
               <div className="stepper" onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => onCant(it.key, -1)}><Minus size={14} /></button>
-                <span>{it.cantidad}</span>
-                <button onClick={() => onCant(it.key, 1)}><Plus size={14} /></button>
+                <button type="button" aria-label={`Quitar un ${it.nombre} de ${o.nombre}`} onClick={() => onCant(it.key, -1)}><Minus size={16} aria-hidden="true" /></button>
+                <span aria-label={`${it.cantidad} ${it.nombre}`}>{it.cantidad}</span>
+                <button type="button" aria-label={`Agregar un ${it.nombre} a ${o.nombre}`} onClick={() => onCant(it.key, 1)}><Plus size={16} aria-hidden="true" /></button>
               </div>
             </li>
           ))}
         </ul>
       )}
-      <div className="orden-prep">
-        <span className="orden-prep-label">Preparación:</span>
+      <div className="orden-prep" role="group" aria-label={`Preparación de ${o.nombre}`}>
+        <span className="orden-prep-label" aria-hidden="true">Preparación:</span>
         {PREPS.map((pr) => (
-          <button key={pr.k} className={"prep-chip" + (o.prep === pr.k ? " on" : "")}
-            onClick={(e) => { e.stopPropagation(); onPrep(pr.k); }}>{pr.label}</button>
+          <button type="button" key={pr.k} className="prep-chip" aria-pressed={o.prep === pr.k}
+            onClick={stop(() => onPrep(pr.k))}>{pr.label}</button>
         ))}
       </div>
     </div>
   );
 }
 
-/* modal domicilio */
+/* datos del domicilio */
 function DomicilioModal({ dom, setDom, onAgregar, onClose }) {
+  const id = useId();
+  const [intento, setIntento] = useState(false);
   const f = (k) => (e) => setDom({ ...dom, [k]: e.target.value });
+  const errDir = intento && !dom.direccion.trim() ? "Escribe la dirección." : "";
+  const errTel = intento && !telefonoValido(dom.telefono) ? "Escribe un teléfono de 7 a 20 dígitos." : "";
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal modal-dom" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head"><Bike size={20} /> <h3>Domicilio</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18} /></button></div>
+    <Modal titulo="Datos del domicilio" icono={<Bike size={20} aria-hidden="true" />} onClose={onClose} className="modal-dom">
+      <form noValidate onSubmit={(e) => { e.preventDefault(); setIntento(true); onAgregar(); }}>
         <div className="modal-body">
-          <label>Nombre</label>
-          <input className="inp" value={dom.nombre} onChange={f("nombre")} placeholder="Nombre de quien pide" />
-          <label>Dirección</label>
-          <input className="inp" value={dom.direccion} onChange={f("direccion")} placeholder="Calle, número, colonia" />
-          <label>Referencia</label>
-          <input className="inp" value={dom.referencia} onChange={f("referencia")} placeholder="Entre calles, color de casa…" />
-          <label>Número telefónico</label>
-          <input className="inp" inputMode="tel" value={dom.telefono} onChange={f("telefono")} placeholder="10 dígitos" />
+          <label htmlFor={id + "n"}>Nombre</label>
+          <input id={id + "n"} className="inp" value={dom.nombre} onChange={f("nombre")} placeholder="Nombre de quien pide" autoComplete="off" maxLength={80} />
+          <label htmlFor={id + "d"}>Dirección <span className="req" aria-hidden="true">*</span></label>
+          <input id={id + "d"} className="inp" value={dom.direccion} onChange={f("direccion")} placeholder="Calle, número, colonia" autoComplete="off"
+            required aria-required="true" aria-invalid={!!errDir} aria-describedby={errDir ? id + "de" : undefined} maxLength={200} />
+          {errDir && <span className="login-err" id={id + "de"}>{errDir}</span>}
+          <label htmlFor={id + "r"}>Referencia</label>
+          <input id={id + "r"} className="inp" value={dom.referencia} onChange={f("referencia")} placeholder="Entre calles, color de casa…" autoComplete="off" maxLength={200} />
+          <label htmlFor={id + "t"}>Número telefónico <span className="req" aria-hidden="true">*</span></label>
+          <input id={id + "t"} className="inp" type="tel" inputMode="tel" value={dom.telefono} onChange={f("telefono")} placeholder="10 dígitos" autoComplete="off"
+            required aria-required="true" aria-invalid={!!errTel} aria-describedby={errTel ? id + "te" : undefined} maxLength={20} />
+          {errTel && <span className="login-err" id={id + "te"}>{errTel}</span>}
           <div className="dom-row">
-            <div style={{ flex: 1 }}><label>Pago</label>
-              <select className="inp" value={dom.pago} onChange={f("pago")}>
+            <div style={{ flex: 1, display: "flex", flexDirection: "column" }}><label htmlFor={id + "p"}>Pago</label>
+              <select id={id + "p"} className="inp" value={dom.pago} onChange={f("pago")}>
                 <option value="efectivo">Efectivo</option>
                 <option value="tarjeta">Tarjeta</option>
                 <option value="transferencia">Transferencia</option>
               </select></div>
-            <div style={{ flex: 1 }}><label>Tiempo (min)</label>
-              <input className="inp" inputMode="numeric" value={dom.tiempo} onChange={f("tiempo")} placeholder="30" /></div>
+            <div style={{ flex: 1, display: "flex", flexDirection: "column" }}><label htmlFor={id + "m"}>Tiempo estimado (min)</label>
+              <input id={id + "m"} className="inp" inputMode="numeric" value={dom.tiempo} onChange={(e) => setDom({ ...dom, tiempo: e.target.value.replace(/\D/g, "").slice(0, 3) })} placeholder="30" /></div>
           </div>
+          <p className="muted small" style={{ margin: "8px 0 0" }}><span aria-hidden="true">*</span> Obligatorio</p>
         </div>
         <div className="modal-actions">
-          <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
-          <button className="btn btn-primary" onClick={onAgregar}><Check size={16} /> Agregar</button>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>Cerrar</button>
+          <button type="submit" className="btn btn-primary"><Check size={16} aria-hidden="true" /> Guardar datos</button>
         </div>
-      </div>
-    </div>
+      </form>
+    </Modal>
   );
 }
 
 /* etiqueta + color para tickets y cocina */
 function ticketView(t) {
+  if (t.reenvio) return { label: "Reenvío (no es venta)", color: "var(--tinta2)" };
   if (t.esExtra) return { label: "Orden extra", color: "var(--especial)" };
   if (t.tipo === "aqui" && t.paraLlevar) return { label: "Exclusivo para llevar", color: TIPOS.llevar.color };
   const Tb = TIPOS[t.tipo] || TIPOS.aqui;
@@ -1300,33 +1207,9 @@ function ticketView(t) {
 const esBebida = (it) => it.cat === "bebida" || (it.key || "").startsWith("beb-");
 const itemPrecio = (it) => (it.precio || 0) * it.cantidad;
 
-// Nombre completo, pero recortado con reglas para que SIEMPRE quepa en un renglón de 58mm.
-function nombreTicket(item) {
-  let n = (item.corto || item.nombre || "").trim();
-  n = n
-    .replace(/^Quesadilla de\s+/i, "Quesa. ")
-    .replace(/^Quesadilla\b/i, "Quesa.")
-    .replace(/^Media costra\b/i, "½ Costra")
-    .replace(/\bde queso\b/i, "queso")
-    .replace(/\bextra\b/i, "")
-    .replace(/\s*\(([^)]*)\)/g, " $1")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  return n;
-}
-
 const AUTOPRINT_KEY = "tequeria_autoprint";
 const getAutoprint = () => { try { return localStorage.getItem(AUTOPRINT_KEY) === "1"; } catch { return false; } };
 const setAutoprintLS = (v) => { try { localStorage.setItem(AUTOPRINT_KEY, v ? "1" : "0"); } catch {} };
-
-// Identificador estable de este dispositivo (para la sesión única de cocina)
-const SID_KEY = "tequeria_cocina_sid";
-function getSid() {
-  let s = null;
-  try { s = localStorage.getItem(SID_KEY); } catch {}
-  if (!s) { s = Math.random().toString(36).slice(2) + Date.now().toString(36); try { localStorage.setItem(SID_KEY, s); } catch {} }
-  return s;
-}
 
 // Sonido corto (beep) sin archivos
 function beep() {
@@ -1350,23 +1233,21 @@ function notificar(titulo, cuerpo) {
   } catch {}
 }
 
-function TicketModal({ t, negocio, onClose, recienEnviado, autoPrint }) {
+function TicketModal({ t, negocio, onClose, autoPrint }) {
   const ex = t.extras || [];
   const ordenes = t.ordenes || [];
   const [modo, setModo] = useState(t.cuenta || "junta");   // "junta" | "separada"
   const [auto, setAuto] = useState(getAutoprint());
   const doPrint = () => { setTimeout(() => window.print(), 80); };
 
-  // Auto-imprimir al abrir (cuando el cocinero activa auto-imprimir)
   useEffect(() => {
-    if (autoPrint || (recienEnviado && getAutoprint())) {
+    if (autoPrint) {
       const id = setTimeout(() => window.print(), 350);
       return () => clearTimeout(id);
     }
   }, []);
 
-  const total = ordenes.reduce((s, o) => s + o.items.reduce((a, i) => a + itemPrecio(i), 0), 0)
-    + ex.reduce((a, e) => a + itemPrecio(e), 0);
+  const total = ordenes.reduce((s, o) => s + o.items.reduce((a, i) => a + itemPrecio(i), 0), 0) + ex.reduce((a, e) => a + itemPrecio(e), 0);
 
   // En modo JUNTA agrupamos las bebidas de todas las órdenes hasta abajo
   const bebidasJuntas = [];
@@ -1386,165 +1267,164 @@ function TicketModal({ t, negocio, onClose, recienEnviado, autoPrint }) {
   );
 
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal modal-ticket" onClick={(e) => e.stopPropagation()}>
-        <div id="print-area" className="ticket-print t58">
-          <div className="tp-name">{negocio}</div>
-          <div className="tp-sub">{t.origen}{t.paraLlevar ? " · para llevar" : ""}</div>
-          <div className="tp-meta"><span>Mesero: {t.mesero}</span><span>{t.hora}</span></div>
-          <div className="tp-meta"><span>{t.fecha}</span><span className="tp-modo-tag">{modo === "separada" ? "CUENTA SEPARADA" : "CUENTA"}</span></div>
-          {t.domicilio && (
-            <div className="tp-dom">
-              {t.domicilio.nombre && <div>Cliente: {t.domicilio.nombre}</div>}
-              <div>Dir: {t.domicilio.direccion}</div>
-              {t.domicilio.referencia && <div>Ref: {t.domicilio.referencia}</div>}
-              <div>Tel: {t.domicilio.telefono}</div>
-              <div>Pago: {t.domicilio.pago}{t.domicilio.tiempo ? ` · ${t.domicilio.tiempo} min` : ""}</div>
-            </div>
-          )}
-          <div className="tp-line" />
+    <Modal titulo={`Ticket · ${t.origen}`} icono={<Printer size={20} aria-hidden="true" />} onClose={onClose} className="modal-ticket">
+      <div id="print-area" className="ticket-print t58">
+        <div className="tp-name">{negocio}</div>
+        <div className="tp-sub">{t.origen}{t.paraLlevar ? " · para llevar" : ""}{t.reenvio ? " · REIMPRESIÓN" : ""}</div>
+        <div className="tp-meta"><span>Mesero: {t.mesero}</span><span>{t.hora}</span></div>
+        <div className="tp-meta"><span>{t.fecha}</span><span className="tp-modo-tag">{modo === "separada" ? "CUENTA SEPARADA" : "CUENTA"}</span></div>
+        {t.domicilio && !t.domicilio.anonimizado && (
+          <div className="tp-dom">
+            {t.domicilio.nombre && <div>Cliente: {t.domicilio.nombre}</div>}
+            <div>Dir: {t.domicilio.direccion}</div>
+            {t.domicilio.referencia && <div>Ref: {t.domicilio.referencia}</div>}
+            <div>Tel: {t.domicilio.telefono}</div>
+            <div>Pago: {t.domicilio.pago}{t.domicilio.tiempo ? ` · ${t.domicilio.tiempo} min` : ""}</div>
+          </div>
+        )}
+        <div className="tp-line" />
 
-          {modo === "separada" ? (
-            ordenes.map((o) => {
-              const sub = o.items.reduce((a, i) => a + itemPrecio(i), 0);
+        {modo === "separada" ? (
+          ordenes.map((o) => {
+            const sub = o.items.reduce((a, i) => a + itemPrecio(i), 0);
+            return (
+              <div key={o.id} className="tp-orden">
+                <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
+                <div className="tp-items">{o.items.map((it) => <Item key={it.key} it={it} />)}</div>
+                <div className="tp-suborden"><span>Subtotal {o.nombre}</span><span>{money(sub)}</span></div>
+              </div>
+            );
+          })
+        ) : (
+          <>
+            {ordenes.map((o) => {
+              const comida = o.items.filter((it) => !esBebida(it));
+              if (comida.length === 0) return null;
               return (
                 <div key={o.id} className="tp-orden">
                   <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
-                  <div className="tp-items">{o.items.map((it) => <Item key={it.key} it={it} />)}</div>
-                  <div className="tp-suborden"><span>Subtotal {o.nombre}</span><span>{money(sub)}</span></div>
+                  <div className="tp-items">{comida.map((it) => <Item key={it.key} it={it} />)}</div>
                 </div>
               );
-            })
-          ) : (
-            <>
-              {ordenes.map((o) => {
-                const comida = o.items.filter((it) => !esBebida(it));
-                if (comida.length === 0) return null;
-                return (
-                  <div key={o.id} className="tp-orden">
-                    <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
-                    <div className="tp-items">{comida.map((it) => <Item key={it.key} it={it} />)}</div>
-                  </div>
-                );
-              })}
-              {bebidasJuntas.length > 0 && (
-                <div className="tp-orden tp-bebidas">
-                  <div className="tp-oname">BEBIDAS</div>
-                  <div className="tp-items">{bebidasJuntas.map((it) => <Item key={it.key} it={it} />)}</div>
-                </div>
-              )}
-            </>
-          )}
-
-          {ex.length > 0 && (
-            <>
-              <div className="tp-line" />
-              <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
-              <div className="tp-items">{ex.map((it) => <Item key={it.key} it={it} />)}</div>
-            </>
-          )}
-
-          <div className="tp-line" />
-          <div className="tp-total"><span>TOTAL</span><span>{money(total)}</span></div>
-          <div className="tp-foot">¡Gracias por su compra!</div>
-        </div>
-
-        {ordenes.length > 1 && (
-          <div className="ticket-modos no-print">
-            <button className={"seg-b" + (modo === "junta" ? " on" : "")} onClick={() => setModo("junta")}>Junta</button>
-            <button className={"seg-b" + (modo === "separada" ? " on" : "")} onClick={() => setModo("separada")}>Separada</button>
-          </div>
+            })}
+            {bebidasJuntas.length > 0 && (
+              <div className="tp-orden tp-bebidas">
+                <div className="tp-oname">BEBIDAS</div>
+                <div className="tp-items">{bebidasJuntas.map((it) => <Item key={it.key} it={it} />)}</div>
+              </div>
+            )}
+          </>
         )}
-        <label className="auto-print no-print">
-          <input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); setAutoprintLS(e.target.checked); }} />
-          Auto-imprimir nuevos pedidos (cocina)
-        </label>
-        <div className="modal-actions no-print">
-          <button className="btn btn-ghost" onClick={onClose}>Cerrar</button>
-          <button className="btn btn-primary" onClick={doPrint}><Printer size={16} /> Imprimir</button>
+
+        {ex.length > 0 && (
+          <>
+            <div className="tp-line" />
+            <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
+            <div className="tp-items">{ex.map((it) => <Item key={it.key} it={it} />)}</div>
+          </>
+        )}
+
+        <div className="tp-line" />
+        <div className="tp-total"><span>TOTAL</span><span>{t.reenvio ? "—" : money(total)}</span></div>
+        <div className="tp-foot">¡Gracias por su compra!</div>
+      </div>
+
+      {ordenes.length > 1 && (
+        <div className="ticket-modos no-print" role="group" aria-label="Formato de la cuenta">
+          <button type="button" className="seg-b" aria-pressed={modo === "junta"} onClick={() => setModo("junta")}>Junta</button>
+          <button type="button" className="seg-b" aria-pressed={modo === "separada"} onClick={() => setModo("separada")}>Separada</button>
         </div>
+      )}
+      <label className="auto-print no-print">
+        <input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); setAutoprintLS(e.target.checked); }} />
+        Auto-imprimir nuevos pedidos (cocina)
+      </label>
+      <div className="modal-actions no-print">
+        <button type="button" className="btn btn-ghost" onClick={onClose}>Cerrar</button>
+        <button type="button" className="btn btn-primary" onClick={doPrint}><Printer size={16} aria-hidden="true" /> Imprimir</button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================== AVISOS DE COCINA ============================== */
+function CocinaAlertas({ data, onAbrir }) {
+  const seen = useRef(null);
+  const [nuevos, setNuevos] = useState([]);
+  const [permiso, setPermiso] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+
+  useEffect(() => {
+    const pend = (data.cocina || []).filter((t) => t.estado !== "listo");
+    const ids = new Set(pend.map((t) => t.id));
+    if (seen.current === null) { seen.current = ids; return; }   // primera carga: no avisar
+    const recien = pend.filter((t) => !seen.current.has(t.id));
+    seen.current = ids;
+    if (recien.length > 0) {
+      const t0 = recien[0];
+      notificar("Nuevo pedido", (t0.esExtra ? "Orden extra · " : "") + t0.origen + (recien.length > 1 ? ` (+${recien.length - 1})` : ""));
+      setNuevos((xs) => [...recien, ...xs].slice(0, 8));
+      if (getAutoprint()) onAbrir(recien[0], true);
+    }
+  }, [data.cocina]);
+
+  const pedirPermiso = async () => { try { setPermiso(await Notification.requestPermission()); } catch {} };
+  const quitar = (id) => setNuevos((xs) => xs.filter((x) => x.id !== id));
+
+  if (nuevos.length === 0 && permiso !== "default") return null;
+  return (
+    <div className="cocina-alertas" role="region" aria-label="Avisos de cocina">
+      {permiso === "default" && (
+        <button type="button" className="alerta-permiso" onClick={pedirPermiso}>🔔 Activar avisos de nuevos pedidos</button>
+      )}
+      <div role="status" aria-live="polite" style={{ display: "contents" }}>
+        {nuevos.map((t) => (
+          <div key={t.id} className={"alerta-pedido" + (t.esExtra ? " extra" : "")}>
+            <span className="alerta-txt"><span aria-hidden="true">🔔 </span>{t.esExtra ? "Orden extra" : "Nuevo pedido"}: <b>{t.origen}</b></span>
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => { onAbrir(t); quitar(t.id); }}><Printer size={14} aria-hidden="true" /> Imprimir</button>
+            <button type="button" className="icon-btn" aria-label={`Ocultar aviso de ${t.origen}`} onClick={() => quitar(t.id)}><X size={16} aria-hidden="true" /></button>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
 /* ============================== COCINA ============================== */
-function resumenDia(hist) {
-  const porTipo = {}, porMesero = {}, prod = {};
-  let total = 0;
-  hist.forEach((t) => {
-    const tt = t.total != null ? t.total : ticketTotal(t);
-    total += tt;
-    const tipo = (TIPOS[t.tipo] && TIPOS[t.tipo].label) || "Otro";
-    porTipo[tipo] = (porTipo[tipo] || 0) + tt;
-    porMesero[t.mesero || "—"] = (porMesero[t.mesero || "—"] || 0) + tt;
-    (t.ordenes || []).forEach((o) => o.items.forEach((it) => {
-      const n = it.corto || it.nombre; prod[n] = (prod[n] || 0) + it.cantidad;
-    }));
-  });
-  const top = Object.entries(prod).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([nombre, cant]) => ({ nombre, cant }));
-  return { total, count: hist.length, porTipo, porMesero, top };
-}
-
-function textoCorteWhatsApp(neg, r, gastosDia, fechaStr) {
-  const L = [];
-  L.push(`*${neg || "La Tequería"}* — Corte del ${fechaStr}`);
-  L.push(`Ventas: ${r.count}`);
-  L.push(`Total: ${money(r.total)}`);
-  L.push("");
-  L.push("Por tipo:");
-  Object.entries(r.porTipo).forEach(([k, v]) => L.push(`• ${k}: ${money(v)}`));
-  L.push("");
-  L.push("Por mesero:");
-  Object.entries(r.porMesero).forEach(([k, v]) => L.push(`• ${k}: ${money(v)}`));
-  if (r.top.length) { L.push(""); L.push("Más vendidos:"); r.top.forEach((p, i) => L.push(`${i + 1}. ${p.nombre} ×${p.cant}`)); }
-  if (gastosDia > 0) { L.push(""); L.push(`Gastos del día: ${money(gastosDia)}`); L.push(`*Neto: ${money(r.total - gastosDia)}*`); }
-  return L.join("\n");
-}
-
-function Cocina({ data, db, user }) {
+function Cocina({ data, db, user, errorCarga }) {
   const edita = puedeEditar(user, "cocina");
   const [tab, setTab] = useState("pendientes");
   const [ticket, setTicket] = useState(null);
 
-  const setEstado = (id, estado) => db.setTicketEstado(id, estado);
-  const quitar = (id) => db.archivarTicket(id);
-  const pend = data.cocina.filter((t) => t.estado !== "listo");
-  const listos = data.cocina.filter((t) => t.estado === "listo");
+  const pend = (data.cocina || []).filter((t) => t.estado !== "listo");
+  const listos = (data.cocina || []).filter((t) => t.estado === "listo");
   const historial = data.historial || [];
-  const res = resumenDia(historial);
-  const gastosHoy = (data.gastos || []).filter((g) => g.fecha === fecha()).reduce((s, g) => s + (Number(g.monto) || 0), 0);
+  const res = data.periodo || { total: 0, count: 0, porTipo: {}, porMesero: {}, top: [], gastos: 0 };
 
   const compartirWhatsApp = () => {
-    const txt = textoCorteWhatsApp(data.nombreNegocio, res, gastosHoy, fecha());
-    try { window.open("https://wa.me/?text=" + encodeURIComponent(txt), "_blank"); }
+    const txt = textoCorteWhatsApp(data.nombreNegocio, res, fecha());
+    try { window.open("https://wa.me/?text=" + encodeURIComponent(txt), "_blank", "noopener"); }
     catch { try { navigator.clipboard.writeText(txt); toast("Resumen copiado", "ok"); } catch {} }
   };
 
   const hacerCorte = async () => {
-    if (historial.length === 0) { toast("No hay ventas registradas hoy.", "info"); return; }
-    if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${res.count} · Total: ${money(res.total)}. Se guardará el corte y se limpiará el historial.`, confirmar: "Hacer corte" }))) return;
-    let adminPin = "";
-    if (supabaseReady) {
-      const pin = await pedirPin({ titulo: "Corte del día", mensaje: "Escribe el PIN de un administrador para autorizar el corte." });
-      if (pin === null) return;
-      adminPin = pin;
-    }
-    const detalle = { porTipo: res.porTipo, porMesero: res.porMesero, top: res.top, gastos: gastosHoy };
-    const okMsg = await db.hacerCorte(adminPin, detalle);
-    if (okMsg === false) { toast("PIN de administrador no válido.", "error"); return; }
-    toast("Corte del día guardado", "ok");
+    if (errorCarga) { toast("No se puede hacer el corte con datos desactualizados. Reintenta la carga primero.", "error"); return; }
+    if (!res.count) { toast("No hay ventas en este periodo.", "info"); return; }
+    if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${res.count} · Total: ${money(res.total)}. El servidor calculará el total definitivo. Las comandas pendientes seguirán en cocina.`, confirmar: "Hacer corte" }))) return;
+    const pin = await pedirPin({ titulo: "Corte del día", mensaje: "Escribe el PIN de un administrador para autorizar el corte.", etiqueta: "PIN de administrador" });
+    if (pin === null) return;
+    const r = await db.corte(pin);
+    if (r.ok) toast(`Corte guardado: ${r.r.corte.tickets} venta(s) · ${money(r.r.corte.total)}`, "ok");
   };
 
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Cocina</h2>
-        <p className="muted">{edita ? "Comandas en preparación e historial de ventas del día." : "Vista de comandas pendientes (solo lectura)."}</p></div></div>
+        <p className="muted">{edita ? "Comandas en preparación y ventas del periodo (desde el último corte)." : "Vista de comandas pendientes (solo lectura)."}</p></div></div>
 
       {edita && (
-        <div className="admin-tabs">
-          <button className={tab === "pendientes" ? "on" : ""} onClick={() => setTab("pendientes")}>Pendientes · {pend.length}</button>
-          <button className={tab === "historial" ? "on" : ""} onClick={() => setTab("historial")}>Historial / Corte</button>
+        <div className="admin-tabs" role="tablist" aria-label="Secciones de cocina">
+          <button type="button" role="tab" aria-selected={tab === "pendientes"} onClick={() => setTab("pendientes")}>Pendientes · {pend.length}</button>
+          <button type="button" role="tab" aria-selected={tab === "historial"} onClick={() => setTab("historial")}>Ventas / Corte</button>
         </div>
       )}
 
@@ -1554,13 +1434,13 @@ function Cocina({ data, db, user }) {
           <div className="cocina-grid">
             {pend.map((t) => {
               const tv = ticketView(t);
-              const tacos = contarTacos(t);
               return (
-                <div key={t.id} className={"kticket " + t.estado}>
+                <article key={t.id} className={"kticket " + t.estado} aria-label={`${tv.label}: ${t.origen}, ${t.hora}`}>
                   <div className="kt-tipo" style={{ background: tv.color }}>{tv.label}</div>
                   <div className="kt-head"><span className="kt-origen">{t.origen}</span><span className="kt-hora">{t.hora}</span></div>
                   <div className="kt-mesero">{t.mesero}</div>
-                  {t.domicilio && (
+                  {t.estado === "preparando" && <div className="kt-estado">En preparación</div>}
+                  {t.domicilio && !t.domicilio.anonimizado && (
                     <div className="kt-dom">📍 {t.domicilio.direccion}{t.domicilio.referencia ? ` · ${t.domicilio.referencia}` : ""}<br />📞 {t.domicilio.telefono} · {t.domicilio.pago}</div>
                   )}
                   <div className="kt-body">
@@ -1576,15 +1456,15 @@ function Cocina({ data, db, user }) {
                       </div>
                     )}
                   </div>
-                  <div className="kt-tacos">🌮 Tacos en total: <b>{tacos}</b></div>
+                  <div className="kt-tacos"><span aria-hidden="true">🌮 </span>Tacos en total: <b>{contarTacos(t)}</b></div>
                   {edita && (
                     <div className="kt-actions">
-                      <button className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} /> Imprimir</button>
-                      {t.estado === "pendiente" && <button className="btn btn-line btn-sm" onClick={() => setEstado(t.id, "preparando")}>Preparando</button>}
-                      <button className="btn btn-primary btn-sm" onClick={() => setEstado(t.id, "listo")}><Check size={14} /> Listo</button>
+                      <button type="button" className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} aria-hidden="true" /> Imprimir</button>
+                      {t.estado === "pendiente" && <button type="button" className="btn btn-line btn-sm" onClick={() => db.setTicketEstado(t.id, "preparando")}>Preparando</button>}
+                      <button type="button" className="btn btn-primary btn-sm" onClick={() => db.setTicketEstado(t.id, "listo")}><Check size={14} aria-hidden="true" /> Listo</button>
                     </div>
                   )}
-                </div>
+                </article>
               );
             })}
           </div>
@@ -1593,7 +1473,9 @@ function Cocina({ data, db, user }) {
               <div className="listos-row">
                 {listos.map((t) => (
                   <div key={t.id} className="listo-chip"><span>{t.origen} · {t.hora}</span>
-                    <button className="icon-btn" onClick={() => quitar(t.id)}><X size={14} /></button></div>
+                    <button type="button" className="icon-btn" aria-label={`Regresar ${t.origen} a preparación`} title="Regresar a preparación" onClick={() => db.setTicketEstado(t.id, "preparando")}><Undo2 size={16} aria-hidden="true" /></button>
+                    <button type="button" className="icon-btn" aria-label={`Quitar ${t.origen} de la lista de listos`} title="Quitar de la lista" onClick={() => db.archivarTicket(t.id)}><X size={16} aria-hidden="true" /></button>
+                  </div>
                 ))}
               </div></>
           )}
@@ -1604,43 +1486,45 @@ function Cocina({ data, db, user }) {
         <>
           <div className="corte-bar">
             <div><div className="corte-total">{money(res.total)}</div>
-              <div className="muted small">{res.count} venta(s) hoy{gastosHoy > 0 ? ` · gastos ${money(gastosHoy)} · neto ${money(res.total - gastosHoy)}` : ""}</div></div>
+              <div className="muted small">{res.count} venta(s) en el periodo{res.gastos > 0 ? ` · gastos ${money(res.gastos)} · neto ${money(res.total - res.gastos)}` : ""}</div></div>
             <div className="corte-btns">
-              <button className="btn btn-line" onClick={compartirWhatsApp} disabled={res.count === 0}>Compartir</button>
-              <button className="btn btn-primary" onClick={hacerCorte}>Hacer corte</button>
+              <button type="button" className="btn btn-line" onClick={compartirWhatsApp} disabled={res.count === 0}>Compartir</button>
+              <button type="button" className="btn btn-primary" onClick={hacerCorte} disabled={!!errorCarga}>Hacer corte</button>
             </div>
           </div>
+          <p className="muted small" style={{ marginTop: -6 }}>Ventas = comandas enviadas a cocina (los reenvíos no cuentan). El corte no confirma cobros.</p>
 
           {res.count > 0 && (
             <div className="corte-desglose">
               <div className="cd-col">
                 <h4>Por tipo</h4>
-                {Object.entries(res.porTipo).map(([k, v]) => <div key={k} className="cd-row"><span>{k}</span><b>{money(v)}</b></div>)}
+                {Object.entries(res.porTipo || {}).map(([k, v]) => <div key={k} className="cd-row"><span>{k}</span><b>{money(v)}</b></div>)}
               </div>
               <div className="cd-col">
                 <h4>Por mesero</h4>
-                {Object.entries(res.porMesero).map(([k, v]) => <div key={k} className="cd-row"><span>{k}</span><b>{money(v)}</b></div>)}
+                {Object.entries(res.porMesero || {}).map(([k, v]) => <div key={k} className="cd-row"><span>{k}</span><b>{money(v)}</b></div>)}
               </div>
               <div className="cd-col">
                 <h4>Más vendidos</h4>
-                {res.top.map((p) => <div key={p.nombre} className="cd-row"><span>{p.nombre}</span><b>×{p.cant}</b></div>)}
+                {(res.top || []).map((p) => <div key={p.nombre} className="cd-row"><span>{p.nombre}</span><b>×{p.cant}</b></div>)}
               </div>
             </div>
           )}
 
-          {historial.length === 0 && <div className="empty">Aún no hay ventas registradas hoy.</div>}
+          {historial.length === 0 && <div className="empty">Aún no hay ventas en este periodo.</div>}
+          {historial.length < res.count && <p className="muted small">Se muestran las {historial.length} más recientes de {res.count}; los totales incluyen todas.</p>}
           <div className="hist-list">
             {historial.map((t) => {
               const tv = ticketView(t);
               return (
                 <div key={t.id} className="hist-row">
-                  <span className="hist-dot" style={{ background: tv.color }} />
+                  <span className="hist-dot" aria-hidden="true" style={{ background: tv.color }} />
                   <div className="hist-info">
                     <div className="hist-origen">{t.origen}{t.esExtra ? " · orden extra" : ""}</div>
-                    <div className="muted small">{t.hora} · {t.mesero} · {(t.ordenes || []).reduce((a, o) => a + o.items.reduce((x, i) => x + i.cantidad, 0), 0)} prod.</div>
+                    <div className="muted small">{t.hora} · {t.mesero} · {contarProductos(t)} prod.</div>
                   </div>
                   <div className="hist-total">{money(t.total != null ? t.total : ticketTotal(t))}</div>
-                  <button className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} /> Ver</button>
+                  <button type="button" className="btn btn-line btn-sm" onClick={() => setTicket(t)} aria-label={`Ver ticket de ${t.origen}, ${t.hora}`}><Printer size={14} aria-hidden="true" /> Ver</button>
                 </div>
               );
             })}
@@ -1651,7 +1535,7 @@ function Cocina({ data, db, user }) {
                 {data.cortes.map((c) => (
                   <div key={c.id} className="hist-row">
                     <div className="hist-info"><div className="hist-origen">Corte {c.fecha}</div>
-                      <div className="muted small">{c.hora} · {c.tickets} ventas{c.detalle && c.detalle.top && c.detalle.top[0] ? ` · top: ${c.detalle.top[0].nombre}` : ""}</div></div>
+                      <div className="muted small">{c.hora} · {c.tickets} ventas{c.gastos > 0 ? ` · gastos ${money(c.gastos)}` : ""}{c.detalle?.top?.[0] ? ` · top: ${c.detalle.top[0].nombre}` : ""}</div></div>
                     <div className="hist-total">{money(c.total)}</div>
                   </div>
                 ))}
@@ -1666,25 +1550,39 @@ function Cocina({ data, db, user }) {
 }
 
 /* ============================== INVENTARIO ============================== */
+function CantidadInput({ valor, nombre, onGuardar }) {
+  const [txt, setTxt] = useState(String(valor));
+  const [editando, setEditando] = useState(false);
+  useEffect(() => { if (!editando) setTxt(String(valor)); }, [valor, editando]);
+  const confirmar = () => {
+    setEditando(false);
+    const n = parseInt(txt, 10);
+    if (!Number.isFinite(n) || n < 0) { setTxt(String(valor)); return; }
+    if (n !== valor) onGuardar(n);
+  };
+  return (
+    <input className="qty-inp" inputMode="numeric" aria-label={`Existencia de ${nombre}`} value={txt}
+      onFocus={() => setEditando(true)} onChange={(e) => setTxt(e.target.value.replace(/\D/g, "").slice(0, 6))}
+      onBlur={confirmar} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+  );
+}
+
 function Inventario({ data, db }) {
-  const setBebida = (id, patch) => db.updateBebida(id, patch);
-  const setCarne = (id, patch) => db.updateCarne(id, patch);
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Inventario</h2>
-        <p className="muted">Marca lo disponible hoy. Cuando una bebida llega a 0 desaparece del menú. Las carnes siguen apareciendo salvo que las desactives.</p></div></div>
+        <p className="muted">Marca lo disponible hoy. Cuando una bebida llega a 0 desaparece del menú. Las ventas descuentan existencias en el servidor.</p></div></div>
       <h3 className="sub-h">Bebidas y aguas</h3>
       <div className="inv-list">
         {data.bebidas.map((b) => (
           <div key={b.id} className={"inv-row" + (b.cantidad === 0 ? " agotado" : "")}>
-            <label className="switch"><input type="checkbox" checked={b.activo} onChange={(e) => setBebida(b.id, { activo: e.target.checked })} /><span /></label>
+            <label className="switch"><input type="checkbox" checked={b.activo} aria-label={`${b.nombre} disponible`} onChange={(e) => db.updateBebida(b.id, { activo: e.target.checked })} /><span aria-hidden="true" /></label>
             <span className="inv-name">{b.nombre}</span>
             {b.cantidad === 0 && <span className="tag-agotado">Agotado</span>}
             <div className="stepper">
-              <button onClick={() => setBebida(b.id, { cantidad: Math.max(0, b.cantidad - 1) })}><Minus size={14} /></button>
-              <input className="qty-inp" inputMode="numeric" value={b.cantidad}
-                onChange={(e) => setBebida(b.id, { cantidad: Math.max(0, parseInt(e.target.value || "0", 10)) })} />
-              <button onClick={() => setBebida(b.id, { cantidad: b.cantidad + 1 })}><Plus size={14} /></button>
+              <button type="button" aria-label={`Restar una ${b.nombre}`} onClick={() => db.ajustarBebida(b.id, -1)} disabled={b.cantidad === 0}><Minus size={16} aria-hidden="true" /></button>
+              <CantidadInput valor={b.cantidad} nombre={b.nombre} onGuardar={(n) => db.updateBebida(b.id, { cantidad: n })} />
+              <button type="button" aria-label={`Sumar una ${b.nombre}`} onClick={() => db.ajustarBebida(b.id, 1)}><Plus size={16} aria-hidden="true" /></button>
             </div>
           </div>
         ))}
@@ -1693,45 +1591,57 @@ function Inventario({ data, db }) {
       <div className="inv-list">
         {data.carnes.map((c) => (
           <div key={c.id} className="inv-row">
-            <label className="switch"><input type="checkbox" checked={c.activo} onChange={(e) => setCarne(c.id, { activo: e.target.checked })} /><span /></label>
+            <label className="switch"><input type="checkbox" checked={c.activo} aria-label={`${c.nombre} disponible en el menú`} onChange={(e) => db.updateCarne(c.id, e.target.checked)} /><span aria-hidden="true" /></label>
             <span className="inv-name">{c.nombre}</span>
             <span className="muted">{c.activo ? "Disponible en el menú" : "Oculta del menú"}</span>
           </div>
         ))}
       </div>
-      <p className="muted small" style={{ marginTop: 18 }}>Para agregar o quitar bebidas, carnes o productos, y cambiar precios, ve a Administración (solo el administrador).</p>
+      <p className="muted small" style={{ marginTop: 18 }}>Para agregar o quitar bebidas, carnes o productos, y cambiar precios, ve a Administración.</p>
     </div>
   );
 }
 
 /* ============================== GASTOS ============================== */
-function Gastos({ data, db, user }) {
+function Gastos({ data, db }) {
   const [concepto, setConcepto] = useState("");
   const [monto, setMonto] = useState("");
-  const add = () => {
-    const m = parseFloat(monto); if (!concepto.trim() || isNaN(m)) return;
-    db.addGasto({ id: uid(), concepto: concepto.trim(), monto: m, fecha: fecha(), hora: hora(), user: user.nombre });
-    setConcepto(""); setMonto("");
+  const [err, setErr] = useState("");
+  const id = useId();
+  const gastos = data.gastos || [];
+  const add = async (e) => {
+    e.preventDefault(); setErr("");
+    const m = leerImporte(monto);
+    if (!concepto.trim()) { setErr("Escribe el concepto."); return; }
+    if (!m || m <= 0) { setErr("Escribe un monto mayor a cero."); return; }
+    const r = await db.addGasto(concepto.trim(), m);
+    if (r.ok) { setConcepto(""); setMonto(""); }
   };
-  const borrar = (id) => db.removeGasto(id);
-  const total = data.gastos.reduce((s, g) => s + g.monto, 0);
+  const borrar = async (g) => {
+    if (!(await confirmDialog({ titulo: "Eliminar gasto", mensaje: `¿Eliminar «${g.concepto}» por ${money(g.monto)}? Quedará registrado en la bitácora.`, confirmar: "Eliminar", peligro: true }))) return;
+    db.removeGasto(g.id);
+  };
+  const total = gastos.reduce((s, g) => s + (Number(g.monto) || 0), 0);
   return (
     <div className="screen">
-      <div className="screen-head"><div><h2>Gastos</h2><p className="muted">Registro de salidas de dinero del día.</p></div></div>
-      <div className="gasto-add">
-        <input className="inp" placeholder="Concepto" value={concepto} onChange={(e) => setConcepto(e.target.value)} />
-        <input className="inp inp-monto" placeholder="$0.00" inputMode="decimal" value={monto} onChange={(e) => setMonto(e.target.value)} />
-        <button className="btn btn-add" onClick={add}><Plus size={16} /> Registrar</button>
-      </div>
-      <div className="gasto-total">Total registrado: <b>${total.toFixed(2)}</b></div>
+      <div className="screen-head"><div><h2>Gastos</h2><p className="muted">Salidas de dinero del periodo actual (desde el último corte).</p></div></div>
+      <form className="gasto-add" onSubmit={add}>
+        <div className="campo"><label htmlFor={id + "c"}>Concepto</label>
+          <input id={id + "c"} className="inp" value={concepto} maxLength={120} onChange={(e) => setConcepto(e.target.value)} /></div>
+        <div className="campo campo-monto"><label htmlFor={id + "m"}>Monto ($)</label>
+          <input id={id + "m"} className="inp" placeholder="0.00" inputMode="decimal" value={monto} onChange={(e) => setMonto(e.target.value)} /></div>
+        <button type="submit" className="btn btn-add"><Plus size={16} aria-hidden="true" /> Registrar</button>
+      </form>
+      {err && <div className="login-err" role="alert" style={{ marginTop: 8 }}>{err}</div>}
+      <div className="gasto-total">Total del periodo: <b>{money(total)}</b></div>
       <div className="gasto-list">
-        {data.gastos.length === 0 && <div className="empty">Aún no hay gastos.</div>}
-        {data.gastos.map((g) => (
+        {gastos.length === 0 && <div className="empty">Aún no hay gastos en este periodo.</div>}
+        {gastos.map((g) => (
           <div key={g.id} className="gasto-row">
             <div><div className="gasto-concepto">{g.concepto}</div>
               <div className="muted small">{g.fecha} · {g.hora} · {g.user}</div></div>
-            <div className="gasto-monto">${g.monto.toFixed(2)}</div>
-            <button className="icon-btn" onClick={() => borrar(g.id)}><Trash2 size={15} /></button>
+            <div className="gasto-monto">{money(g.monto)}</div>
+            <button type="button" className="icon-btn" aria-label={`Eliminar gasto ${g.concepto}`} onClick={() => borrar(g)}><Trash2 size={17} aria-hidden="true" /></button>
           </div>
         ))}
       </div>
@@ -1740,104 +1650,87 @@ function Gastos({ data, db, user }) {
 }
 
 /* ============================== ADMINISTRACIÓN (solo admin) ============================== */
-const slug = (s) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-  .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || uid();
-const num = (v) => Math.max(0, parseFloat(v || "0") || 0);
-
-const CAT_LABELS = {
-  taco: "Tacos", quesa: "Quesadillas / Gringas", volcan: "Volcanes", costra: "Especialidad — Costra",
-};
-
 function Admin({ data, db, user }) {
   const [tab, setTab] = useState("precios");
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Administración</h2>
         <p className="muted">Solo el administrador. Aquí defines precios, productos y usuarios.</p></div></div>
-      <div className="admin-tabs">
+      <div className="admin-tabs" role="tablist" aria-label="Secciones de administración">
         {[["precios", "Precios"], ["productos", "Productos"], ["meseros", "Usuarios"]].map(([k, l]) => (
-          <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>
+          <button type="button" role="tab" key={k} aria-selected={tab === k} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
-      {tab === "precios" && <AdminPrecios data={data} db={db} />}
-      {tab === "productos" && <AdminProductos data={data} db={db} />}
-      {tab === "meseros" && <AdminMeseros data={data} db={db} user={user} />}
+      <div role="tabpanel">
+        {tab === "precios" && <AdminPrecios data={data} db={db} />}
+        {tab === "productos" && <AdminProductos data={data} db={db} />}
+        {tab === "meseros" && <AdminMeseros data={data} db={db} user={user} />}
+      </div>
     </div>
   );
 }
 
 function AdminPrecios({ data, db }) {
-  const setPrecio = (key, v) => db.setPrecio(key, num(v));
-  const setExtra = (id, v) => db.setExtraPrecio(id, num(v));
-  const setBeb = (id, v) => db.updateBebida(id, { precio: num(v) });
-
-  const grupos = {
-    taco: [
-      ...data.carnes.map((c) => ({ key: `taco-${c.id}`, nombre: `Taco ${c.nombre}` })),
-      { key: "quesa-maiz-queso", nombre: "Quesadilla de maíz (queso)" },
-      ...data.carnes.map((c) => ({ key: `taco-queso-${c.id}`, nombre: `Taco de queso ${c.nombre}` })),
-    ],
-    quesa: [
-      ...data.carnes.map((c) => ({ key: `gringa-${c.id}`, nombre: `Gringa ${c.nombre}` })),
-      ...data.carnes.map((c) => ({ key: `llenadora-${c.id}`, nombre: `Llenadora ${c.nombre}` })),
-      { key: "quesa-queso", nombre: "Quesadilla de queso" },
-    ],
-    volcan: [
-      ...data.carnes.map((c) => ({ key: `volcan-${c.id}`, nombre: `Volcán ${c.nombre}` })),
-      { key: "volcan-queso", nombre: "Volcán de queso" },
-    ],
-    costra: [
-      ...data.carnes.map((c) => ({ key: `costra-${c.id}`, nombre: `Costra ${c.nombre}` })),
-      { key: "costra-queso", nombre: "Costra de queso" },
-      ...data.carnes.map((c) => ({ key: `media-costra-${c.id}`, nombre: `Media costra ${c.nombre}` })),
-      { key: "media-costra-queso", nombre: "Media costra de queso" },
-    ],
-  };
-  const empaqueRows = [
-    { key: "bolsa-verdura", nombre: "Bolsa de verdura (zanahoria, pepino, limón)" },
-    { key: "tortilla-harina", nombre: "Tortillas extra (harina)" },
-    { key: "tortilla-maiz", nombre: "Tortillas extra (maíz)" },
-  ];
-
+  const grupos = catalogoBase(data.carnes);
+  const empaqueRows = empaqueItems(data.precios).filter((e) => e.key !== "verdura-aparte");
   return (
     <div>
+      <p className="muted small">Escribe el precio y presiona Enter o sal del campo para guardarlo. Se admiten centavos (ej. 25.50).</p>
       {Object.entries(grupos).map(([cat, rows]) => (
-        <div key={cat}>
-          <h3 className="sub-h" style={{ color: CATS[cat].color }}>{CAT_LABELS[cat]}</h3>
+        <section key={cat} aria-labelledby={`hp-${cat}`}>
+          <h3 className="sub-h" id={`hp-${cat}`} style={{ color: CATS[cat].color }}>{CATS[cat].label}</h3>
           <div className="precio-list">
             {rows.map((r) => (
-              <PrecioRow key={r.key} nombre={r.nombre} value={data.precios[r.key] ?? 0} onChange={(v) => setPrecio(r.key, v)} />
+              <PrecioRow key={r.key} nombre={r.nombre} value={data.precios[r.key] ?? 0} onGuardar={(v) => db.setPrecio(r.key, v)} />
             ))}
             {data.extras.filter((e) => e.cat === cat).map((e) => (
-              <PrecioRow key={e.id} nombre={e.nombre + " (extra)"} value={e.precio} onChange={(v) => setExtra(e.id, v)} />
+              <PrecioRow key={e.id} nombre={e.nombre + " (agregado)"} value={e.precio} onGuardar={(v) => db.setExtraPrecio(e.id, v)} />
             ))}
           </div>
-        </div>
+        </section>
       ))}
       <h3 className="sub-h" style={{ color: CATS.bebida.color }}>Refrescos y aguas</h3>
       <div className="precio-list">
         {data.bebidas.map((b) => (
-          <PrecioRow key={b.id} nombre={b.nombre} value={b.precio ?? 0} onChange={(v) => setBeb(b.id, v)} />
+          <PrecioRow key={b.id} nombre={b.nombre} value={b.precio ?? 0} onGuardar={(v) => db.updateBebida(b.id, { precio: v })} />
         ))}
       </div>
       <h3 className="sub-h" style={{ color: CATS.empaque.color }}>Para llevar / empaque</h3>
       <p className="muted small">La "verdura aparte" siempre es sin costo.</p>
       <div className="precio-list">
         {empaqueRows.map((r) => (
-          <PrecioRow key={r.key} nombre={r.nombre} value={data.precios[r.key] ?? 0} onChange={(v) => setPrecio(r.key, v)} />
+          <PrecioRow key={r.key} nombre={r.nombre} value={data.precios[r.key] ?? 0} onGuardar={(v) => db.setPrecio(r.key, v)} />
         ))}
       </div>
     </div>
   );
 }
 
-function PrecioRow({ nombre, value, onChange }) {
+// Edita con texto local y guarda al confirmar (no una petición por tecla)
+function PrecioRow({ nombre, value, onGuardar }) {
+  const id = useId();
+  const [txt, setTxt] = useState(String(value));
+  const [editando, setEditando] = useState(false);
+  const [estado, setEstado] = useState("");
+  useEffect(() => { if (!editando) setTxt(String(value)); }, [value, editando]);
+  const confirmar = async () => {
+    setEditando(false);
+    const v = leerImporte(txt);
+    if (v == null || v > 100000) { setEstado("No válido"); setTxt(String(value)); return; }
+    if (v === Number(value)) { setEstado(""); return; }
+    setEstado("Guardando…");
+    const r = await onGuardar(v);
+    setEstado(r?.ok ? "Guardado ✓" : "Error");
+  };
   return (
     <div className="precio-row">
-      <span className="precio-nombre">{nombre}</span>
+      <label className="precio-nombre" htmlFor={id}>{nombre}</label>
+      <span className="precio-estado" aria-live="polite">{estado}</span>
       <div className="precio-input">
-        <span>$</span>
-        <input inputMode="decimal" value={value} onChange={(e) => onChange(e.target.value)} />
+        <span aria-hidden="true">$</span>
+        <input id={id} inputMode="decimal" value={txt} onFocus={() => { setEditando(true); setEstado(""); }}
+          onChange={(e) => setTxt(e.target.value)} onBlur={confirmar}
+          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") { setTxt(String(value)); setEditando(false); } }} />
       </div>
     </div>
   );
@@ -1846,16 +1739,23 @@ function PrecioRow({ nombre, value, onChange }) {
 function CatCategoria({ titulo, cat, base, extras, ocultos, onToggle, onAdd, onDelExtra }) {
   const [nombre, setNombre] = useState("");
   const [precio, setPrecio] = useState("");
-  const agregar = () => { if (!nombre.trim()) return; onAdd(cat, nombre.trim(), precio); setNombre(""); setPrecio(""); };
+  const id = useId();
+  const agregar = async (e) => {
+    e.preventDefault();
+    if (!nombre.trim()) return;
+    const p = leerImporte(precio) ?? 0;
+    const r = await onAdd(cat, nombre.trim(), p);
+    if (r?.ok) { setNombre(""); setPrecio(""); }
+  };
   return (
-    <div>
-      <h3 className="sub-h" style={{ color: CATS[cat].color }}>{titulo}</h3>
+    <section aria-labelledby={id + "h"}>
+      <h3 className="sub-h" id={id + "h"} style={{ color: CATS[cat].color }}>{titulo}</h3>
       <div className="inv-list">
         {base.map((it) => {
           const oculto = ocultos.includes(it.key);
           return (
             <div key={it.key} className={"inv-row" + (oculto ? " agotado" : "")}>
-              <label className="switch"><input type="checkbox" checked={!oculto} onChange={() => onToggle(it.key)} /><span /></label>
+              <label className="switch"><input type="checkbox" checked={!oculto} aria-label={`Mostrar ${it.nombre} en el menú`} onChange={() => onToggle(it.key)} /><span aria-hidden="true" /></label>
               <span className="inv-name">{it.nombre}</span>
               {oculto && <span className="muted">oculto del menú</span>}
             </div>
@@ -1864,519 +1764,166 @@ function CatCategoria({ titulo, cat, base, extras, ocultos, onToggle, onAdd, onD
         {extras.map((e) => (
           <div key={e.id} className="inv-row">
             <span className="inv-name">{e.nombre} <span className="muted">(agregado)</span></span>
-            <button className="btn btn-danger-ghost btn-sm" onClick={() => onDelExtra(e.id)}><Trash2 size={14} /> Quitar</button>
+            <button type="button" className="btn btn-danger-ghost btn-sm" onClick={() => onDelExtra(e)}><Trash2 size={14} aria-hidden="true" /> Quitar</button>
           </div>
         ))}
       </div>
-      <div className="prod-add">
-        <input className="inp" placeholder={`Agregar en ${titulo}`} value={nombre}
-          onChange={(e) => setNombre(e.target.value)} onKeyDown={(e) => e.key === "Enter" && agregar()} />
-        <input className="inp inp-sm" inputMode="decimal" placeholder="Precio" value={precio} onChange={(e) => setPrecio(e.target.value)} />
-        <button className="btn btn-add" onClick={agregar}><Plus size={16} /></button>
-      </div>
-    </div>
+      <form className="prod-add" onSubmit={agregar}>
+        <label className="sr-only" htmlFor={id + "n"}>Nuevo producto en {titulo}</label>
+        <input id={id + "n"} className="inp" placeholder={`Agregar en ${titulo}`} value={nombre} maxLength={60} onChange={(e) => setNombre(e.target.value)} />
+        <label className="sr-only" htmlFor={id + "p"}>Precio</label>
+        <input id={id + "p"} className="inp inp-sm" inputMode="decimal" placeholder="Precio" value={precio} onChange={(e) => setPrecio(e.target.value)} />
+        <button type="submit" className="btn btn-add" aria-label={`Agregar producto en ${titulo}`}><Plus size={16} aria-hidden="true" /></button>
+      </form>
+    </section>
   );
 }
 
 function AdminProductos({ data, db }) {
   const [carne, setCarne] = useState("");
   const [beb, setBeb] = useState({ nombre: "", precio: "", cantidad: "" });
+  const id = useId();
   const base = catalogoBase(data.carnes);
   const ocultos = data.ocultos || [];
 
-  const addCarne = () => {
+  const addCarne = async (e) => {
+    e.preventDefault();
     const n = carne.trim(); if (!n) return;
-    const id = slug(n);
-    if (data.carnes.some((c) => c.id === id)) { toast("Esa carne ya existe.", "error"); return; }
-    db.addCarne(n);
-    toast(`Carne "${n}" agregada`, "ok");
-    setCarne("");
+    if (data.carnes.some((c) => c.id === slug(n))) { toast("Esa carne ya existe.", "error"); return; }
+    const r = await db.addCarne(n);
+    if (r.ok) setCarne("");
   };
-  const quitarCarne = async (id) => {
-    if (!(await confirmDialog({ titulo: "Quitar carne", mensaje: "¿Quitar esta carne y todos sus productos del menú?", confirmar: "Quitar", peligro: true }))) return;
-    db.removeCarne(id);
+  const quitarCarne = async (c) => {
+    if (!(await confirmDialog({ titulo: "Quitar carne", mensaje: `¿Quitar ${c.nombre} y todos sus productos del menú?`, confirmar: "Quitar", peligro: true }))) return;
+    db.removeCarne(c.id);
   };
-
-  const toggleOculto = (key) => db.toggleOculto(key);
-  const addExtraEn = (cat, nombre, precio) => db.addExtra(cat, nombre, num(precio));
-  const quitarExtra = (id) => db.removeExtra(id);
-
-  const addBeb = () => {
+  const quitarExtra = async (e) => {
+    if (!(await confirmDialog({ titulo: "Quitar producto", mensaje: `¿Quitar «${e.nombre}» del menú?`, confirmar: "Quitar", peligro: true }))) return;
+    db.removeExtra(e.id);
+  };
+  const addBeb = async (e) => {
+    e.preventDefault();
     const n = beb.nombre.trim(); if (!n) return;
-    db.addBebida({ id: uid(), nombre: n, cantidad: num(beb.cantidad), activo: true, precio: num(beb.precio) });
-    setBeb({ nombre: "", precio: "", cantidad: "" });
+    const r = await db.addBebida(n, leerImporte(beb.precio) ?? 0, parseInt(beb.cantidad || "0", 10) || 0);
+    if (r.ok) setBeb({ nombre: "", precio: "", cantidad: "" });
   };
-  const quitarBeb = (id) => db.removeBebida(id);
-  const toggleBeb = (id) => { const b = data.bebidas.find((x) => x.id === id); if (b) db.updateBebida(id, { activo: !b.activo }); };
-
+  const quitarBeb = async (b) => {
+    if (!(await confirmDialog({ titulo: "Quitar bebida", mensaje: `¿Quitar ${b.nombre} del inventario?`, confirmar: "Quitar", peligro: true }))) return;
+    db.removeBebida(b.id);
+  };
   const cats = [["taco", "Tacos"], ["quesa", "Quesadillas / Gringas"], ["volcan", "Volcanes"], ["costra", "Especialidad — Costra"]];
 
   return (
     <div>
       <h3 className="sub-h">Carnes</h3>
-      <p className="muted small">Cada carne genera taco, gringa, llenadora, volcán, costra y media costra. Quitarla elimina todos sus productos.</p>
+      <p className="muted small">Cada carne genera taco, gringa, llenadora, volcán, costra y media costra con precios iniciales. Quitarla elimina todos sus productos.</p>
       <div className="inv-list">
         {data.carnes.map((c) => (
           <div key={c.id} className="inv-row">
             <span className="inv-name">{c.nombre}</span>
-            <button className="btn btn-danger-ghost btn-sm" onClick={() => quitarCarne(c.id)}><Trash2 size={14} /> Quitar</button>
+            <button type="button" className="btn btn-danger-ghost btn-sm" onClick={() => quitarCarne(c)}><Trash2 size={14} aria-hidden="true" /> Quitar</button>
           </div>
         ))}
       </div>
-      <div className="inv-add">
-        <input className="inp" placeholder="Nueva carne (ej. Suadero)" value={carne}
-          onChange={(e) => setCarne(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addCarne()} />
-        <button className="btn btn-add" onClick={addCarne}><Plus size={16} /> Agregar carne</button>
-      </div>
+      <form className="inv-add" onSubmit={addCarne}>
+        <label className="sr-only" htmlFor={id + "c"}>Nueva carne</label>
+        <input id={id + "c"} className="inp" placeholder="Nueva carne (ej. Suadero)" value={carne} maxLength={40} onChange={(e) => setCarne(e.target.value)} />
+        <button type="submit" className="btn btn-add"><Plus size={16} aria-hidden="true" /> Agregar carne</button>
+      </form>
 
       <p className="muted small" style={{ marginTop: 18 }}>Usa el interruptor para mostrar u ocultar un producto del menú, o "Quitar" para borrar uno agregado. Abajo de cada categoría puedes agregar uno nuevo.</p>
       {cats.map(([cat, titulo]) => (
         <CatCategoria key={cat} titulo={titulo} cat={cat} base={base[cat]}
           extras={data.extras.filter((e) => e.cat === cat)} ocultos={ocultos}
-          onToggle={toggleOculto} onAdd={addExtraEn} onDelExtra={quitarExtra} />
+          onToggle={db.toggleOculto} onAdd={db.addExtra} onDelExtra={quitarExtra} />
       ))}
 
       <h3 className="sub-h" style={{ color: CATS.bebida.color }}>Refrescos y bebidas</h3>
       <div className="inv-list">
         {data.bebidas.map((b) => (
           <div key={b.id} className="inv-row">
-            <label className="switch"><input type="checkbox" checked={b.activo} onChange={() => toggleBeb(b.id)} /><span /></label>
+            <label className="switch"><input type="checkbox" checked={b.activo} aria-label={`${b.nombre} activa`} onChange={() => db.updateBebida(b.id, { activo: !b.activo })} /><span aria-hidden="true" /></label>
             <span className="inv-name">{b.nombre}</span>
             <span className="muted">{money(b.precio)}</span>
-            <button className="btn btn-danger-ghost btn-sm" onClick={() => quitarBeb(b.id)}><Trash2 size={14} /> Quitar</button>
+            <button type="button" className="btn btn-danger-ghost btn-sm" onClick={() => quitarBeb(b)}><Trash2 size={14} aria-hidden="true" /> Quitar</button>
           </div>
         ))}
       </div>
-      <div className="prod-add">
-        <input className="inp" placeholder="Nuevo refresco / agua" value={beb.nombre} onChange={(e) => setBeb({ ...beb, nombre: e.target.value })} />
-        <input className="inp inp-sm" inputMode="decimal" placeholder="Precio" value={beb.precio} onChange={(e) => setBeb({ ...beb, precio: e.target.value })} />
-        <input className="inp inp-sm" inputMode="numeric" placeholder="Existencia" value={beb.cantidad} onChange={(e) => setBeb({ ...beb, cantidad: e.target.value })} />
-        <button className="btn btn-add" onClick={addBeb}><Plus size={16} /></button>
-      </div>
+      <form className="prod-add" onSubmit={addBeb}>
+        <label className="sr-only" htmlFor={id + "bn"}>Nuevo refresco o agua</label>
+        <input id={id + "bn"} className="inp" placeholder="Nuevo refresco / agua" value={beb.nombre} maxLength={60} onChange={(e) => setBeb({ ...beb, nombre: e.target.value })} />
+        <label className="sr-only" htmlFor={id + "bp"}>Precio</label>
+        <input id={id + "bp"} className="inp inp-sm" inputMode="decimal" placeholder="Precio" value={beb.precio} onChange={(e) => setBeb({ ...beb, precio: e.target.value })} />
+        <label className="sr-only" htmlFor={id + "bc"}>Existencia</label>
+        <input id={id + "bc"} className="inp inp-sm" inputMode="numeric" placeholder="Existencia" value={beb.cantidad} onChange={(e) => setBeb({ ...beb, cantidad: e.target.value.replace(/\D/g, "") })} />
+        <button type="submit" className="btn btn-add" aria-label="Agregar bebida"><Plus size={16} aria-hidden="true" /></button>
+      </form>
     </div>
   );
 }
 
 function AdminMeseros({ data, db, user }) {
   const [nuevo, setNuevo] = useState({ nombre: "", pin: "", rol: "mesero" });
-  const admins = data.usuarios.filter((u) => u.rol === "admin").length;
+  const id = useId();
 
-  const add = async () => {
+  const add = async (e) => {
+    e.preventDefault();
     const n = nuevo.nombre.trim(); const p = nuevo.pin.trim();
-    if (!n || p.length < 4) { toast("Nombre y PIN de al menos 4 dígitos.", "error"); return; }
-    let adminPin = "";
-    if (supabaseReady) {
-      const pin = await pedirPin({ titulo: "Crear usuario", mensaje: "Escribe tu PIN de administrador para autorizar." });
-      if (pin === null) return; adminPin = pin;
-    }
-    const ok = await db.crearUsuario({ id: uid(), nombre: n, pin: p, rol: nuevo.rol }, adminPin);
-    if (ok === false) { toast("PIN de administrador no válido.", "error"); return; }
-    toast(`Usuario "${n}" creado`, "ok");
-    setNuevo({ nombre: "", pin: "", rol: "mesero" });
+    if (!n || !PIN_RE.test(p)) { toast("Escribe nombre y un PIN de 4 a 8 dígitos.", "error"); return; }
+    if (pinDebil(p)) { toast(mensajePin({ error: "debil" }), "error"); return; }
+    const pin = await pedirPin({ titulo: "Crear usuario", mensaje: "Escribe tu PIN de administrador para autorizar.", etiqueta: "Tu PIN de administrador" });
+    if (pin === null) return;
+    const r = await db.crearUsuario(pin, n, p, nuevo.rol);
+    if (r.ok) { toast(`Usuario "${n}" creado`, "ok"); setNuevo({ nombre: "", pin: "", rol: "mesero" }); }
   };
   const quitar = async (u) => {
     if (u.id === user.id) { toast("No puedes eliminar tu propio usuario.", "error"); return; }
-    if (u.rol === "admin" && admins <= 1) { toast("Debe quedar al menos un administrador.", "error"); return; }
-    if (!(await confirmDialog({ titulo: "Eliminar usuario", mensaje: `¿Eliminar a ${u.nombre}?`, confirmar: "Eliminar", peligro: true }))) return;
-    let adminPin = "";
-    if (supabaseReady) {
-      const pin = await pedirPin({ titulo: "Eliminar usuario", mensaje: "Escribe tu PIN de administrador para autorizar." });
-      if (pin === null) return; adminPin = pin;
-    }
-    const ok = await db.eliminarUsuario(u.id, adminPin);
-    if (ok === false) { toast("PIN de administrador no válido.", "error"); return; }
-    toast("Usuario eliminado", "ok");
+    if (!(await confirmDialog({ titulo: "Eliminar usuario", mensaje: `¿Eliminar a ${u.nombre}? Su sesión se cerrará en todos los dispositivos.`, confirmar: "Eliminar", peligro: true }))) return;
+    const pin = await pedirPin({ titulo: "Eliminar usuario", mensaje: "Escribe tu PIN de administrador para autorizar.", etiqueta: "Tu PIN de administrador" });
+    if (pin === null) return;
+    const r = await db.eliminarUsuario(pin, u.id);
+    if (r.ok) toast("Usuario eliminado", "ok");
+  };
+  const restablecer = async (u) => {
+    const nuevoPin = await pedirPin({ titulo: `PIN temporal para ${u.nombre}`, mensaje: "Escribe un PIN temporal (4 a 8 dígitos). Al entrar deberá elegir uno propio.", etiqueta: "PIN temporal", confirmar: "Continuar" });
+    if (nuevoPin === null) return;
+    if (!PIN_RE.test(nuevoPin)) { toast("El PIN debe tener de 4 a 8 dígitos.", "error"); return; }
+    const pin = await pedirPin({ titulo: "Restablecer PIN", mensaje: "Escribe tu PIN de administrador para autorizar.", etiqueta: "Tu PIN de administrador" });
+    if (pin === null) return;
+    const r = await db.restablecerPin(pin, u.id, nuevoPin);
+    if (r.ok) toast(`PIN de ${u.nombre} restablecido`, "ok");
   };
 
   return (
     <div>
       <div className="inv-list">
-        {data.usuarios.map((u) => (
+        {(data.usuarios || []).map((u) => (
           <div key={u.id} className="inv-row">
-            <span className="inv-name">{u.nombre}</span>
+            <span className="inv-name">{u.nombre}{u.id === user.id ? " (tú)" : ""}</span>
             <span className={"rol-tag " + u.rol}>{ROLES[u.rol] || u.rol}</span>
-            <button className="btn btn-danger-ghost btn-sm" onClick={() => quitar(u)}><Trash2 size={14} /> Quitar</button>
+            <button type="button" className="btn btn-line btn-sm" onClick={() => restablecer(u)} aria-label={`Restablecer PIN de ${u.nombre}`}><KeyRound size={14} aria-hidden="true" /> PIN</button>
+            {u.id !== user.id && <button type="button" className="btn btn-danger-ghost btn-sm" onClick={() => quitar(u)} aria-label={`Eliminar a ${u.nombre}`}><Trash2 size={14} aria-hidden="true" /> Quitar</button>}
           </div>
         ))}
       </div>
       <h3 className="sub-h">Agregar usuario</h3>
-      <div className="prod-add">
-        <input className="inp" placeholder="Nombre" value={nuevo.nombre} onChange={(e) => setNuevo({ ...nuevo, nombre: e.target.value })} />
-        <input className="inp inp-sm" inputMode="numeric" placeholder="PIN" value={nuevo.pin} onChange={(e) => setNuevo({ ...nuevo, pin: e.target.value })} />
-        <select className="inp inp-sm" value={nuevo.rol} onChange={(e) => setNuevo({ ...nuevo, rol: e.target.value })}>
+      <form className="prod-add" onSubmit={add}>
+        <label className="sr-only" htmlFor={id + "n"}>Nombre</label>
+        <input id={id + "n"} className="inp" placeholder="Nombre" value={nuevo.nombre} maxLength={40} onChange={(e) => setNuevo({ ...nuevo, nombre: e.target.value })} />
+        <label className="sr-only" htmlFor={id + "p"}>PIN del nuevo usuario</label>
+        <input id={id + "p"} className="inp inp-sm" type="password" inputMode="numeric" autoComplete="new-password" placeholder="PIN" value={nuevo.pin}
+          onChange={(e) => setNuevo({ ...nuevo, pin: e.target.value.replace(/\D/g, "").slice(0, 8) })} />
+        <label className="sr-only" htmlFor={id + "r"}>Rol</label>
+        <select id={id + "r"} className="inp inp-sm" value={nuevo.rol} onChange={(e) => setNuevo({ ...nuevo, rol: e.target.value })}>
           <option value="mesero">Mesero</option>
           <option value="cocinero">Cocinero</option>
           <option value="admin">Administrador</option>
         </select>
-        <button className="btn btn-add" onClick={add}><Plus size={16} /></button>
-      </div>
+        <button type="submit" className="btn btn-add" aria-label="Crear usuario"><Plus size={16} aria-hidden="true" /></button>
+      </form>
       <p className="muted small" style={{ marginTop: 10 }}>
-        El <b>Mesero</b> toma órdenes y ve cocina/inventario. El <b>Cocinero</b> solo ve mesas y cocina. El <b>Administrador</b> controla precios, productos y usuarios.
+        El <b>Mesero</b> toma órdenes y ve cocina. El <b>Cocinero</b> ve mesas, maneja cocina y hace el corte (con PIN de administrador). El <b>Administrador</b> controla precios, productos, inventario, gastos y usuarios.
       </p>
     </div>
   );
 }
-
-/* ============================== ESTILOS ============================== */
-const CSS = `
-:root{
-  --agave:#173A2F; --agave2:#21513F;
-  --lima:#7FA63B; --maiz:#D99A22; --barro:#B9522B;
-  --especial:#7A2E2E; --agua:#2D7E9E; --empaque:#5E8C4A;
-  --crema:#FAF4E8; --papel:#FFFFFF; --tinta:#222820; --tinta2:#6A7163;
-  --linea:#E6DEC9; --ok:#2E7D5B; --alerta:#C0392B;
-}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
-html,body,#root{height:100%;margin:0;overflow:hidden;overscroll-behavior:none;}
-.app{height:100vh;height:100dvh;display:flex;flex-direction:column;background:var(--crema);
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--tinta);}
-.loading{display:flex;height:100vh;height:100dvh;align-items:center;justify-content:center;color:var(--tinta2);}
-button{font-family:inherit;cursor:pointer;}
-.muted{color:var(--tinta2);} .small{font-size:12px;}
-
-/* LOGIN */
-.login{height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 30% 20%,#21513F,#143028);}
-.login-card{background:var(--papel);border-radius:22px;padding:34px 30px;width:min(420px,92vw);box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center;}
-.brand-mark{font-size:44px;} .brand-title{margin:6px 0 0;font-size:30px;letter-spacing:-.5px;}
-.brand-sub{margin:2px 0 22px;color:var(--tinta2);}
-.login-users{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-bottom:18px;}
-.user-chip{border:2px solid var(--linea);background:var(--crema);padding:12px 18px;border-radius:12px;font-size:16px;font-weight:600;color:var(--tinta);}
-.user-chip.on{border-color:var(--agave);background:var(--agave);color:#fff;}
-.pin-input{width:100%;padding:14px;border:2px solid var(--linea);border-radius:12px;font-size:20px;text-align:center;letter-spacing:6px;margin-bottom:12px;}
-.login-err{color:var(--alerta);margin-bottom:10px;font-weight:600;}
-.login-hint{margin-top:16px;font-size:12px;color:var(--tinta2);}
-
-/* TOPBAR */
-.topbar{display:flex;align-items:center;gap:14px;background:var(--agave);color:#fff;padding:10px 16px;flex-wrap:wrap;}
-.topbar-brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:18px;}
-.conn-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 2px rgba(255,255,255,.2);}
-/* ---- Avisos de cocina ---- */
-.cocina-alertas{position:sticky;top:0;z-index:30;display:flex;flex-direction:column;gap:6px;padding:8px 12px;background:var(--crema);border-bottom:1px solid var(--linea);}
-.alerta-permiso{background:var(--maiz);color:#fff;border:0;border-radius:10px;padding:10px;font-weight:700;cursor:pointer;}
-.alerta-pedido{display:flex;align-items:center;gap:8px;background:#fff;border:1.5px solid var(--ok);border-radius:12px;padding:8px 10px;animation:toastIn .2s ease;}
-.alerta-pedido.extra{border-color:var(--especial);}
-.alerta-txt{flex:1;font-size:14px;}
-.topbar-cactus{font-size:22px;}
-.topbar-nav{display:flex;gap:6px;flex:1;flex-wrap:wrap;}
-.nav-btn{display:flex;align-items:center;gap:7px;background:transparent;border:none;color:#cfe3d8;padding:9px 13px;border-radius:11px;font-size:14px;font-weight:600;position:relative;}
-.nav-btn.on{background:rgba(255,255,255,.16);color:#fff;}
-.nav-btn.ghost{padding:9px;}
-.badge{position:absolute;top:-2px;right:-2px;background:var(--barro);color:#fff;border-radius:10px;font-size:11px;font-style:normal;padding:1px 6px;}
-.topbar-user{display:flex;align-items:center;gap:8px;}
-.user-name{font-weight:600;font-size:14px;}
-
-.main{flex:1;overflow:auto;min-height:0;}
-
-/* SCREENS */
-.screen{padding:22px;max-width:1100px;margin:0 auto;}
-.screen-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;}
-.screen-head h2{margin:0;font-size:26px;} .screen-head .muted{margin:4px 0 18px;}
-.screen-actions{display:flex;gap:8px;flex-wrap:wrap;}
-.sub-h{margin:26px 0 12px;font-size:18px;}
-.empty{padding:30px;text-align:center;color:var(--tinta2);background:var(--papel);border:1px dashed var(--linea);border-radius:14px;}
-
-/* MESAS */
-.mesas-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;}
-.mesa-card{background:var(--papel);border:2px solid var(--linea);border-radius:16px;padding:18px;min-height:130px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;transition:transform .08s;}
-.mesa-card:active{transform:scale(.97);}
-.mesa-card.ocupada{border-color:var(--barro);background:#FBEDE6;}
-.mesa-num{font-size:40px;font-weight:800;line-height:1;}
-.mesa-estado{font-size:13px;font-weight:700;color:var(--tinta2);text-transform:uppercase;letter-spacing:1px;}
-.mesa-card.ocupada .mesa-estado{color:var(--barro);}
-.mesa-info{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:11px;color:var(--tinta2);margin-top:6px;text-align:center;}
-.mesa-mesero{background:var(--barro);color:#fff;padding:3px 10px;border-radius:8px;font-weight:700;font-size:12px;}
-
-.especial-card{background:var(--papel);}
-.especial-card.llevar{border-color:var(--maiz);color:var(--maiz);}
-.especial-card.llevar:active{background:#FBF1DD;}
-.especial-card.domicilio{border-color:var(--barro);color:var(--barro);}
-.especial-card.domicilio:active{background:#FBEDE6;}
-.especial-card-label{font-size:17px;font-weight:800;margin-top:8px;}
-.especial-badge{margin-top:4px;background:var(--barro);color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:8px;}
-
-.type-fixed{display:flex;align-items:center;gap:6px;background:var(--tc);color:#fff;padding:9px 16px;border-radius:12px;font-weight:800;font-size:15px;}
-.mesa-chip{background:var(--agave);color:#fff;padding:8px 14px;border-radius:12px;font-weight:800;font-size:15px;}
-.ocupada-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;background:#FBEDE6;border-bottom:1px solid var(--linea);padding:8px 16px;font-size:14px;color:var(--barro);}
-.ocupada-bar b{color:var(--tinta);}
-
-/* COMANDA */
-.comanda-wrap{height:100%;display:flex;flex-direction:column;min-height:0;}
-.type-bar{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--papel);border-bottom:1px solid var(--linea);flex-wrap:wrap;}
-.type-btns{display:flex;gap:8px;flex:1;flex-wrap:wrap;}
-.type-btn{display:flex;align-items:center;gap:6px;border:2px solid var(--linea);background:#fff;color:var(--tinta);padding:9px 14px;border-radius:12px;font-weight:700;font-size:14px;position:relative;}
-.type-btn.on{border-color:var(--tc);background:var(--tc);color:#fff;}
-.type-check{background:#fff;color:var(--ok);border-radius:50%;}
-.mesa-select{border:2px solid var(--linea);border-radius:12px;padding:9px 12px;font-size:14px;font-weight:700;background:#fff;}
-.type-banner{color:#fff;text-align:center;font-weight:800;font-size:20px;letter-spacing:.5px;padding:8px;text-transform:uppercase;}
-
-.comanda{flex:1;display:grid;grid-template-columns:1fr 380px;min-height:0;}
-.menu-pane{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--linea);}
-.menu-pane-scroll{flex:1;overflow:auto;padding:14px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
-.menu-inner{display:flex;flex-direction:column;gap:14px;}
-.cols-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
-.menu-col{background:var(--papel);border-radius:14px;border:1px solid var(--linea);overflow:hidden;}
-.col-head{background:var(--cat);color:#fff;padding:9px 12px;font-weight:700;font-size:14px;}
-.col-items{padding:8px;display:flex;flex-direction:column;gap:7px;}
-.item-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;border:1.5px solid var(--linea);background:#fff;border-radius:10px;padding:10px 12px;font-size:14px;font-weight:600;color:var(--tinta);min-height:46px;border-left:5px solid var(--cat);transition:transform .06s,background .1s;}
-.item-btn:active{transform:scale(.97);background:var(--crema);}
-.item-nombre{flex:1;}
-.item-precio{font-weight:800;color:var(--cat);font-size:13px;white-space:nowrap;}
-.especial{background:var(--papel);border:1px solid var(--linea);border-radius:14px;overflow:hidden;}
-.especial-head{background:var(--especial);color:#fff;padding:9px 14px;font-weight:700;}
-.especial-items{padding:10px;display:flex;flex-wrap:wrap;gap:8px;}
-.especial-items .item-btn{flex:1;min-width:140px;--cat:var(--especial);}
-.bebidas-box{background:var(--papel);border:1px solid var(--linea);border-radius:14px;overflow:hidden;}
-.bebidas-head{background:var(--agua);color:#fff;padding:9px 14px;font-weight:700;}
-.bebidas-items{padding:10px;display:flex;flex-wrap:wrap;gap:8px;}
-.bebidas-items .item-btn{flex:1;min-width:130px;--cat:var(--agua);}
-
-.ticket-pane{display:flex;flex-direction:column;background:var(--papel);min-height:0;overflow:hidden;}
-.ticket-inner{flex:1;display:flex;flex-direction:column;min-height:0;}
-.ticket-head{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--linea);background:var(--crema);}
-.ticket-origen{font-size:18px;font-weight:800;} .ticket-mesero{font-size:12px;color:var(--tinta2);}
-.dom-resumen{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:#FBEDE6;border:none;border-bottom:1px solid var(--linea);padding:10px 16px;font-size:13px;color:var(--barro);font-weight:600;}
-.dom-resumen span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.ticket-scroll{flex:1;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
-
-.orden{border:1.5px solid var(--linea);border-radius:12px;padding:10px;background:#fff;}
-.orden.activa{border-color:var(--agave);box-shadow:0 0 0 2px rgba(23,58,47,.12);}
-.orden-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
-.orden-name{background:none;border:none;font-weight:800;font-size:15px;display:flex;align-items:center;gap:5px;color:var(--tinta);}
-.orden-input{font-weight:800;font-size:15px;border:1px solid var(--agave);border-radius:6px;padding:3px 6px;}
-.orden-right{display:flex;align-items:center;gap:8px;}
-.orden-count{background:var(--agave);color:#fff;border-radius:20px;min-width:24px;text-align:center;font-size:12px;font-weight:700;padding:2px 6px;}
-.orden-empty{font-size:12px;color:var(--tinta2);font-style:italic;padding:4px 2px;}
-.orden-prep{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:9px;padding-top:9px;border-top:1px dashed var(--linea);}
-.orden-prep-label{font-size:11px;font-weight:700;color:var(--tinta2);margin-right:2px;}
-.prep-chip{border:1.5px solid var(--linea);background:#fff;border-radius:20px;padding:5px 11px;font-size:12px;font-weight:700;color:var(--tinta2);}
-.prep-chip.on{background:var(--agave);border-color:var(--agave);color:#fff;}
-.orden-extras{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:8px;}
-.extra-chip{display:flex;align-items:center;gap:3px;border:1.5px solid var(--cat);background:#fff;color:var(--cat);border-radius:20px;padding:6px 11px;font-size:12px;font-weight:700;}
-.extra-chip:active{background:#EEF3E8;}
-.ref-input{flex:1;min-width:120px;border:2px solid var(--linea);border-radius:12px;padding:9px 12px;font-size:14px;font-weight:600;background:#fff;}
-.ref-input:focus{outline:none;border-color:var(--maiz);}
-.pedido-extras{border:1.5px dashed var(--empaque);border-radius:12px;padding:10px;margin-top:4px;background:#F4F8EF;}
-.pedido-extras-head{font-weight:800;font-size:13px;color:var(--empaque);margin-bottom:8px;}
-.pedido-extras-add{display:flex;flex-wrap:wrap;gap:6px;}
-.kt-extras{border-top:1px dashed var(--linea);margin-top:4px;padding-top:6px;}
-.kt-extras-h{font-weight:800;font-size:12px;color:var(--empaque);margin-bottom:3px;}
-.tp-extras-h{font-weight:800;font-size:12px;margin-bottom:3px;}
-.orden-items{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;}
-.oitem{display:flex;align-items:center;gap:8px;font-size:13px;}
-.oitem-dot{width:9px;height:9px;border-radius:50%;background:var(--cat);flex:none;}
-.oitem-name{flex:1;}
-.oitem-precio{font-weight:700;font-size:12px;color:var(--tinta2);white-space:nowrap;}
-.stepper{display:flex;align-items:center;gap:2px;border:1px solid var(--linea);border-radius:8px;overflow:hidden;}
-.stepper button{border:none;background:var(--crema);width:30px;height:30px;display:flex;align-items:center;justify-content:center;color:var(--tinta);}
-.stepper button:active{background:var(--linea);}
-.stepper span{min-width:24px;text-align:center;font-weight:700;font-size:13px;}
-.icon-btn{border:none;background:none;color:var(--tinta2);padding:4px;display:flex;}
-.icon-btn:active{color:var(--alerta);}
-
-.footer-izq,.footer-der{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--linea);background:var(--papel);}
-.footer-izq .btn,.footer-der .btn{flex:1;}
-.ticket-extra{display:flex;gap:8px;padding:0 14px 12px;}
-.ticket-extra .btn{flex:1;}
-
-/* BOTONES */
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:none;border-radius:11px;padding:12px 16px;font-size:14px;font-weight:700;transition:transform .06s,opacity .1s;}
-.btn:active{transform:scale(.97);} .btn:disabled{opacity:.4;}
-.btn-sm{padding:8px 12px;font-size:13px;} .btn-block{width:100%;margin-top:8px;}
-.btn-primary{background:var(--agave);color:#fff;}
-.btn-add{background:var(--lima);color:#fff;}
-.btn-maiz{background:var(--maiz);color:#fff;}
-.btn-barro{background:var(--barro);color:#fff;}
-.btn-line{background:#fff;border:1.5px solid var(--agave);color:var(--agave);}
-.btn-ghost{background:var(--crema);color:var(--tinta);border:1px solid var(--linea);}
-.btn-danger-ghost{background:#fff;border:1.5px solid var(--alerta);color:var(--alerta);}
-.btn-danger{background:var(--alerta);color:#fff;}
-
-/* INPUTS */
-.inp{border:1.5px solid var(--linea);border-radius:10px;padding:11px 12px;font-size:15px;width:100%;background:#fff;}
-.inp:focus{outline:none;border-color:var(--agave);}
-
-/* PESTAÑAS CELULAR */
-.pane-toggle{display:flex;gap:6px;padding:8px 12px;background:var(--papel);border-bottom:1px solid var(--linea);}
-.pane-toggle button{flex:1;border:none;background:var(--crema);border-radius:10px;padding:11px;font-weight:700;font-size:14px;color:var(--tinta2);}
-.pane-toggle button.on{background:var(--agave);color:#fff;}
-.pane-scroll{flex:1;overflow:auto;min-height:0;padding:14px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
-.phone-footer{border-top:1px solid var(--linea);background:var(--papel);}
-.phone-footer .footer-izq,.phone-footer .footer-der{border-top:none;}
-
-/* COCINA */
-.cocina-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;}
-.kticket{background:var(--papel);border:1px solid var(--linea);border-radius:14px;overflow:hidden;}
-.kt-tipo{color:#fff;font-weight:800;font-size:13px;text-transform:uppercase;letter-spacing:.5px;padding:6px 12px;}
-.kt-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px 0;}
-.kt-origen{font-weight:800;font-size:16px;} .kt-hora{font-size:12px;color:var(--tinta2);}
-.kt-mesero{font-size:12px;color:var(--tinta2);padding:0 12px 6px;}
-.kt-dom{font-size:12px;color:var(--barro);padding:0 12px 6px;line-height:1.5;}
-.kt-body{display:flex;flex-direction:column;gap:8px;padding:0 12px 10px;}
-.kt-orden{background:var(--crema);border-radius:8px;padding:7px 9px;}
-.kt-oname{font-weight:700;font-size:13px;margin-bottom:3px;}
-.kt-item{font-size:13px;}
-.kt-actions{display:flex;gap:6px;padding:0 12px 12px;} .kt-actions .btn{flex:1;}
-.kt-tacos{margin:0 12px 10px;background:var(--crema);border:1px dashed var(--barro);border-radius:9px;padding:6px 10px;font-size:13px;font-weight:700;color:var(--barro);text-align:center;}
-.kt-tacos b{font-size:16px;}
-.corte-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--papel);border:1px solid var(--linea);border-radius:14px;padding:14px 16px;margin-bottom:14px;}
-.corte-total{font-size:26px;font-weight:800;color:var(--agave);line-height:1;}
-.corte-btns{display:flex;gap:8px;flex:none;}
-.corte-desglose{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;}
-.cd-col{background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:12px 14px;}
-.cd-col h4{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--tinta2);}
-.cd-row{display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:14px;}
-.pin-input{width:100%;box-sizing:border-box;margin:6px 0 4px;padding:12px 14px;font-size:20px;letter-spacing:.3em;text-align:center;border:1.5px solid var(--linea);border-radius:12px;background:var(--crema);}
-.hist-list{display:flex;flex-direction:column;gap:8px;}
-.hist-row{display:flex;align-items:center;gap:10px;background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 12px;}
-.hist-dot{width:10px;height:10px;border-radius:50%;flex:none;}
-.hist-info{flex:1;min-width:0;}
-.hist-origen{font-weight:700;font-size:14px;}
-.hist-total{font-weight:800;color:var(--barro);}
-.resumen-scroll{flex:1;overflow:auto;padding:14px;min-height:0;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
-.resumen-h{margin:0 0 10px;font-size:16px;}
-.resumen-orden{background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 12px;margin-bottom:8px;}
-.resumen-oname{font-weight:800;font-size:14px;margin-bottom:4px;}
-.resumen-item{font-size:13px;}
-.resumen-item span{font-weight:700;display:inline-block;min-width:26px;}
-.resumen-actions{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid var(--linea);background:var(--papel);}
-.resumen-extra{border:1px solid var(--especial);border-radius:12px;padding:8px 10px 4px;margin-bottom:8px;background:rgba(180,40,40,.05);}
-.resumen-extra-h{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--especial);margin-bottom:6px;}
-.listos-row{display:flex;flex-wrap:wrap;gap:8px;}
-.listo-chip{display:flex;align-items:center;gap:8px;background:#EAF3EE;border:1px solid #CFE3D8;border-radius:20px;padding:6px 8px 6px 14px;font-size:13px;color:var(--ok);font-weight:600;}
-
-/* INVENTARIO */
-.inv-list{display:flex;flex-direction:column;gap:8px;}
-.inv-row{display:flex;align-items:center;gap:12px;background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 14px;}
-.inv-row.agotado{background:#FBEDE6;border-color:#E9C3B2;}
-.inv-name{font-weight:700;flex:1;}
-.tag-agotado{background:var(--alerta);color:#fff;font-size:11px;padding:2px 8px;border-radius:8px;font-weight:700;}
-.qty-inp{width:46px;text-align:center;border:none;font-weight:700;font-size:14px;background:transparent;}
-.inv-add{display:flex;gap:8px;margin-top:12px;} .inv-add .inp{flex:1;}
-.switch{position:relative;display:inline-block;width:44px;height:26px;flex:none;}
-.switch input{opacity:0;width:0;height:0;}
-.switch span{position:absolute;inset:0;background:#cdd3c6;border-radius:20px;transition:.2s;}
-.switch span:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;}
-.switch input:checked + span{background:var(--ok);}
-.switch input:checked + span:before{transform:translateX(18px);}
-
-/* GASTOS */
-.gasto-add{display:flex;gap:8px;flex-wrap:wrap;} .gasto-add .inp{flex:1;min-width:140px;} .inp-monto{max-width:120px;flex:none;}
-.gasto-total{margin:14px 0;font-size:16px;}
-.gasto-list{display:flex;flex-direction:column;gap:8px;}
-.gasto-row{display:flex;align-items:center;gap:12px;background:var(--papel);border:1px solid var(--linea);border-radius:12px;padding:10px 14px;}
-.gasto-concepto{font-weight:700;} .gasto-monto{margin-left:auto;font-weight:800;color:var(--barro);}
-
-/* MODALES */
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px;}
-.modal{background:#fff;border-radius:16px;width:min(380px,94vw);max-height:90vh;overflow:auto;}
-.modal-dom{width:min(440px,94vw);}
-.modal-head{display:flex;align-items:center;gap:10px;padding:16px;border-bottom:1px solid var(--linea);}
-.modal-head h3{margin:0;flex:1;font-size:18px;}
-.modal-body{padding:16px;display:flex;flex-direction:column;gap:4px;}
-.modal-body label{font-size:12px;font-weight:700;color:var(--tinta2);margin-top:8px;}
-.dom-row{display:flex;gap:10px;}
-.modal-actions{display:flex;gap:8px;padding:14px;border-top:1px solid var(--linea);} .modal-actions .btn{flex:1;}
-
-/* ---- Modal de confirmación ---- */
-.modal-confirm{width:min(360px,92vw);}
-.confirm-title{margin:0;padding:18px 18px 0;font-size:18px;}
-.confirm-msg{margin:0;padding:10px 18px 4px;color:var(--tinta);line-height:1.5;}
-
-/* ---- Cuentas separadas ---- */
-.cuentas-list{padding:16px;display:flex;flex-direction:column;gap:8px;}
-.cuenta-row{display:flex;align-items:center;gap:10px;width:100%;background:var(--crema);border:1px solid var(--linea);border-radius:12px;padding:12px 14px;cursor:pointer;text-align:left;}
-.cuenta-row:hover{border-color:var(--agave);}
-.cuenta-name{flex:1;font-weight:700;color:var(--tinta);}
-.cuenta-sub{font-weight:800;color:var(--agave);}
-
-/* ---- Toasts ---- */
-.toaster{position:fixed;left:0;right:0;bottom:18px;display:flex;flex-direction:column;align-items:center;gap:8px;z-index:90;pointer-events:none;padding:0 16px;}
-.toast{pointer-events:auto;max-width:440px;width:fit-content;background:var(--tinta);color:#fff;padding:12px 18px;border-radius:12px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.25);animation:toastIn .22s ease;cursor:pointer;}
-.toast.ok{background:var(--ok);}
-.toast.error{background:var(--alerta);}
-.toast.info{background:var(--agave2);}
-@keyframes toastIn{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
-.ticket-total{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-top:2px solid var(--agave);background:var(--crema);font-size:16px;font-weight:700;}
-.ticket-total b{font-size:22px;color:var(--agave);}
-
-/* ADMIN */
-.admin-tabs{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap;}
-.admin-tabs button{border:none;background:var(--papel);border:1.5px solid var(--linea);border-radius:11px;padding:10px 18px;font-weight:700;font-size:14px;color:var(--tinta2);}
-.admin-tabs button.on{background:var(--agave);border-color:var(--agave);color:#fff;}
-.precio-list{display:flex;flex-direction:column;gap:6px;}
-.precio-row{display:flex;align-items:center;gap:12px;background:var(--papel);border:1px solid var(--linea);border-radius:10px;padding:8px 14px;}
-.precio-nombre{flex:1;font-weight:600;font-size:14px;}
-.precio-input{display:flex;align-items:center;gap:2px;border:1.5px solid var(--linea);border-radius:9px;padding:4px 10px;background:#fff;font-weight:700;}
-.precio-input span{color:var(--tinta2);}
-.precio-input input{width:64px;border:none;font-size:15px;font-weight:700;text-align:right;background:transparent;}
-.precio-input input:focus{outline:none;}
-.prod-add{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}
-.prod-add .inp{flex:1;min-width:140px;}
-.inp-sm{flex:none;max-width:120px;}
-.rol-tag{font-size:11px;font-weight:700;padding:3px 10px;border-radius:8px;}
-.rol-tag.admin{background:var(--agave);color:#fff;}
-.rol-tag.mesero{background:var(--linea);color:var(--tinta);}
-.rol-tag.cocinero{background:var(--barro);color:#fff;}
-.mesa-card.solo-ver{cursor:default;}
-
-/* ---- TICKET TÉRMICO 58mm ---- */
-.modal-ticket{max-width:300px;}
-.ticket-print{font-family:"Courier New",monospace;color:#000;background:#fff;}
-.t58{width:230px;margin:0 auto;padding:8px 10px;border:1px solid var(--linea);border-radius:4px;}
-.tp-tipo{text-align:center;font-weight:800;font-size:15px;letter-spacing:1px;margin-bottom:2px;}
-.tp-name{text-align:center;font-size:18px;font-weight:800;line-height:1.1;}
-.tp-sub{text-align:center;font-size:12px;margin:2px 0 6px;}
-.tp-meta{display:flex;justify-content:space-between;font-size:11px;}
-.tp-modo-tag{font-weight:800;}
-.tp-dom{font-size:12px;margin-top:6px;line-height:1.5;}
-.tp-line{border-top:1px dashed #000;margin:7px 0;}
-.tp-orden{margin-bottom:7px;}
-.tp-oname{font-weight:800;font-size:13px;}
-.tp-prep{font-size:12px;font-style:italic;margin:1px 0 2px;}
-.kt-prep{font-size:12px;font-weight:700;color:var(--barro);margin-bottom:2px;}
-.tp-extras-h{font-weight:800;font-size:12px;margin-bottom:2px;}
-.tp-item{display:flex;gap:6px;font-size:13px;align-items:baseline;line-height:1.35;}
-.tp-q{min-width:26px;font-weight:700;} .tp-n{flex:1;} .tp-p{font-weight:700;white-space:nowrap;}
-.tp-tacos{font-weight:800;font-size:15px;text-align:center;margin:2px 0;}
-.tp-total{display:flex;justify-content:space-between;font-weight:800;font-size:16px;margin:2px 0 6px;}
-.tp-foot{text-align:center;font-size:12px;margin-top:4px;}
-.auto-print{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--tinta2);padding:10px 4px 0;cursor:pointer;}
-.auto-print input{width:18px;height:18px;}
-
-/* cada producto en un solo renglón (recorta si es larguísimo) */
-.tp-item{display:flex;gap:6px;font-size:14px;align-items:baseline;line-height:1.4;}
-.tp-q{min-width:20px;font-weight:800;text-align:right;}
-.tp-n{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.tp-p{font-weight:700;white-space:nowrap;}
-.tp-suborden{display:flex;justify-content:space-between;font-weight:700;font-size:13px;border-top:1px dotted #000;margin-top:3px;padding-top:2px;}
-.tp-bebidas{margin-top:5px;padding-top:4px;border-top:1px dashed #000;}
-.tp-bebidas .tp-oname{letter-spacing:1px;}
-
-/* selector junta/separada dentro del modal */
-.ticket-modos{display:flex;gap:0;margin:10px 4px 0;border:1px solid var(--linea);border-radius:10px;overflow:hidden;}
-.seg-b{flex:1;padding:10px;background:#fff;border:0;font-weight:700;color:var(--tinta2);cursor:pointer;}
-.seg-b.on{background:var(--agave);color:#fff;}
-
-@media print{
-  @page{ size:58mm auto; margin:0; }
-  html,body{ width:58mm; margin:0!important; padding:0!important; background:#fff; }
-  body *{ visibility:hidden; }
-  #print-area,#print-area *{ visibility:visible; color:#000!important; }
-  #print-area{ position:absolute; left:0; top:0; width:58mm; border:0!important; border-radius:0!important; padding:0 2mm!important; }
-  .no-print{ display:none!important; }
-}
-
-@media (max-width:760px){
-  .cols-3{grid-template-columns:1fr;}
-  .type-banner{font-size:16px;}
-  .topbar{flex-wrap:nowrap;gap:8px;padding:8px 10px;}
-  .topbar-name{display:none;}
-  .user-name{display:none;}
-  .topbar-user .rol-tag{display:none;}
-  .topbar-nav{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex:1;}
-  .topbar-nav::-webkit-scrollbar{display:none;}
-  .nav-btn{flex:none;white-space:nowrap;padding:9px 12px;}
-  .type-bar{gap:8px;}
-  .type-btns{order:2;width:100%;}
-}
-`;

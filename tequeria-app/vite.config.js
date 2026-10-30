@@ -4,6 +4,12 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   base: "./",
-  // Expone al navegador las variables con estos prefijos
-  envPrefix: ["VITE_", "NEXT_PUBLIC_"],
+  // Solo VITE_*: evita publicar por accidente otras variables del proyecto en el navegador
+  envPrefix: ["VITE_"],
+  build: {
+    rollupOptions: {
+      // librerías en archivos aparte: cambian poco y el navegador las conserva entre versiones
+      output: { manualChunks: { react: ["react", "react-dom"], supabase: ["@supabase/supabase-js"] } },
+    },
+  },
 });
