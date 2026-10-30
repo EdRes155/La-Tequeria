@@ -1,0 +1,174 @@
+{
+  "environment": "Chromium, copia local, fixture sintética; sin Supabase real",
+  "checks": [
+    {
+      "id": "UX-B01",
+      "layouts": [
+        {
+          "width": 320,
+          "documentOverflow": false,
+          "mainOverflow": false,
+          "navHidden": true
+        },
+        {
+          "width": 390,
+          "documentOverflow": false,
+          "mainOverflow": false,
+          "navHidden": true
+        },
+        {
+          "width": 760,
+          "documentOverflow": false,
+          "mainOverflow": false,
+          "navHidden": false
+        },
+        {
+          "width": 768,
+          "documentOverflow": false,
+          "mainOverflow": false,
+          "navHidden": false
+        },
+        {
+          "width": 1440,
+          "documentOverflow": false,
+          "mainOverflow": false,
+          "navHidden": false
+        }
+      ]
+    },
+    {
+      "id": "UX-B02",
+      "draft_lost_without_confirmation": true
+    },
+    {
+      "id": "UX-B03",
+      "visible_message": "✓ Comanda enviada a cocina",
+      "persisted_tickets": 0
+    },
+    {
+      "id": "UX-B04",
+      "active_order_hidden_in_menu": true,
+      "nonempty_order_deleted_without_dialog": true
+    },
+    {
+      "id": "UX-B05",
+      "semantics": {
+        "role": null,
+        "ariaModal": null,
+        "fields": [
+          {
+            "placeholder": "Nombre de quien pide",
+            "associatedLabels": 0
+          },
+          {
+            "placeholder": "Calle, número, colonia",
+            "associatedLabels": 0
+          },
+          {
+            "placeholder": "Entre calles, color de casa…",
+            "associatedLabels": 0
+          },
+          {
+            "placeholder": "10 dígitos",
+            "associatedLabels": 0
+          },
+          {
+            "placeholder": null,
+            "associatedLabels": 0
+          },
+          {
+            "placeholder": "30",
+            "associatedLabels": 0
+          }
+        ],
+        "iconNames": [
+          {
+            "text": "",
+            "ariaLabel": null
+          }
+        ]
+      },
+      "tab_leaves_dialog": true,
+      "escape_leaves_dialog_open": true
+    },
+    {
+      "id": "UX-B06",
+      "saved_draft_actions": "Agregar orden extra\nReenviar a cocina\nMarcar mesa como libre",
+      "persisted_tickets": 0
+    },
+    {
+      "id": "UX-B07",
+      "category_styles": [
+        {
+          "text": "Tacos",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(127, 166, 59)",
+          "fontSize": "14px",
+          "fontWeight": "700",
+          "contrastRatio": 2.83
+        },
+        {
+          "text": "Quesadillas / Gringas",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(217, 154, 34)",
+          "fontSize": "14px",
+          "fontWeight": "700",
+          "contrastRatio": 2.44
+        },
+        {
+          "text": "Volcanes",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(185, 82, 43)",
+          "fontSize": "14px",
+          "fontWeight": "700",
+          "contrastRatio": 4.88
+        }
+      ],
+      "menu_metrics": {
+        "height": 533,
+        "scrollHeight": 1890,
+        "productButtons": 35
+      },
+      "stepper_targets": [
+        {
+          "width": 30,
+          "height": 30,
+          "text": "",
+          "ariaLabel": null
+        },
+        {
+          "width": 30,
+          "height": 30,
+          "text": "",
+          "ariaLabel": null
+        }
+      ],
+      "order_selection": {
+        "tag": "DIV",
+        "tabIndex": null,
+        "role": null
+      }
+    },
+    {
+      "id": "UX-B08",
+      "boundary": {
+        "phonePanels": false,
+        "columns": "380px 380px",
+        "menuWidth": 380,
+        "ticketWidth": 380
+      }
+    }
+  ],
+  "screenshots": [
+    "01-mesas-movil.png",
+    "02-comanda-movil.png",
+    "03-envio-fallido-con-exito.png",
+    "04-menu-sin-persona-activa.png",
+    "05-domicilio-movil.png",
+    "06-comanda-escritorio.png",
+    "07-borrador-como-mesa-ocupada.png",
+    "08-comanda-760px.png"
+  ],
+  "blocked_external": [],
+  "page_errors": []
+}
