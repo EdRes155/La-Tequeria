@@ -341,6 +341,46 @@ d("operación", () => {
     expect(rows[0].n).toBe(3);
   });
 
+  it("muestra al mesero el estatus del pedido y no libera una mesa sin cobrar (salvo cierre autorizado)", async () => {
+    const t1 = ticket("estatus-mesa7-1", { tipo: "aqui", mesaId: 7, ordenes: [{ id: "o1", items: [item("taco-pastor", 2)] }] });
+    await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: t1 });
+    const ver = () => api.rpc("estado", { p_token: mesero, p_partes: ["cocina", "mesas"] });
+    let est = await ver();
+    const enviado = est.cocina.find((x) => x.id === t1.id);
+    expect(enviado.recibido).toBeNull();
+    expect(est.mesas.find((m) => m.id === 7).desde).toBe(enviado.creado);
+
+    expect((await falla(api.rpc("marcar_recibido", { p_token: mesero, p_ids: [t1.id] }))).message).toBe("PERMISO");
+    expect(await api.rpc("marcar_recibido", { p_token: cocina, p_ids: [t1.id] })).toBe(1);
+    expect(await api.rpc("marcar_recibido", { p_token: cocina, p_ids: [t1.id] })).toBe(0);
+    est = await ver();
+    expect(est.cocina.find((x) => x.id === t1.id).recibido).toBeTruthy();
+
+    // sin cobrar no se libera; el cierre sin cobro pide motivo y PIN de administrador
+    expect((await falla(api.rpc("liberar_mesa", { p_token: mesero, p_mesa_id: 7 }))).message).toBe("POR_COBRAR");
+    const nc = { p_token: mesero, p_admin_pin: "8642", p_tickets: [t1.id], p_motivo: "El cliente se fue", p_liberar_mesa: true };
+    expect((await falla(api.rpc("no_cobrar", { ...nc, p_motivo: " " }))).message).toBe("DATOS");
+    expect((await api.rpc("no_cobrar", { ...nc, p_admin_pin: "0000" })).error).toBe("pin");
+    expect(await api.rpc("no_cobrar", nc)).toMatchObject({ ok: true, mesaLiberada: true, total: 40 });
+    expect((await falla(api.rpc("no_cobrar", nc))).message).toBe("YA_COBRADO");
+    est = await api.rpc("estado", { p_token: admin, p_partes: ["historial", "porCobrar", "mesas"] });
+    expect(est.mesas.find((m) => m.id === 7)).toMatchObject({ estado: "libre", desde: null });
+    expect(est.porCobrar.some((t) => t.id === t1.id)).toBe(false);
+    expect(est.historial.find((x) => x.id === t1.id).cobro).toEqual({ noCobrado: true });
+    expect(est.periodo).toMatchObject({ noCobrado: 40, noCobradoCount: 1 });
+
+    // ya cobrada, la mesa sí se libera; preparar la comanda también la marca como recibida
+    const t2 = ticket("estatus-mesa7-2", { tipo: "aqui", mesaId: 7 });
+    await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: t2 });
+    await api.rpc("cambiar_estado_ticket", { p_token: cocina, p_id: t2.id, p_estado: "preparando" });
+    est = await ver();
+    expect(est.cocina.find((x) => x.id === t2.id)).toMatchObject({ estado: "preparando", recibido: expect.any(String) });
+    await api.rpc("cobrar", { p_token: mesero, p_id: "cobro-mesa7-a", p_tickets: [t2.id], p_metodo: "tarjeta" });
+    expect((await api.rpc("liberar_mesa", { p_token: mesero, p_mesa_id: 7 })).estado).toBe("libre");
+    const { rows } = await sql.query("select detalle->>'motivo' motivo, detalle->>'autorizo' autorizo from bitacora where accion = 'no_cobrado'");
+    expect(rows).toEqual([{ motivo: "El cliente se fue", autorizo: expect.any(String) }]);
+  });
+
   it("el corte exige PIN admin, no oculta pendientes de cocina y no pierde tickets concurrentes", async () => {
     expect((await api.rpc("hacer_corte", { p_token: cocina, p_admin_pin: "0000" })).error).toBe("pin");
     await api.rpc("agregar_gasto", { p_token: admin, p_id: "gasto-corte-1", p_concepto: "Hielo", p_monto: 30.5 });
@@ -360,7 +400,8 @@ d("operación", () => {
     expect(corte.corte.total).toBe(antes.periodo.total);
     expect(corte.corte.tickets).toBe(antes.periodo.count);
     expect(corte.corte.gastos).toBe(30.5);
-    expect(corte.corte.cobrado).toMatchObject({ tarjeta: 80, efectivo: 0 });
+    expect(corte.corte.cobrado).toMatchObject({ tarjeta: 120, efectivo: 0 });
+    expect(corte.corte.cobrado).toEqual(antes.periodo.cobrado);
     expect(corte.corte.porCobrar).toBe(antes.periodo.porCobrar);
     expect(antes.periodo.porCobrar).toBeGreaterThan(0);
     expect(corte2.ok).toBe(true);

@@ -425,6 +425,22 @@ body:has(.modal-bg) .toaster{top:12px;bottom:auto;}
 .pago-chip.pagado{background:var(--ok-suave);color:var(--ok);}
 .pago-chip.pendiente{background:var(--maiz-suave);color:var(--maiz);}
 .pago-chip.previo{background:var(--crema);color:var(--tinta2);}
+/* Estatus del pedido (mesero) */
+.estado-pedido{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:800;padding:3px 10px 3px 8px;border-radius:999px;white-space:nowrap;background:var(--crema);color:var(--tinta2);margin-top:4px;}
+.ep-pasos{display:inline-flex;gap:3px;}
+.ep-pasos i{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.25;}
+.ep-pasos i.on{opacity:1;}
+.estado-pedido.p-recibido{background:#E8EEF6;color:var(--agua);}
+.estado-pedido.p-proceso{background:var(--maiz-suave);color:var(--maiz);}
+.estado-pedido.p-entregado{background:var(--agave-suave);color:var(--agave);}
+.estado-pedido.p-cobrado{background:var(--ok-suave);color:var(--ok);}
+.estatus-lista{display:flex;flex-direction:column;gap:6px;margin:4px 0 12px;}
+.estatus-fila{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;font-size:14px;font-weight:600;}
+.estatus-fila .estado-pedido{margin-top:0;}
+.nota-liberar{text-align:center;margin:4px 0 0;}
+.aviso-sin-cobro{margin:0 0 4px;padding:10px 12px;border-radius:12px;background:var(--barro-suave);color:var(--tinta);font-size:14px;line-height:1.45;}
+.link-sin-cobro{align-self:center;margin:6px 0 0;color:var(--alerta);text-decoration:underline;}
+.cobro-monto.sin-cobro{color:var(--alerta);}
 .mesa-cobrar{margin-top:4px;background:var(--maiz-suave);color:var(--maiz);font-size:12px;font-weight:800;padding:2px 9px;border-radius:999px;}
 .por-cobrar{margin-top:26px;}
 .por-cobrar-list{display:flex;flex-direction:column;gap:8px;}

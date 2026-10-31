@@ -28,9 +28,9 @@ Comprobaciones hechas en producción:
 
 | Verificación | Resultado |
 |---|---|
-| `npm test` (dominio y modo local) | 15 pruebas ✓ |
-| `npm run test:sql` (PostgreSQL 16 real, actualización v2→v3, concurrencia con dos conexiones, cobros, adaptador remoto) | 23 pruebas ✓ |
-| `npm run test:e2e` (Chromium, escenarios UX de la auditoría y cobro) | 7 recorridos ✓ |
+| `npm test` (dominio y modo local) | 20 pruebas ✓ |
+| `npm run test:sql` (PostgreSQL 16 real, actualización v2→v3, concurrencia con dos conexiones, cobros, estatus, adaptador remoto) | 24 pruebas ✓ |
+| `npm run test:e2e` (Chromium, escenarios UX de la auditoría, cobro y estatus) | 8 recorridos ✓ |
 | `npm run build` y `npm run check:secrets` | ✓ |
 
 ## Seguridad y datos
@@ -96,6 +96,10 @@ Comprobaciones hechas en producción:
   inflar lo pendiente.
 - **Tickets**: folio consecutivo, formato de cuenta (precio unitario y bloque de pago) y
   de cocina (sin precios, letra grande), papel de 58 u 80 mm y cuenta de la mesa completa.
+- **Cocina y meseros**: el ticket de cocina ordena por categoría (tacos, gringas, volcanes,
+  costras, bebidas) y abrevia (T, G, V, C…). El mesero ve el estatus de cada pedido (enviado,
+  recibido, en proceso, entregado, cobrado). Una mesa no se libera sin cobrar: el servidor lo
+  rechaza y solo un administrador puede cerrarla sin cobro, con PIN y motivo en la bitácora.
 - **Diseño**: paleta «nopal» con contraste de 4.5:1 o más en todos los textos,
   tipografías Figtree y Bricolage Grotesque incluidas en el build, un inicio de sesión
   con tarjetas de usuario y teclado numérico, y en cocina el tiempo de espera de cada

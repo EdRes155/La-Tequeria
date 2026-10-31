@@ -10,6 +10,7 @@ import {
   empaqueItems, catalogoBase, buildMenu, uid, clone, nuevaOrden, nuevoPedido, domVacio, telefonoValido,
   pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, pinDebil, hora, fecha,
   METODOS_PAGO, METODO_LABEL, sugerenciasEfectivo, porCobrarDeMesa, iniciales, colorAvatar, redondear,
+  ordenarItems, nombreCocina, PASOS_PEDIDO, estadoPedido, unirTickets, pedidosDeMesa,
 } from "./dominio.js";
 import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
 import { CSS } from "./estilos.js";
@@ -229,9 +230,11 @@ export default function App() {
         }
       },
       guardarBorrador: (mesaId, pedido, version) => ejecutar(() => a.guardarBorrador(mesaId, pedido, version), { partes: ["mesas"], silenciar: ["CONFLICTO"] }),
-      liberarMesa: (mesaId) => ejecutar(() => a.liberarMesa(mesaId), { partes: ["mesas"] }),
+      liberarMesa: (mesaId) => ejecutar(() => a.liberarMesa(mesaId), { partes: ["mesas", "porCobrar"] }),
+      // La cocina confirma lo que ya tiene en pantalla; si falla no se avisa (se reintenta con la siguiente comanda)
+      marcarRecibido: async (ids) => { try { await a.marcarRecibido(ids); refrescar(["cocina", "porCobrar"]); } catch {} },
       reenviar: (mesaId) => ejecutar(() => a.reenviar(uid(), mesaId), { partes: ["cocina"], ok: "Reenviado a cocina" }),
-      setTicketEstado: (id, estado) => ejecutar(() => a.estadoTicket(id, estado), { partes: ["cocina", "historial"], optimista: (nd) => enCocina(nd, id, (x) => { x.estado = estado; }) }),
+      setTicketEstado: (id, estado) => ejecutar(() => a.estadoTicket(id, estado), { partes: ["cocina", "historial", "porCobrar"], optimista: (nd) => enCocina(nd, id, (x) => { x.estado = estado; }) }),
       archivarTicket: (id) => ejecutar(() => a.archivar(id), { partes: ["cocina"], optimista: (nd) => { nd.cocina = nd.cocina.filter((t) => t.id !== id); } }),
       corte: (adminPin) => ejecutar(() => a.corte(adminPin), { partes: ["cocina", "historial", "cortes", "gastos"] }),
       ajustarBebida: (id, delta) => ejecutar(() => a.ajustarBebida(id, delta), { partes: ["bebidas"], optimista: (nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) b.cantidad = Math.max(0, b.cantidad + delta); } }),
@@ -255,6 +258,20 @@ export default function App() {
       async cobrar(id, tickets, metodo, recibido, propina, liberar) {
         try {
           const r = await a.cobrar(id, tickets, metodo, recibido, propina, liberar);
+          setSinRed(false);
+          refrescar(["porCobrar", "historial", "mesas", "cocina"]);
+          return r;
+        } catch (e) {
+          if (e.codigo === "SESION" || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (e.codigo === "RED") setSinRed(true);
+          if (e.codigo === "YA_COBRADO" || e.codigo === "TICKET") refrescar(["porCobrar", "historial"]);
+          throw e;
+        }
+      },
+      // Cierre sin cobro autorizado con PIN de administrador; el diálogo muestra los errores
+      async noCobrar(adminPin, tickets, motivo, liberar) {
+        try {
+          const r = await a.noCobrar(adminPin, tickets, motivo, liberar);
           setSinRed(false);
           refrescar(["porCobrar", "historial", "mesas", "cocina"]);
           return r;
@@ -630,13 +647,22 @@ function Mesas({ data, go, user, borradores, abrirCobro }) {
   const puedeComanda = puede(user, "comanda");
   const porCobrar = data.porCobrar || [];
   const sumar = (ts) => redondear(ts.reduce((a, t) => a + (Number(t.total) || 0), 0));
-  // Grupos por cobrar: una fila por mesa y una por cada pedido para llevar / domicilio
+  // Pedidos en curso: lo que falta cobrar (una fila por mesa) y lo que sigue en cocina aunque ya esté pagado
+  // la copia de cocina trae el paso más reciente; se refrescan juntas
+  const todos = unirTickets(data.cocina || [], porCobrar).filter((t) => !t.reenvio && !t.cobro?.previo);
+  const mesaDe = (id) => data.mesas.find((m) => m.id === id);
   const grupos = [];
-  porCobrar.forEach((t) => {
+  todos.forEach((t) => {
     if (t.mesaId) {
+      if (t.cobro) return;   // las mesas ya pagadas se siguen en su tarjeta
       const g = grupos.find((x) => x.mesaId === t.mesaId);
       if (g) g.cuentas.push(t); else grupos.push({ mesaId: t.mesaId, titulo: `Mesa ${t.mesaId}`, cuentas: [t] });
-    } else grupos.push({ mesaId: null, titulo: t.origen, cuentas: [t] });
+    } else if (!t.cobro || t.estado !== "listo") grupos.push({ mesaId: null, titulo: t.origen, cuentas: [t] });
+  });
+  grupos.forEach((g) => {
+    g.debe = g.cuentas.filter((t) => !t.cobro);
+    const m = g.mesaId && mesaDe(g.mesaId);
+    g.estado = m?.estado === "ocupada" ? pedidosDeMesa(todos, m) : g.cuentas;
   });
   const domsActivos = (data.cocina || []).filter((t) => t.tipo === "domicilio" && t.estado !== "listo").length;
   const capturando = (k) => tieneCambios(borradores[k]);
@@ -658,10 +684,12 @@ function Mesas({ data, go, user, borradores, abrirCobro }) {
           const etiqueta = { ocupada: "Ocupada", borrador: "Borrador", libre: "Libre" }[estado];
           const local = capturando(`mesa-${m.id}`);
           const adeudo = sumar(porCobrarDeMesa(porCobrar, m.id));
+          const pedidos = pedidosDeMesa(todos, m);
+          const ep = estadoPedido(pedidos);
           return (
             <button key={m.id} type="button" className={"mesa-card " + estado + (puedeComanda ? "" : " solo-ver")}
               aria-disabled={!puedeComanda}
-              aria-label={`Mesa ${m.id}, ${etiqueta}${estado === "borrador" ? " (guardado, no enviado a cocina)" : ""}${local ? ", con cambios sin guardar en este dispositivo" : ""}${adeudo > 0 ? `, por cobrar ${money(adeudo)}` : ""}`}
+              aria-label={`Mesa ${m.id}, ${etiqueta}${estado === "borrador" ? " (guardado, no enviado a cocina)" : ""}${local ? ", con cambios sin guardar en este dispositivo" : ""}${ep ? `, estatus ${etiquetaPedido(ep)}` : ""}${adeudo > 0 ? `, por cobrar ${money(adeudo)}` : ""}`}
               onClick={() => puedeComanda && go("comanda", { tipo: "aqui", mesaId: m.id })}>
               {local && <span className="sin-guardar" aria-hidden="true">Sin guardar</span>}
               <div className="mesa-num" aria-hidden="true">{m.id}</div>
@@ -673,6 +701,7 @@ function Mesas({ data, go, user, borradores, abrirCobro }) {
                   {estado === "borrador" && <span>No enviado a cocina</span>}
                 </div>
               )}
+              {ep && <span aria-hidden="true"><EstadoPedido ts={pedidos} /></span>}
               {adeudo > 0 && <span className="mesa-cobrar" aria-hidden="true">Por cobrar {money(adeudo)}</span>}
             </button>
           );
@@ -697,7 +726,7 @@ function Mesas({ data, go, user, borradores, abrirCobro }) {
 
       {puedeComanda && grupos.length > 0 && (
         <section className="por-cobrar" aria-labelledby="h-por-cobrar">
-          <h3 className="sub-h" id="h-por-cobrar">Cuentas por cobrar · {money(sumar(porCobrar))}</h3>
+          <h3 className="sub-h" id="h-por-cobrar">Pedidos en curso · por cobrar {money(sumar(porCobrar))}</h3>
           <div className="por-cobrar-list">
             {grupos.map((g) => (
               <div key={g.mesaId ? `m${g.mesaId}` : g.cuentas[0].id} className="pc-row">
@@ -706,10 +735,13 @@ function Mesas({ data, go, user, borradores, abrirCobro }) {
                   <div className="muted small">
                     {g.cuentas.length > 1 ? `${g.cuentas.length} cuentas · ` : ""}{g.cuentas.map((t) => `#${t.folio ?? "—"}`).join(", ")} · {g.cuentas[g.cuentas.length - 1].hora} · {g.cuentas[0].mesero}
                   </div>
+                  <EstadoPedido ts={g.estado} />
                 </div>
-                <div className="pc-total">{money(sumar(g.cuentas))}</div>
-                <button type="button" className="btn btn-primary btn-sm" onClick={() => abrirCobro(g.cuentas, g.titulo, g.mesaId)}
-                  aria-label={`Cobrar ${g.titulo}, ${money(sumar(g.cuentas))}`}><Banknote size={16} aria-hidden="true" /> Cobrar</button>
+                {g.debe.length > 0 ? (<>
+                  <div className="pc-total">{money(sumar(g.debe))}</div>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => abrirCobro(g.debe, g.titulo, g.mesaId)}
+                    aria-label={`Cobrar ${g.titulo}, ${money(sumar(g.debe))}`}><Banknote size={16} aria-hidden="true" /> Cobrar</button>
+                </>) : <span className="pago-chip pagado"><Check size={12} aria-hidden="true" /> Pagado</span>}
               </div>
             ))}
           </div>
@@ -871,9 +903,16 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
   };
   const deudaMesa = mesaId ? porCobrarDeMesa(data.porCobrar, mesaId) : [];
   const totalDeuda = redondear(deudaMesa.reduce((a, t) => a + (Number(t.total) || 0), 0));
+  const pedidosMesa = mesaOcupada ? pedidosDeMesa(unirTickets(data.cocina || [], data.porCobrar || []), mesaInfo) : [];
+  const cobrarMesa = () => abrirCobro(deudaMesa, `Mesa ${mesaId}`, mesaId);
   const confirmLiberar = async () => {
+    // Una mesa con cuentas pendientes no se libera: primero se cobra
+    if (totalDeuda > 0) {
+      if (await confirmDialog({ titulo: "Primero cobra la mesa", mensaje: `La Mesa ${mesaId} tiene ${money(totalDeuda)} por cobrar. Para liberarla, primero cóbrala.`, confirmar: "Cobrar mesa" })) cobrarMesa();
+      return;
+    }
     const msg = mesaBorrador ? `¿Eliminar el borrador de la Mesa ${mesaId}? No se envió a cocina.`
-      : `¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.${totalDeuda > 0 ? ` Aún tiene ${money(totalDeuda)} por cobrar: seguirá en «Cuentas por cobrar».` : ""}`;
+      : `¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.`;
     if (await confirmDialog({ titulo: mesaBorrador ? "Eliminar borrador" : "Liberar mesa", mensaje: msg, confirmar: mesaBorrador ? "Eliminar" : "Liberar", peligro: true })) liberarMesa();
   };
 
@@ -930,7 +969,10 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
   const estadoBar = mesaOcupada ? (
     <div className="ocupada-bar">
       <span>Enviada a cocina por <b>{mesaInfo.mesero || "—"}</b>{mesaInfo.hora ? ` · ${mesaInfo.hora}` : ""}</span>
-      <button type="button" className="btn btn-danger-ghost btn-sm" onClick={confirmLiberar}>Marcar libre</button>
+      <EstadoPedido ts={pedidosMesa} />
+      {totalDeuda > 0
+        ? <button type="button" className="btn btn-primary btn-sm" onClick={cobrarMesa}><Banknote size={14} aria-hidden="true" /> Cobrar {money(totalDeuda)}</button>
+        : <button type="button" className="btn btn-danger-ghost btn-sm" onClick={confirmLiberar}>Marcar libre</button>}
     </div>
   ) : mesaBorrador && !esExtra ? (
     <div className="ocupada-bar borrador">
@@ -1128,6 +1170,16 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
         )}
         <div className="resumen-scroll">
           <h3 className="resumen-h">Lo que ya se envió a cocina</h3>
+          {pedidosMesa.length > 0 && (
+            <div className="estatus-lista" aria-label="Estatus de las comandas de la mesa">
+              {pedidosMesa.map((t) => (
+                <div key={t.id} className="estatus-fila">
+                  <span>{t.esExtra ? "Orden extra" : "Comanda"}{t.folio ? ` #${t.folio}` : ""} · {t.hora}</span>
+                  <EstadoPedido ts={t} />
+                </div>
+              ))}
+            </div>
+          )}
           <ResumenPedido ped={ped} />
           {extrasMesa.map((ex, n) => (
             <div key={ex.id} className="resumen-extra">
@@ -1139,7 +1191,7 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
         </div>
         <div className="resumen-actions">
           {totalDeuda > 0 && (
-            <button type="button" className="btn btn-primary btn-block" onClick={() => abrirCobro(deudaMesa, `Mesa ${mesaId}`, mesaId)}>
+            <button type="button" className="btn btn-primary btn-block" onClick={cobrarMesa}>
               <Banknote size={16} aria-hidden="true" /> Cobrar mesa · {money(totalDeuda)}
             </button>
           )}
@@ -1147,7 +1199,9 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
             <Plus size={16} aria-hidden="true" /> Agregar orden extra
           </button>
           <button type="button" className="btn btn-line btn-block" onClick={reenviar}><Send size={16} aria-hidden="true" /> Reenviar a cocina</button>
-          <button type="button" className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>
+          {totalDeuda > 0
+            ? <p className="muted small nota-liberar">Para liberar la mesa, primero cóbrala.</p>
+            : <button type="button" className="btn btn-danger-ghost btn-block" onClick={confirmLiberar}>Marcar mesa como libre</button>}
         </div>
       </div>
     );
@@ -1214,7 +1268,7 @@ function ResumenPedido({ ped }) {
     {(ped.ordenes || []).map((o) => (
       <div key={o.id} className="resumen-orden">
         <div className="resumen-oname">{o.nombre}{o.prep ? ` · ${PREP_LABEL[o.prep] || o.prep}` : ""}</div>
-        {o.items.map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.nombre}</div>)}
+        {ordenarItems(o.items).map((it) => <div key={it.key} className="resumen-item"><span>{it.cantidad}×</span> {it.nombre}</div>)}
       </div>
     ))}
     {(ped.extras || []).length > 0 && (
@@ -1405,6 +1459,9 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
   const [err, setErr] = useState("");
   const [hecho, setHecho] = useState(null);
   const [ticket, setTicket] = useState(null);
+  const [sinCobro, setSinCobro] = useState(false);   // cierre sin cobro: motivo + PIN de administrador
+  const [motivo, setMotivo] = useState("");
+  const [pinAdmin, setPinAdmin] = useState("");
 
   const elegidas = cuentas.filter((t) => sel.has(t.id));
   const subtotal = redondear(elegidas.reduce((a, t) => a + (Number(t.total) || 0), 0));
@@ -1430,6 +1487,20 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
     } finally { setBusy(false); }
   };
 
+  const cerrarSinCobro = async () => {
+    if (!elegidas.length || busy) return;
+    if (!motivo.trim()) { setErr("Escribe el motivo."); return; }
+    if (!PIN_RE.test(pinAdmin)) { setErr("Escribe el PIN de un administrador (4 a 8 dígitos)."); return; }
+    setBusy(true); setErr("");
+    try {
+      const r = await db.noCobrar(pinAdmin, elegidas.map((t) => t.id), motivo.trim(), mesaId && todasDeLaMesa && liberar);
+      setHecho({ sinCobro: true, total: r.total ?? subtotal, motivo: motivo.trim(), mesaLiberada: r.mesaLiberada, cuentas: elegidas });
+    } catch (e) {
+      setErr(e.message || "No se pudo cerrar la cuenta.");
+      setPinAdmin("");
+    } finally { setBusy(false); }
+  };
+
   // Cuenta impresa con todas las órdenes cobradas juntas
   const cuentaImpresa = () => {
     const c = hecho.cuentas;
@@ -1440,6 +1511,22 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
       cobro: { metodo: hecho.metodo, total: hecho.total, propina: hecho.propina, recibido: hecho.recibido, hora: hora() },
     };
   };
+
+  if (hecho?.sinCobro) {
+    return (
+      <Modal titulo={`Cerrado sin cobro · ${titulo}`} icono={<Check size={20} aria-hidden="true" />} onClose={onClose} className="modal-cobro">
+        <div className="cobro-hecho" role="status">
+          <div className="muted">Quedó como «No cobrado» en el corte</div>
+          <div className="cobro-monto sin-cobro">{money(hecho.total)}</div>
+          <p className="muted">Motivo: {hecho.motivo}</p>
+          {hecho.mesaLiberada && <p className="muted">La Mesa {mesaId} quedó libre.</p>}
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-primary" data-autofocus onClick={onClose}>Listo</button>
+        </div>
+      </Modal>
+    );
+  }
 
   if (hecho) {
     return (
@@ -1475,6 +1562,15 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
           ))}
         </div>
 
+        {sinCobro ? (<>
+          <p className="aviso-sin-cobro">Las cuentas elegidas quedarán como <b>«No cobrado»</b>: no suman a lo cobrado del corte y quedan en la bitácora. Solo un administrador puede autorizarlo.</p>
+          <div className="etq-sec"><label htmlFor={id + "mo"}>Motivo</label></div>
+          <input id={id + "mo"} className="inp" maxLength={200} placeholder="Ej. el cliente se fue sin pagar" value={motivo}
+            onChange={(e) => setMotivo(e.target.value)} data-autofocus />
+          <div className="etq-sec"><label htmlFor={id + "pa"}>PIN de administrador</label></div>
+          <input id={id + "pa"} className="inp" type="password" inputMode="numeric" autoComplete="off" maxLength={8} value={pinAdmin}
+            onChange={(e) => setPinAdmin(e.target.value.replace(/\D/g, ""))} />
+        </>) : (<>
         <div className="etq-sec" id={id + "m"}>Método de pago</div>
         <div className="segmento" role="group" aria-labelledby={id + "m"}>
           {METODOS_PAGO.map((m) => {
@@ -1511,19 +1607,30 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
             <span>{cambio != null && cambio < 0 ? "Falta" : "Cambio"}</span><span>{cambio == null ? "—" : money(Math.abs(cambio))}</span>
           </div>
         </>)}
+        </>)}
 
         {mesaId && todasDeLaMesa && (
-          <label className="check-linea"><input type="checkbox" checked={liberar} onChange={(e) => setLiberar(e.target.checked)} /> Liberar la Mesa {mesaId} al cobrar</label>
+          <label className="check-linea"><input type="checkbox" checked={liberar} onChange={(e) => setLiberar(e.target.checked)} /> Liberar la Mesa {mesaId} {sinCobro ? "al cerrar" : "al cobrar"}</label>
         )}
 
-        <div className="cobro-total"><span className="muted">Total a cobrar</span><span className="cobro-monto">{money(aPagar)}</span></div>
+        <div className="cobro-total"><span className="muted">{sinCobro ? "Total sin cobrar" : "Total a cobrar"}</span><span className={"cobro-monto" + (sinCobro ? " sin-cobro" : "")}>{money(sinCobro ? subtotal : aPagar)}</span></div>
         {err && <div className="login-err" role="alert">{err}</div>}
+        {!sinCobro && (
+          <button type="button" className="volver link-sin-cobro" onClick={() => { setSinCobro(true); setErr(""); }}>¿No se va a cobrar? Cerrar sin cobro</button>
+        )}
       </div>
       <div className="modal-actions">
-        <button type="button" className="btn btn-ghost" onClick={onClose}>Cancelar</button>
-        <button type="button" className="btn btn-primary" disabled={!puede} onClick={cobrar} aria-busy={busy}>
-          {busy ? <Loader2 size={16} className="girando" aria-hidden="true" /> : <Check size={16} aria-hidden="true" />} Cobrar {money(aPagar)}
-        </button>
+        {sinCobro ? (<>
+          <button type="button" className="btn btn-ghost" onClick={() => { setSinCobro(false); setErr(""); }}>Volver al cobro</button>
+          <button type="button" className="btn btn-danger" disabled={!elegidas.length || busy} onClick={cerrarSinCobro} aria-busy={busy}>
+            {busy && <Loader2 size={16} className="girando" aria-hidden="true" />} Cerrar sin cobro
+          </button>
+        </>) : (<>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+          <button type="button" className="btn btn-primary" disabled={!puede} onClick={cobrar} aria-busy={busy}>
+            {busy ? <Loader2 size={16} className="girando" aria-hidden="true" /> : <Check size={16} aria-hidden="true" />} Cobrar {money(aPagar)}
+          </button>
+        </>)}
       </div>
     </Modal>
   );
@@ -1565,7 +1672,7 @@ function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta"
   const Item = ({ it, precios = true }) => (<>
     <div className="tp-item">
       <span className="tp-q">{it.cantidad}</span>
-      <span className="tp-n">{formato === "cocina" ? it.nombre : nombreTicket(it)}</span>
+      <span className="tp-n">{formato === "cocina" ? nombreCocina(it) : nombreTicket(it)}</span>
       {precios && <span className="tp-p">{itemPrecio(it) > 0 ? money(itemPrecio(it)) : ""}</span>}
     </div>
     {precios && it.cantidad > 1 && it.precio > 0 && <div className="tp-unit">@ {money(it.precio)}</div>}
@@ -1594,10 +1701,10 @@ function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta"
         <div key={o.id} className="tp-orden">
           <div className="tp-oname">{o.nombre}</div>
           {o.prep && <div className="tp-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
-          {o.items.map((it) => <Item key={it.key} it={it} precios={false} />)}
+          {ordenarItems(o.items).map((it) => <Item key={it.key} it={it} precios={false} />)}
         </div>
       ))}
-      {ex.length > 0 && (<div className="tp-orden"><div className="tp-oname">PARA TODO EL PEDIDO</div>{ex.map((it) => <Item key={it.key} it={it} precios={false} />)}</div>)}
+      {ex.length > 0 && (<div className="tp-orden"><div className="tp-oname">PARA TODO EL PEDIDO</div>{ordenarItems(ex).map((it) => <Item key={it.key} it={it} precios={false} />)}</div>)}
       <div className="tp-tacos">TACOS: {contarTacos(t)}</div>
     </div>
   );
@@ -1616,14 +1723,14 @@ function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta"
           return (
             <div key={o.id} className="tp-orden">
               <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
-              <div className="tp-items">{o.items.map((it) => <Item key={it.key} it={it} />)}</div>
+              <div className="tp-items">{ordenarItems(o.items).map((it) => <Item key={it.key} it={it} />)}</div>
               <div className="tp-suborden"><span>Subtotal {o.nombre}</span><span>{money(sub)}</span></div>
             </div>
           );
         })
       ) : (<>
         {ordenes.map((o) => {
-          const comida = o.items.filter((it) => !esBebida(it));
+          const comida = ordenarItems(o.items.filter((it) => !esBebida(it)));
           if (comida.length === 0) return null;
           return (
             <div key={o.id} className="tp-orden">
@@ -1642,7 +1749,7 @@ function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta"
       {ex.length > 0 && (<>
         <div className="tp-line" />
         <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
-        <div className="tp-items">{ex.map((it) => <Item key={it.key} it={it} />)}</div>
+        <div className="tp-items">{ordenarItems(ex).map((it) => <Item key={it.key} it={it} />)}</div>
       </>)}
       <div className="tp-line" />
       <div className="tp-total"><span>TOTAL</span><span>{t.reenvio ? "—" : money(total)}</span></div>
@@ -1744,8 +1851,28 @@ function useMinuto() {
 function EstadoPago({ t }) {
   if (t.reenvio) return null;
   if (!t.cobro) return <span className="pago-chip pendiente">Por cobrar</span>;
+  if (t.cobro.noCobrado) return <span className="pago-chip previo" title="Cerrado sin cobro con autorización de un administrador">No cobrado</span>;
   if (t.cobro.previo) return <span className="pago-chip previo" title="Venta anterior al registro de cobros">Sin registro</span>;
   return <span className="pago-chip pagado"><Check size={12} aria-hidden="true" /> {METODO_LABEL[t.cobro.metodo] || "Pagado"}</span>;
+}
+
+// Estatus para el mesero: enviado · recibido · en proceso · entregado · cobrado
+function etiquetaPedido(e) {
+  if (!e) return "";
+  const base = e.paso === "cobrado" && e.noCobrado ? "Cerrado sin cobro" : PASOS_PEDIDO.find((p) => p.k === e.paso).label;
+  return base + (e.cobrado && e.paso !== "cobrado" ? " · pagado" : "");
+}
+function EstadoPedido({ ts }) {
+  const e = estadoPedido(ts);
+  if (!e) return null;
+  const n = PASOS_PEDIDO.findIndex((p) => p.k === e.paso);
+  const txt = etiquetaPedido(e);
+  return (
+    <span className={"estado-pedido p-" + e.paso} role="img" aria-label={`Estatus: ${txt}`}>
+      <span className="ep-pasos" aria-hidden="true">{PASOS_PEDIDO.map((p, i) => <i key={p.k} className={i <= n ? "on" : ""} />)}</span>
+      <span aria-hidden="true">{txt}</span>
+    </span>
+  );
 }
 
 function Cocina({ data, db, user, errorCarga }) {
@@ -1768,6 +1895,16 @@ function Cocina({ data, db, user, errorCarga }) {
 
   const pend = (data.cocina || []).filter((t) => t.estado !== "listo");
   const listos = (data.cocina || []).filter((t) => t.estado === "listo");
+
+  // Con la cocina en pantalla, las comandas nuevas pasan a «Recibido» para el mesero
+  const confirmados = useRef(new Set());
+  useEffect(() => {
+    if (!edita || tab !== "pendientes" || document.visibilityState !== "visible") return;
+    const ids = pend.filter((t) => !t.recibido && !confirmados.current.has(t.id)).map((t) => t.id);
+    if (!ids.length) return;
+    ids.forEach((id) => confirmados.current.add(id));
+    db.marcarRecibido(ids);
+  }, [data.cocina, tab, edita]);
   const historial = data.historial || [];
   const res = data.periodo || { total: 0, count: 0, porTipo: {}, porMesero: {}, top: [], gastos: 0 };
 
@@ -1820,12 +1957,12 @@ function Cocina({ data, db, user, errorCarga }) {
                     {t.ordenes.map((o) => (
                       <div key={o.id} className="kt-orden"><div className="kt-oname">{o.nombre}</div>
                         {o.prep && <div className="kt-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
-                        {o.items.map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.nombre}</div>)}</div>
+                        {ordenarItems(o.items).map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.nombre}</div>)}</div>
                     ))}
                     {t.extras && t.extras.length > 0 && (
                       <div className="kt-extras">
                         <div className="kt-extras-h">Para todo el pedido</div>
-                        {t.extras.map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.corto || it.nombre}</div>)}
+                        {ordenarItems(t.extras).map((it) => <div key={it.key} className="kt-item"><b>{it.cantidad}×</b> {it.corto || it.nombre}</div>)}
                       </div>
                     )}
                   </div>
@@ -1865,6 +2002,7 @@ function Cocina({ data, db, user, errorCarga }) {
                 {METODOS_PAGO.map((m) => <span key={m.k}>{m.label} <b>{money(cob[m.k] || 0)}</b></span>)}
                 {cob.propinas > 0 && <span>Propinas <b>{money(cob.propinas)}</b></span>}
                 {res.porCobrar > 0 && <span className="pago-chip pendiente">Por cobrar {money(res.porCobrar)}</span>}
+                {res.noCobrado > 0 && <span className="pago-chip previo">No cobrado {money(res.noCobrado)}</span>}
               </div></div>
             <div className="corte-btns">
               <button type="button" className="btn btn-line" onClick={compartirWhatsApp} disabled={res.count === 0}>Compartir</button>

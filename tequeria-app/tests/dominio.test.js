@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   money, leerImporte, buildMenu, resolverItem, pinDebil, nombreTicket, resumenPeriodo, pedidoParaEnviar,
   preciosDefault, CARNES_DEFAULT, BEBIDAS_DEFAULT, ticketTotal, puede, puedeEditar,
+  ordenarItems, nombreCocina, estadoPedido, pedidosDeMesa, unirTickets,
 } from "../src/dominio.js";
 
 const datos = {
@@ -78,5 +79,58 @@ describe("reglas", () => {
     ], [{ monto: 10 }]);
     expect(r).toMatchObject({ total: 75.5, count: 2, gastos: 10, porTipo: { "Para comer aquí": 50, "Para llevar": 25.5 } });
     expect(r.top).toEqual([{ nombre: "Taco", cant: 2 }]);
+  });
+});
+
+describe("ticket de cocina y estatus del pedido", () => {
+  it("ordena por categoría: tacos, gringas, volcanes, costras y bebidas", () => {
+    const items = [
+      { key: "beb-coca", cat: "bebida" }, { key: "costra-pastor", cat: "costra" }, { key: "gringa-pastor", cat: "quesa" },
+      { key: "taco-pastor", cat: "taco" }, { key: "volcan-queso", cat: "volcan" }, { key: "taco-bistec", cat: "taco" },
+    ];
+    expect(ordenarItems(items).map((i) => i.key)).toEqual(
+      ["taco-pastor", "taco-bistec", "gringa-pastor", "volcan-queso", "costra-pastor", "beb-coca"]);
+    expect(items[0].key).toBe("beb-coca"); // no modifica el original
+  });
+
+  it("abrevia solo lo que se entiende en cocina", () => {
+    const n = (nombre, corto) => nombreCocina({ nombre, corto });
+    expect(n("Taco Pastor")).toBe("T Pastor");
+    expect(n("Taco de queso Bistec")).toBe("T queso Bistec");
+    expect(n("Gringa Suadero")).toBe("G Suadero");
+    expect(n("Volcán de queso")).toBe("V queso");
+    expect(n("Costra Pastor")).toBe("C Pastor");
+    expect(n("Media costra de queso")).toBe("½C queso");
+    expect(n("Llenadora Pastor")).toBe("Llen. Pastor");
+    expect(n("Quesadilla de maíz (queso)")).toBe("Quesa maíz");
+    expect(n("Coca-Cola")).toBe("Coca-Cola");
+    expect(n("Tortillas extra (harina)", "Tortillas harina")).toBe("Tort. harina");
+  });
+
+  it("calcula el estatus que ve el mesero", () => {
+    const t = (extra) => ({ id: Math.random().toString(36), estado: "pendiente", recibido: null, cobro: null, ...extra });
+    expect(estadoPedido(t()).paso).toBe("enviado");
+    expect(estadoPedido(t({ recibido: "2026-10-31T10:00:00Z" })).paso).toBe("recibido");
+    expect(estadoPedido(t({ estado: "preparando" })).paso).toBe("proceso");
+    expect(estadoPedido(t({ estado: "listo" })).paso).toBe("entregado");
+    expect(estadoPedido(t({ estado: "listo", cobro: { metodo: "efectivo" } })).paso).toBe("cobrado");
+    // pagado antes de salir de cocina: sigue el paso de cocina y se marca como pagado
+    expect(estadoPedido(t({ estado: "preparando", cobro: { metodo: "tarjeta" } }))).toMatchObject({ paso: "proceso", cobrado: true });
+    // una mesa con orden extra: manda la comanda más atrasada
+    expect(estadoPedido([t({ estado: "listo" }), t({ estado: "preparando" })]).paso).toBe("proceso");
+    expect(estadoPedido([t({ reenvio: true })])).toBeNull();
+  });
+
+  it("toma solo las comandas de la visita actual de la mesa", () => {
+    const mesa = { id: 3, estado: "ocupada", desde: "2026-10-31T12:00:00.000Z" };
+    const vieja = { id: "a", mesaId: 3, creado: "2026-10-31T09:00:00.000Z", cobro: { metodo: "efectivo" } };
+    const actual = { id: "b", mesaId: 3, creado: "2026-10-31T12:00:00.000Z", cobro: null };
+    const extra = { id: "c", mesaId: 3, creado: "2026-10-31T12:20:00.000Z", cobro: { metodo: "tarjeta" }, esExtra: true };
+    const otra = { id: "d", mesaId: 4, creado: "2026-10-31T12:30:00.000Z" };
+    const todos = unirTickets([actual], [vieja, actual, extra, otra]);
+    expect(todos).toHaveLength(4);
+    expect(pedidosDeMesa(todos, mesa).map((t) => t.id)).toEqual(["b", "c"]);
+    expect(pedidosDeMesa(todos, { ...mesa, estado: "libre" })).toEqual([]);
+    expect(pedidosDeMesa(todos, { ...mesa, desde: null }).map((t) => t.id)).toEqual(["b"]);
   });
 });

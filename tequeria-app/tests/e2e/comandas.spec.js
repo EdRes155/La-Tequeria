@@ -155,7 +155,7 @@ test("cobros: cambio en efectivo, mesa liberada y el corte separa lo cobrado de 
   await page.getByRole("button", { name: "Para llevar", exact: true }).click();
   await producto(page, "Taco Pastor").click();
   await page.getByRole("button", { name: "Enviar a cocina" }).click();
-  await expect(page.getByRole("heading", { name: "Cuentas por cobrar · $60" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pedidos en curso · por cobrar $60" })).toBeVisible();
   await expect(mesa(page, 4)).toHaveAccessibleName(/por cobrar \$40/);
 
   await page.getByRole("button", { name: /^Cobrar Mesa 4, \$40/ }).click();
@@ -170,7 +170,7 @@ test("cobros: cambio en efectivo, mesa liberada y el corte separa lo cobrado de 
   await expect(hecho).toContainText("La Mesa 4 quedó libre.");
   await hecho.getByRole("button", { name: "Listo" }).click();
   await expect(mesa(page, 4)).toHaveAccessibleName(/Libre/);
-  await expect(page.getByRole("heading", { name: "Cuentas por cobrar · $20" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pedidos en curso · por cobrar $20" })).toBeVisible();
 
   await page.getByRole("button", { name: /^Cocina/ }).click();
   await page.getByRole("tab", { name: "Ventas / Corte" }).click();
@@ -185,5 +185,55 @@ test("cobros: cambio en efectivo, mesa liberada y el corte separa lo cobrado de 
   await page.getByRole("button", { name: "Autorizar" }).click();
   await expect(page.getByText("Corte guardado: 2 venta(s) · $60 · cobrado $40")).toBeVisible();
   await page.getByRole("button", { name: /^Mesas/ }).click();
-  await expect(page.getByRole("heading", { name: "Cuentas por cobrar · $20" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pedidos en curso · por cobrar $20" })).toBeVisible();
+});
+
+test("cocina ordenada y abreviada, estatus para el mesero y no se libera una mesa sin cobrar", async ({ page }) => {
+  await entrarComoAdmin(page);
+  await mesa(page, 5).click();
+  for (const p of ["Coca-Cola", "Volcán Pastor", "Taco Pastor", "Gringa Pastor"]) await producto(page, p).click();
+  await page.getByRole("button", { name: "Enviar a cocina" }).click();
+  await expect(mesa(page, 5)).toHaveAccessibleName(/estatus Enviado/);
+
+  await page.getByRole("button", { name: /^Cocina/ }).click();
+  await expect(page.locator(".kticket .kt-item")).toHaveText(["1× Taco Pastor", "1× Gringa Pastor", "1× Volcán Pastor", "1× Coca-Cola"]);
+  await page.locator(".kticket").getByRole("button", { name: "Imprimir" }).click();
+  await expect(page.locator(".tp-cocina .tp-n")).toHaveText(["T Pastor", "G Pastor", "V Pastor", "Coca-Cola"]);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: /^Mesas/ }).click();
+  await expect(mesa(page, 5)).toHaveAccessibleName(/estatus Recibido/);
+
+  await page.getByRole("button", { name: /^Cocina/ }).click();
+  await page.getByRole("button", { name: "Preparando" }).click();
+  await page.getByRole("button", { name: /^Mesas/ }).click();
+  await expect(mesa(page, 5)).toHaveAccessibleName(/estatus En proceso/);
+
+  // con cuenta pendiente no hay «Marcar mesa como libre»: primero se cobra
+  await mesa(page, 5).click();
+  await expect(page.getByText("Para liberar la mesa, primero cóbrala.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Marcar mesa como libre" })).toHaveCount(0);
+  await page.getByRole("button", { name: /^Mesas/ }).first().click();
+
+  await page.getByRole("button", { name: /^Cocina/ }).click();
+  await page.getByRole("button", { name: "Listo" }).click();
+  await page.getByRole("button", { name: /^Mesas/ }).click();
+  await expect(mesa(page, 5)).toHaveAccessibleName(/estatus Entregado, por cobrar/);
+
+  // cierre sin cobro: motivo y PIN de administrador
+  await page.getByRole("button", { name: /^Cobrar Mesa 5/ }).click();
+  const dlg = page.getByRole("dialog", { name: "Cobrar · Mesa 5" });
+  await dlg.getByRole("button", { name: "¿No se va a cobrar? Cerrar sin cobro" }).click();
+  await dlg.getByLabel("Motivo").fill("El cliente se fue");
+  await dlg.getByLabel("PIN de administrador").fill("0000");
+  await dlg.getByRole("button", { name: "Cerrar sin cobro" }).click();
+  await expect(dlg.getByRole("alert")).toContainText("PIN incorrecto");
+  await dlg.getByLabel("PIN de administrador").fill("8642");
+  await dlg.getByRole("button", { name: "Cerrar sin cobro" }).click();
+  const hecho = page.getByRole("dialog", { name: "Cerrado sin cobro · Mesa 5" });
+  await expect(hecho).toContainText("La Mesa 5 quedó libre.");
+  await hecho.getByRole("button", { name: "Listo" }).click();
+  await expect(mesa(page, 5)).toHaveAccessibleName(/Libre/);
+  await page.getByRole("button", { name: /^Cocina/ }).click();
+  await page.getByRole("tab", { name: "Ventas / Corte" }).click();
+  await expect(page.locator(".corte-bar")).toContainText("No cobrado $");
 });

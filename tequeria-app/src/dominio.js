@@ -83,6 +83,11 @@ export const CATS = {
   empaque: { color: "var(--empaque)",  label: "Para llevar / empaque" },
 };
 
+/* Orden fijo de las categorías en tickets y cocina: tacos, gringas, volcanes, costras y bebidas */
+export const ORDEN_CATS = ["taco", "quesa", "volcan", "costra", "bebida", "empaque"];
+const rangoCat = (it) => { const i = ORDEN_CATS.indexOf(it?.cat); return i < 0 ? ORDEN_CATS.length : i; };
+export const ordenarItems = (items) => [...(items || [])].sort((a, b) => rangoCat(a) - rangoCat(b));
+
 /* preparación por orden */
 export const PREPS = [
   { k: "con-todo", label: "Con todo" },
@@ -213,6 +218,38 @@ export function sugerenciasEfectivo(total) {
 }
 export const porCobrarDeMesa = (porCobrar, mesaId) => (porCobrar || []).filter((t) => t.mesaId === mesaId);
 
+/* Estatus del pedido para el mesero. Cocina: enviado → recibido (ya está en la pantalla de cocina)
+   → en proceso → entregado (marcado como listo). Cobrado cierra el pedido. */
+export const PASOS_PEDIDO = [
+  { k: "enviado", label: "Enviado" },
+  { k: "recibido", label: "Recibido" },
+  { k: "proceso", label: "En proceso" },
+  { k: "entregado", label: "Entregado" },
+  { k: "cobrado", label: "Cobrado" },
+];
+const PASO_IDX = Object.fromEntries(PASOS_PEDIDO.map((p, i) => [p.k, i]));
+const pasoCocina = (t) => (t.estado === "listo" ? "entregado" : t.estado === "preparando" ? "proceso" : t.recibido ? "recibido" : "enviado");
+// Acepta un ticket o varios (una mesa con órdenes extra): manda el que va más atrasado
+export function estadoPedido(ts) {
+  const lista = (Array.isArray(ts) ? ts : [ts]).filter((t) => t && !t.reenvio);
+  if (!lista.length) return null;
+  const cocina = lista.map(pasoCocina).reduce((a, b) => (PASO_IDX[a] <= PASO_IDX[b] ? a : b));
+  const cobrado = lista.every((t) => t.cobro);
+  return { cocina, cobrado, noCobrado: lista.some((t) => t.cobro?.noCobrado), paso: cobrado && cocina === "entregado" ? "cobrado" : cocina };
+}
+export function unirTickets(...listas) {
+  const m = new Map();
+  listas.flat().forEach((t) => { if (t && !m.has(t.id)) m.set(t.id, t); });
+  return [...m.values()];
+}
+// Comandas de la visita actual de una mesa: desde su comanda original más reciente (mesa.desde)
+export function pedidosDeMesa(tickets, m) {
+  if (!m || m.estado !== "ocupada") return [];
+  const desde = m.desde ? new Date(m.desde).getTime() - 1000 : null;
+  return (tickets || []).filter((t) => t.mesaId === m.id && !t.reenvio
+    && (desde == null ? !t.cobro : !t.creado || new Date(t.creado).getTime() >= desde));
+}
+
 /* Avatar del login: iniciales y un color estable por usuario */
 export const iniciales = (nombre) => (nombre || "?").trim().split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase();
 const COLORES_AVATAR = ["#11634A", "#A15C07", "#1D4E89", "#8B1E3F", "#C2410C", "#55702A", "#5B3E8C", "#0F6E78"];
@@ -241,10 +278,12 @@ export function resumenPeriodo(tickets, gastos = [], cobros = []) {
   const validos = cobros.filter((c) => !c.anulado);
   const metodo = (k) => redondear(validos.filter((c) => c.metodo === k).reduce((s, c) => s + c.total + c.propina, 0));
   const pendientes = tickets.filter((t) => !t.reenvio && !t.cobroId);
+  const sinCobro = tickets.filter((t) => !t.reenvio && t.cobroId === "no_cobrado");
   return {
     total: redondear(total), count: tickets.filter((t) => !t.reenvio).length, porTipo, porMesero, top,
     gastos: redondear(gastos.reduce((s, g) => s + (Number(g.monto) || 0), 0)),
     porCobrar: redondear(pendientes.reduce((s, t) => s + (Number(t.total) || 0), 0)), porCobrarCount: pendientes.length,
+    noCobrado: redondear(sinCobro.reduce((s, t) => s + (Number(t.total) || 0), 0)), noCobradoCount: sinCobro.length,
     cobrado: {
       count: validos.length, ventas: redondear(validos.reduce((s, c) => s + c.total, 0)),
       propinas: redondear(validos.reduce((s, c) => s + c.propina, 0)),
@@ -271,6 +310,7 @@ export function textoCorteWhatsApp(neg, r, fechaStr) {
     METODOS_PAGO.forEach((m) => { if (r.cobrado[m.k] > 0) L.push(`• ${m.label}: ${money(r.cobrado[m.k])}`); });
     if (r.cobrado.propinas > 0) L.push(`• (incluye propinas: ${money(r.cobrado.propinas)})`);
     if (r.porCobrar > 0) L.push(`Por cobrar: ${money(r.porCobrar)}`);
+    if (r.noCobrado > 0) L.push(`No cobrado (autorizado): ${money(r.noCobrado)}`);
   }
   if (r.gastos > 0) { L.push(""); L.push(`Gastos del periodo: ${money(r.gastos)}`); L.push(`*Neto: ${money(r.total - r.gastos)}*`); }
   return L.join("\n");
@@ -287,6 +327,27 @@ export function nombreTicket(item) {
     .replace(/\s*\(([^)]*)\)/g, " $1")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+/* Nombre corto para el ticket de cocina: T Pastor, G Bistec, V queso, ½C Asada… */
+const ABREV_COCINA = [
+  [/^Taco de queso\b/i, "T queso"],
+  [/^Taco\b/i, "T"],
+  [/^Gringa\b/i, "G"],
+  [/^Llenadora\b/i, "Llen."],
+  [/^Volcán(?: de)?\b/i, "V"],
+  [/^Media costra(?: de)?\b/i, "½C"],
+  [/^Costra(?: de)?\b/i, "C"],
+  [/^Quesadilla de maíz \(queso\)/i, "Quesa maíz"],
+  [/^Quesadilla(?: de)?\b/i, "Quesa"],
+  [/^Tortillas\b/i, "Tort."],
+  [/^Bolsa de verdura\b/i, "Bolsa verdura"],
+  [/^Agua de\b/i, "Agua"],
+];
+export function nombreCocina(item) {
+  const n = (item.corto || item.nombre || "").trim();
+  const r = ABREV_COCINA.find(([re]) => re.test(n));
+  return (r ? n.replace(r[0], r[1]) : n).replace(/\s{2,}/g, " ").trim();
 }
 
 export const slug = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")

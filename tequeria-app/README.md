@@ -37,6 +37,9 @@ la tablet de cocina.
 - Al cobrar se elige método (efectivo, tarjeta o transferencia) y propina (10 %, 15 % u
   otra). En efectivo se captura lo recibido y la app calcula el **cambio**; no deja cobrar
   si falta dinero. Se puede liberar la mesa en el mismo paso.
+- **Una mesa no se libera sin cobrar.** Si el cliente se fue o la comanda fue un error, un
+  administrador puede «Cerrar sin cobro» desde el mismo diálogo, con su PIN y un motivo.
+  Esas cuentas quedan como «No cobrado» en el corte y en la `bitacora`.
 - El servidor calcula el total y rechaza cobrar dos veces la misma cuenta. Reintentar un
   cobro no lo duplica.
 - Solo un administrador puede **anular** un cobro, con motivo, y solo antes del corte.
@@ -45,11 +48,22 @@ la tablet de cocina.
   las propinas y lo que quedó **por cobrar**. Las cuentas sin cobrar siguen pendientes
   después del corte. Las ventas anteriores a esta versión se marcan como «Sin registro».
 
+## Estatus del pedido (mesero)
+
+Cada mesa y cada pedido para llevar o domicilio muestra su estatus: **Enviado** → **Recibido**
+(la cocina ya lo tiene en pantalla) → **En proceso** (Preparando) → **Entregado** (Listo) →
+**Cobrado**. Si se paga antes de que salga de cocina se ve, por ejemplo, «En proceso · pagado».
+En «Mesas», la lista «Pedidos en curso» junta lo que falta cobrar y lo que sigue en cocina.
+
 ## Tickets
 
 - **Cuenta**: folio, precio unitario, total y el bloque de pago (método, propina, recibido
   y cambio). Después de cobrar se puede imprimir la cuenta de toda la mesa junta.
 - **Cocina**: tipo y origen en grande, preparación, productos sin precios y conteo de tacos.
+  Los productos salen siempre en orden: tacos, gringas, volcanes, costras y bebidas, y con
+  nombres cortos: T (taco), T queso, G (gringa), Llen. (llenadora), V (volcán), C (costra),
+  ½C (media costra), Quesa, Tort. (tortillas). Las bebidas y las carnes no se abrevian.
+  En la pantalla de cocina y en la cuenta se usa el mismo orden con los nombres completos.
 - Papel de **58 o 80 mm**; la elección se recuerda en cada dispositivo.
 - En cocina cada comanda muestra su folio y el tiempo de espera (se marca a los 10 y 20 min).
 

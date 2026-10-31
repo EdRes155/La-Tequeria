@@ -85,6 +85,29 @@ describe("modo local", () => {
     expect(est.cortes).toHaveLength(1);
   });
 
+  it("no libera una mesa sin cobrar; un administrador puede cerrarla sin cobro", async () => {
+    await api.crearAdminInicial("Ana", "8642");
+    const { usuarios } = await api.pantallaLogin();
+    await api.entrar(usuarios[0].id, "8642");
+    await api.acciones.enviar(t("mesa2-1", { tipo: "aqui", mesaId: 2 }));
+    let est = await api.cargar();
+    const tk = est.cocina.find((x) => x.id === "mesa2-1");
+    expect(tk.recibido).toBeNull();
+    expect(est.mesas[1].desde).toBe(tk.creado);
+    expect(await api.acciones.marcarRecibido(["mesa2-1"])).toBe(1);
+    expect((await api.cargar()).cocina[0].recibido).toBeTruthy();
+
+    expect((await falla(api.acciones.liberarMesa(2))).codigo).toBe("POR_COBRAR");
+    expect((await falla(api.acciones.noCobrar("0000", ["mesa2-1"], "Se fue", true))).codigo).toBe("pin");
+    expect((await falla(api.acciones.noCobrar("8642", ["mesa2-1"], " ", true))).codigo).toBe("DATOS");
+    expect(await api.acciones.noCobrar("8642", ["mesa2-1"], "Se fue", true)).toMatchObject({ ok: true, mesaLiberada: true, total: 40 });
+    est = await api.cargar();
+    expect(est.mesas[1].estado).toBe("libre");
+    expect(est.porCobrar).toEqual([]);
+    expect(est.historial[0].cobro).toEqual({ noCobrado: true });
+    expect(est.periodo).toMatchObject({ noCobrado: 40, porCobrar: 0 });
+  });
+
   it("aplica permisos por rol y obliga a cambiar un PIN débil", async () => {
     await api.crearAdminInicial("Ana", "8642");
     let { usuarios } = await api.pantallaLogin();

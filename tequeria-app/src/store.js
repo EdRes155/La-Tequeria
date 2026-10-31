@@ -22,7 +22,7 @@ export const TODAS = ["config", "carnes", "bebidas", "usuarios", "mesas", "cocin
 export const TABLA_PARTES = {
   config: ["config"], carnes: ["carnes"], bebidas: ["bebidas"], usuarios: ["usuarios"], mesas: ["mesas"],
   tickets: ["cocina", "historial", "porCobrar"], cortes: ["cortes", "historial"], gastos: ["gastos", "historial"],
-  cobros: ["porCobrar", "historial", "cortes"],
+  cobros: ["porCobrar", "historial", "cortes", "cocina"],
 };
 
 const SESION_KEY = "tequeria_sesion";
@@ -160,6 +160,10 @@ function crearRemoto() {
         p_id: id, p_tickets: tickets, p_metodo: metodo, p_recibido: recibido ?? null, p_propina: propina || 0, p_liberar_mesa: !!liberarMesa,
       }),
       anularCobro: (id, motivo) => conToken("anular_cobro", { p_id: id, p_motivo: motivo }),
+      marcarRecibido: (ids) => conToken("marcar_recibido", { p_ids: ids }),
+      noCobrar: (adminPin, tickets, motivo, liberarMesa) => conPin("no_cobrar", {
+        p_admin_pin: adminPin, p_tickets: tickets, p_motivo: motivo, p_liberar_mesa: !!liberarMesa,
+      }),
     },
   };
 }
