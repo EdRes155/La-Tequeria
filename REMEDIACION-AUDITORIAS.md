@@ -13,13 +13,18 @@ expectativas invertidas) están en `tequeria-app/tests/`.
 
 ## Estado
 
-**Implementado y probado en el código.** Para que llegue a producción falta un paso
-manual: ejecutar `tequeria-app/supabase-schema.sql` en el proyecto de Supabase de
-La Tequería y publicar la app v3 al mismo tiempo. Los pasos están en el
-[README](tequeria-app/README.md#actualizar-desde-v2-la-versión-anterior).
+**En producción desde el 31 de octubre de 2026.** El esquema v3 se aplicó en el proyecto
+de Supabase de La Tequería y la app v3 está publicada en Vercel desde `main`. Se
+conservaron todos los datos: tickets, cortes, inventario y usuarios. Antes de aplicar
+la migración se guardó una copia de las tablas v2 en el esquema privado
+`respaldo_v2_20261030`; esa copia no incluye 2 tickets creados después.
 
-La base de producción no se modificó desde esta sesión: el conector de Supabase
-disponible pertenecía a otra organización.
+Comprobaciones hechas en producción:
+- Las funciones coinciden byte a byte con la versión probada en local.
+- El rol `anon` ya no tiene acceso a ninguna tabla y la API v2 ya no existe.
+- La página publicada ya llama a la API nueva con respuestas 200.
+- Avisos de Supabase: solo quedan los esperados, las funciones de la API (que
+  validan la sesión por dentro) y las tablas con RLS sin políticas.
 
 | Verificación | Resultado |
 |---|---|
@@ -73,7 +78,9 @@ disponible pertenecía a otra organización.
 
 ## Pendiente (requiere acción fuera del repositorio)
 
-1. Ejecutar `supabase-schema.sql` en la base de producción y publicar la v3 al mismo tiempo.
+1. Entrar con cada usuario: el administrador con PIN de demostración debe elegir uno nuevo.
+   Cuando todo esté confirmado, borrar el respaldo `respaldo_v2_20261030`: contiene hashes
+   de PIN viejos y domicilios.
 2. Revisar en Supabase los respaldos y el PITR, y la opción de canales públicos de Realtime.
 3. Definir si el corte debe registrar **cobros** además de comandas enviadas (hoy no hay modelo de pagos).
 4. Probar en los dispositivos reales: impresora térmica de 58 mm, Safari en iPad, teclado virtual y lector de pantalla.
