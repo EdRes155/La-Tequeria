@@ -29,8 +29,8 @@ Comprobaciones hechas en producción:
 | Verificación | Resultado |
 |---|---|
 | `npm test` (dominio y modo local) | 15 pruebas ✓ |
-| `npm run test:sql` (PostgreSQL 16 real, actualización v2→v3, concurrencia con dos conexiones, adaptador remoto) | 22 pruebas ✓ |
-| `npm run test:e2e` (Chromium, escenarios UX de la auditoría) | 6 recorridos ✓ |
+| `npm run test:sql` (PostgreSQL 16 real, actualización v2→v3, concurrencia con dos conexiones, cobros, adaptador remoto) | 23 pruebas ✓ |
+| `npm run test:e2e` (Chromium, escenarios UX de la auditoría y cobro) | 7 recorridos ✓ |
 | `npm run build` y `npm run check:secrets` | ✓ |
 
 ## Seguridad y datos
@@ -68,7 +68,7 @@ Comprobaciones hechas en producción:
 | UX-03 Éxito falso | Se muestra «Enviando…». El error queda visible junto al pedido con «Reintentar envío» sin duplicar, y se distingue el resultado incierto por falta de conexión. |
 | UX-04 Persona activa oculta | La barra «Añadiendo a:» está fija en el menú (celular y escritorio) con botones `aria-pressed`. Seleccionar y renombrar son controles separados. |
 | UX-05 Diálogos | Componente `Modal` con `role="dialog"`, `aria-modal`, foco contenido, Escape y restitución del foco. |
-| UX-06 Contraste | Paleta ajustada: lima `#557A1F`, maíz `#94600A` y demás tonos ≥ 4.5:1. Se comprueba en e2e. |
+| UX-06 Contraste | Paleta ajustada (hoy «nopal»: lima `#3A731C`, maíz `#A15C07` y demás tonos ≥ 4.5:1). Se comprueba en e2e. |
 | UX-07 Etiquetas, iconos y objetivos táctiles | Etiquetas `htmlFor`, `aria-label` en botones con icono (con el producto o la orden afectada), controles de 44×44 px y foco visible. |
 | UX-08 Borrar sin recuperar | Se pide confirmación al borrar una orden con productos, un gasto, una carne, una bebida o un producto. En cocina, «Listo» se puede regresar a preparación. |
 | UX-09 Navegación y catálogo | En el celular todas las secciones se ven en una segunda fila. Hay accesos por categoría y buscador de productos. |
@@ -82,5 +82,21 @@ Comprobaciones hechas en producción:
    Cuando todo esté confirmado, borrar el respaldo `respaldo_v2_20261030`: contiene hashes
    de PIN viejos y domicilios.
 2. Revisar en Supabase los respaldos y el PITR, y la opción de canales públicos de Realtime.
-3. Definir si el corte debe registrar **cobros** además de comandas enviadas (hoy no hay modelo de pagos).
-4. Probar en los dispositivos reales: impresora térmica de 58 mm, Safari en iPad, teclado virtual y lector de pantalla.
+3. Probar en los dispositivos reales: impresoras térmicas de 58 y 80 mm, Safari en iPad, teclado virtual y lector de pantalla.
+
+## Después de las auditorías: cobros, tickets y diseño
+
+- **Cobros en el corte** (atiende el pendiente que dejó la remediación). Se agregó la tabla
+  `cobros` con método, propina, recibido y cambio. Las funciones `cobrar` y
+  `anular_cobro` validan sesión y rol, calculan el total en el servidor, bloquean las
+  cuentas para evitar el doble cobro y son idempotentes. Anular un cobro es solo para
+  administradores, requiere motivo y queda en la bitácora. El corte guarda lo
+  **cobrado** por método y lo **por cobrar**. Las cuentas sin cobrar siguen pendientes
+  después del corte. Las ventas anteriores se marcan como «Sin registro» para no
+  inflar lo pendiente.
+- **Tickets**: folio consecutivo, formato de cuenta (precio unitario y bloque de pago) y
+  de cocina (sin precios, letra grande), papel de 58 u 80 mm y cuenta de la mesa completa.
+- **Diseño**: paleta «nopal» con contraste de 4.5:1 o más en todos los textos,
+  tipografías Figtree y Bricolage Grotesque incluidas en el build, un inicio de sesión
+  con tarjetas de usuario y teclado numérico, y en cocina el tiempo de espera de cada
+  comanda.

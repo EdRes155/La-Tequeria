@@ -26,9 +26,40 @@ la tablet de cocina.
 
 | Rol | Puede |
 |---|---|
-| Mesero | Tomar comandas, borradores, orden extra, reenviar, liberar mesa. Ve cocina (solo lectura). |
+| Mesero | Tomar comandas, borradores, orden extra, reenviar, liberar mesa y **cobrar**. Ve cocina (solo lectura). |
 | Cocinero | Cocina completa y el corte (con PIN de administrador). Una sola cocina activa a la vez. |
-| Administrador | Todo: precios, productos, inventario, gastos y usuarios. |
+| Administrador | Todo: precios, productos, inventario, gastos, usuarios y **anular cobros**. |
+
+## Cobros y corte
+
+- Cada comanda enviada queda **por cobrar**. En «Mesas» aparecen la lista «Cuentas por
+  cobrar» y el monto pendiente en cada mesa; en la comanda de la mesa está «Cobrar mesa».
+- Al cobrar se elige método (efectivo, tarjeta o transferencia) y propina (10 %, 15 % u
+  otra). En efectivo se captura lo recibido y la app calcula el **cambio**; no deja cobrar
+  si falta dinero. Se puede liberar la mesa en el mismo paso.
+- El servidor calcula el total y rechaza cobrar dos veces la misma cuenta. Reintentar un
+  cobro no lo duplica.
+- Solo un administrador puede **anular** un cobro, con motivo, y solo antes del corte.
+  Todo queda en la `bitacora`.
+- El corte separa las **ventas** (comandas enviadas) de lo **cobrado** por método, con
+  las propinas y lo que quedó **por cobrar**. Las cuentas sin cobrar siguen pendientes
+  después del corte. Las ventas anteriores a esta versión se marcan como «Sin registro».
+
+## Tickets
+
+- **Cuenta**: folio, precio unitario, total y el bloque de pago (método, propina, recibido
+  y cambio). Después de cobrar se puede imprimir la cuenta de toda la mesa junta.
+- **Cocina**: tipo y origen en grande, preparación, productos sin precios y conteo de tacos.
+- Papel de **58 o 80 mm**; la elección se recuerda en cada dispositivo.
+- En cocina cada comanda muestra su folio y el tiempo de espera (se marca a los 10 y 20 min).
+
+## Diseño
+
+Paleta «nopal» (verde agave con acentos de maíz, barro y oro; todos los textos con
+contraste de 4.5:1 o más) y tipografías **Figtree** (texto) y **Bricolage Grotesque**
+(títulos y montos), incluidas en el build porque la CSP no permite fuentes externas.
+El inicio de sesión muestra la hora, el estado de la conexión, tarjetas con iniciales
+por usuario (recuerda el último) y un teclado numérico para el PIN.
 
 ---
 
@@ -106,6 +137,5 @@ corre las cuatro.
 ## Pendiente fuera del código
 
 - Activar en Supabase los respaldos automáticos/PITR según el plan contratado.
-- El corte cuenta **comandas enviadas**, no cobros: no hay registro de pagos.
-- Validar impresión en la impresora térmica de 58 mm y lectura con lector de pantalla
-  en los dispositivos reales.
+- Validar impresión en las impresoras térmicas (58 y 80 mm) y lectura con lector de
+  pantalla en los dispositivos reales.

@@ -2,12 +2,14 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, useId } from 
 import {
   Plus, Minus, Trash2, Printer, Send, LogOut, ArrowLeft, Bike, Package, Wallet, Utensils, ShoppingBag,
   ChefHat, Check, Pencil, Settings, KeyRound, Save, Undo2, Loader2, RefreshCw, X,
+  Banknote, CreditCard, ArrowLeftRight, Delete, Receipt,
 } from "lucide-react";
 import { api, remoto, ErrorApi, mensajePin, TODAS } from "./store.js";
 import {
   ROLES, puede, puedeEditar, money, ticketTotal, contarTacos, contarProductos, CATS, PREPS, PREP_LABEL,
   empaqueItems, catalogoBase, buildMenu, uid, clone, nuevaOrden, nuevoPedido, domVacio, telefonoValido,
   pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, pinDebil, hora, fecha,
+  METODOS_PAGO, METODO_LABEL, sugerenciasEfectivo, porCobrarDeMesa, iniciales, colorAvatar, redondear,
 } from "./dominio.js";
 import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
 import { CSS } from "./estilos.js";
@@ -30,6 +32,39 @@ function useIsPhone() {
     return () => (mq.removeEventListener ? mq.removeEventListener("change", f) : mq.removeListener(f));
   }, []);
   return phone;
+}
+
+/* Logotipo: taco con relleno (sin archivos externos) */
+function Logo({ className = "", titulo }) {
+  return (
+    <svg className={className} viewBox="0 0 64 64" role={titulo ? "img" : undefined} aria-label={titulo} aria-hidden={titulo ? undefined : true}>
+      <circle cx="32" cy="32" r="31" fill="#F6F1E8" />
+      <path d="M12 33c2-6 7-8 10-6 2-5 8-7 11-3 3-4 9-3 11 1 4-2 9 1 9 8z" fill="#3A731C" />
+      <path d="M14 33c3-3 6-4 9-3 3-3 7-3 10-1 3-2 7-2 10 0 3-1 6 0 8 4z" fill="#C2410C" />
+      <path d="M8 33h48a24 24 0 0 1-48 0z" fill="#F2C14E" />
+      <path d="M8 33h48" stroke="#C98A1B" strokeWidth="2.5" strokeLinecap="round" />
+      <circle cx="22" cy="42" r="1.6" fill="#C98A1B" /><circle cx="33" cy="47" r="1.6" fill="#C98A1B" /><circle cx="43" cy="41" r="1.6" fill="#C98A1B" />
+    </svg>
+  );
+}
+// Banderines de papel picado (decorativo)
+function PapelPicado() {
+  const colores = ["#F2C14E", "#C2410C", "#1D4E89", "#8B1E3F", "#3A731C", "#F2C14E", "#C2410C", "#1D4E89", "#8B1E3F", "#3A731C"];
+  return (
+    <svg className="picado" viewBox="0 0 400 56" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M0 6 Q200 18 400 6" stroke="rgba(255,255,255,.35)" strokeWidth="1.5" fill="none" />
+      {colores.map((c, i) => {
+        const x = i * 40 + 4;
+        return (
+          <g key={i}>
+            <path d={`M${x} ${7 + (i % 2)} h32 v30 l-8 6 l-8 -6 l-8 6 l-8 -6z`} fill={c} opacity=".92" />
+            <path d={`M${x + 16} ${14} l6 7 l-6 7 l-6 -7z`} fill="rgba(11,59,44,.5)" />
+            {[[7, 13], [25, 13], [7, 29], [25, 29]].map(([dx, dy]) => <circle key={dx + "-" + dy} cx={x + dx} cy={dy} r="2" fill="rgba(11,59,44,.5)" />)}
+          </g>
+        );
+      })}
+    </svg>
+  );
 }
 
 /* tipos de comanda */
@@ -74,6 +109,7 @@ export default function App() {
   const [printAuto, setPrintAuto] = useState(false);
   const [cocinaIncierta, setCocinaIncierta] = useState(false);
   const [cambiandoPin, setCambiandoPin] = useState(false);
+  const [cobro, setCobro] = useState(null);       // { cuentas, titulo, mesaId } para el diálogo de cobro
   const borradoresRef = useRef(borradores);
   borradoresRef.current = borradores;
 
@@ -112,7 +148,7 @@ export default function App() {
       const vigente = (p) => pedidas.current[p] === n;
       const parche = { yo: r.yo };
       if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, precios: r.precios, extras: r.extras, ocultos: r.ocultos });
-      ["carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos"].forEach((p) => { if (p in r && vigente(p)) parche[p] = r[p]; });
+      ["carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos", "porCobrar"].forEach((p) => { if (p in r && vigente(p)) parche[p] = r[p]; });
       if ("periodo" in r && vigente("historial")) parche.periodo = r.periodo;
       setData((d) => ({ ...(d || {}), ...parche }));
       setErrorCarga(null); setSinRed(false);
@@ -215,6 +251,21 @@ export default function App() {
       crearUsuario: (adminPin, nombre, pin, rol) => ejecutar(() => a.crearUsuario(adminPin, nombre, pin, rol), { partes: ["usuarios"] }),
       eliminarUsuario: (adminPin, id) => ejecutar(() => a.eliminarUsuario(adminPin, id), { partes: ["usuarios"] }),
       restablecerPin: (adminPin, id, pin) => ejecutar(() => a.restablecerPin(adminPin, id, pin), { partes: ["usuarios"] }),
+      // El cobro maneja sus errores en el diálogo (no se pierde lo capturado)
+      async cobrar(id, tickets, metodo, recibido, propina, liberar) {
+        try {
+          const r = await a.cobrar(id, tickets, metodo, recibido, propina, liberar);
+          setSinRed(false);
+          refrescar(["porCobrar", "historial", "mesas", "cocina"]);
+          return r;
+        } catch (e) {
+          if (e.codigo === "SESION" || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (e.codigo === "RED") setSinRed(true);
+          if (e.codigo === "YA_COBRADO" || e.codigo === "TICKET") refrescar(["porCobrar", "historial"]);
+          throw e;
+        }
+      },
+      anularCobro: (id, motivo) => ejecutar(() => a.anularCobro(id, motivo), { partes: ["porCobrar", "historial"], ok: "Cobro anulado: las cuentas vuelven a estar por cobrar" }),
     };
   }, [manejarError, refrescar]);
 
@@ -236,27 +287,29 @@ export default function App() {
   }
   if (debeCambiar) {
     return (<>
-      <CambiarPin forzado usuario={usuario} onSalir={cerrarSesion}
+      <CambiarPin forzado usuario={usuario} negocio={pantalla?.negocio} sinRed={sinRed} onSalir={cerrarSesion}
         onListo={() => { toast("PIN actualizado", "ok"); setSesion((s) => ({ ...s, debeCambiarPin: false })); }} />
       {hosts}
     </>);
   }
   if (!data || !data.mesas) {
     return (<>
-      <style>{CSS}</style>
-      <div className="loading" role="status">
-        {errorCarga ? (<>
-          <p>No se pudieron cargar los datos: {errorCarga.message}</p>
-          <button className="btn btn-primary" onClick={() => refrescar(null)}><RefreshCw size={16} aria-hidden="true" /> Reintentar</button>
-          <button className="btn btn-ghost" onClick={() => cerrarSesion(null)}>Cerrar sesión</button>
-        </>) : "Cargando…"}
-      </div>
+      <EntradaShell negocio={pantalla?.negocio} sinRed={sinRed}>
+        <div role="status" style={{ textAlign: "center" }}>
+          {errorCarga ? (<>
+            <p className="login-err">No se pudieron cargar los datos: {errorCarga.message}</p>
+            <button className="btn btn-primary btn-block" onClick={() => refrescar(null)}><RefreshCw size={16} aria-hidden="true" /> Reintentar</button>
+            <button className="btn btn-ghost btn-block" onClick={() => cerrarSesion(null)}>Cerrar sesión</button>
+          </>) : <p className="login-sub" style={{ margin: 0 }}><Loader2 size={18} className="girando" aria-hidden="true" /> Cargando…</p>}
+        </div>
+      </EntradaShell>
       {hosts}
     </>);
   }
 
   const userActual = data.yo || usuario;
-  const props = { data, db, user: userActual, go, ctx };
+  const abrirCobro = (cuentas, titulo, mesaId = null) => setCobro({ cuentas, titulo, mesaId });
+  const props = { data, db, user: userActual, go, ctx, abrirCobro };
   const abrirImpresion = (t, auto = false) => { setPrintAuto(!!auto); setPrintTicket(t); };
   const claveCtx = ctx && view === "comanda" ? claveBorrador(ctx) : null;
 
@@ -294,8 +347,9 @@ export default function App() {
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
       </main>
-      {printTicket && <TicketModal t={printTicket} negocio={data.nombreNegocio} autoPrint={printAuto}
+      {printTicket && <TicketModal t={printTicket} negocio={data.nombreNegocio} autoPrint={printAuto} formatoInicial="cocina"
         onClose={() => { setPrintTicket(null); setPrintAuto(false); }} />}
+      {cobro && <CobroModal {...cobro} db={db} negocio={data.nombreNegocio} onClose={() => setCobro(null)} />}
       {cambiandoPin && (
         <CambiarPin usuario={userActual} onSalir={cerrarSesion} onCancelar={() => setCambiandoPin(false)}
           onListo={() => { setCambiandoPin(false); toast("PIN actualizado", "ok"); }} />
@@ -313,13 +367,68 @@ function SinAcceso() {
   );
 }
 
-/* ============================== LOGIN ============================== */
+/* ============================== ENTRADA ============================== */
+const ULTIMO_KEY = "tequeria_ultimo_usuario";
+const fmtHora = new Intl.DateTimeFormat("es-MX", { hour: "2-digit", minute: "2-digit", hour12: false });
+const fmtFecha = new Intl.DateTimeFormat("es-MX", { weekday: "long", day: "numeric", month: "long" });
+
+function useReloj() {
+  const [ahora, setAhora] = useState(() => new Date());
+  useEffect(() => { const iv = setInterval(() => setAhora(new Date()), 15000); return () => clearInterval(iv); }, []);
+  return ahora;
+}
+
+// Marco común de las pantallas de entrada: panel de marca + tarjeta
+function EntradaShell({ negocio, sinRed, error, children }) {
+  const ahora = useReloj();
+  const estado = !remoto ? { cls: "", txt: "Modo local: solo este navegador" }
+    : sinRed || error ? { cls: "mal", txt: "Sin conexión con el servidor" } : { cls: "ok", txt: "Conectado al servidor" };
+  return (
+    <div className="login">
+      <style>{CSS}</style>
+      <aside className="login-hero">
+        <PapelPicado />
+        <div className="hero-top">
+          <Logo className="hero-logo" />
+          <div><div className="hero-negocio">{negocio || "La Tequería"}</div><div className="hero-sub">Sistema de comandas</div></div>
+        </div>
+        <div className="hero-centro">
+          <p className="hero-hora">{fmtHora.format(ahora)}</p>
+          <p className="hero-fecha">{fmtFecha.format(ahora)}</p>
+          <p className="hero-lema">Comandas, cocina y caja en un solo lugar.</p>
+        </div>
+        <div className={"hero-estado " + estado.cls} role="status"><i aria-hidden="true" />{estado.txt}</div>
+      </aside>
+      <main className="login-panel">
+        <div className="login-card">{children}</div>
+      </main>
+    </div>
+  );
+}
+
 function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
   const [sel, setSel] = useState(null);
   const [pin, setPin] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [agitar, setAgitar] = useState(0);
   const idPin = useId();
+  const pinRef = useRef(null);
+  const usuarios = pantalla?.usuarios || [];
+  const elegido = usuarios.find((u) => u.id === sel);
+
+  // Recuerda al último usuario de este dispositivo
+  useEffect(() => {
+    if (sel || !usuarios.length) return;
+    let ultimo = null;
+    try { ultimo = localStorage.getItem(ULTIMO_KEY); } catch {}
+    if (ultimo && usuarios.some((u) => u.id === ultimo)) setSel(ultimo);
+  }, [pantalla]);
+  useEffect(() => { if (sel) pinRef.current?.focus({ preventScroll: true }); }, [sel]);
+
+  const elegir = (id) => { setSel(id); setErr(""); setPin(""); };
+  const tecla = (d) => { setErr(""); setPin((p) => (p + d).slice(0, 8)); pinRef.current?.focus({ preventScroll: true }); };
+  const borrar = () => { setPin((p) => p.slice(0, -1)); pinRef.current?.focus({ preventScroll: true }); };
 
   const entrar = async (e) => {
     e?.preventDefault();
@@ -327,66 +436,75 @@ function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
     setBusy(true); setErr("");
     try {
       const r = await api.entrar(sel, pin);
-      if (!r.ok) { setErr(mensajePin(r)); setPin(""); return; }
+      if (!r.ok) { setErr(mensajePin(r)); setPin(""); setAgitar((n) => n + 1); return; }
+      try { localStorage.setItem(ULTIMO_KEY, sel); } catch {}
       onEntrar(r);
     } catch (ex) {
       setErr(ex instanceof ErrorApi ? ex.message : "No se pudo entrar. Inténtalo de nuevo.");
     } finally { setBusy(false); }
   };
 
-  const connTxt = !remoto ? "● Modo local: los datos se guardan solo en este navegador"
-    : sinRed || error ? "● Sin conexión con el servidor" : "● Conectado al servidor";
-  const connCol = !remoto ? "var(--alerta)" : sinRed || error ? "var(--alerta)" : "var(--ok)";
-
   let cuerpo;
   if (error) {
     cuerpo = (<div role="alert">
-      <div className="login-err">{error.message}</div>
+      <h1 className="login-titulo">No hay conexión</h1>
+      <p className="login-err">{error.message}</p>
       <button className="btn btn-primary btn-block" onClick={reintentar}><RefreshCw size={16} aria-hidden="true" /> Reintentar</button>
     </div>);
   } else if (!pantalla) {
-    cuerpo = <p role="status">Cargando…</p>;
+    cuerpo = <p className="login-sub" role="status"><Loader2 size={18} className="girando" aria-hidden="true" /> Cargando…</p>;
   } else if (!pantalla.hayAdmin) {
-    cuerpo = remoto ? (
-      <div className="login-setup">
-        <b>Falta el primer administrador.</b> Ejecuta en Supabase → SQL Editor:
+    cuerpo = remoto ? (<>
+      <h1 className="login-titulo">Falta el administrador</h1>
+      <div className="login-setup" style={{ marginTop: 14 }}>
+        Ejecuta en Supabase → SQL Editor:
         <code>select public.crear_admin_inicial('Tu nombre', 'tu PIN');</code>
         Después recarga esta página.
       </div>
-    ) : <CrearAdminLocal onListo={reintentar} />;
-  } else {
+    </>) : <CrearAdminLocal onListo={reintentar} />;
+  } else if (!elegido) {
     cuerpo = (<>
-      <div className="login-users" role="group" aria-label="¿Quién eres?">
-        {pantalla.usuarios.map((u) => (
-          <button key={u.id} type="button" className={"user-chip" + (sel === u.id ? " on" : "")} aria-pressed={sel === u.id}
-            onClick={() => { setSel(u.id); setErr(""); setPin(""); }}>{u.nombre}</button>
+      <h1 className="login-titulo">¿Quién eres?</h1>
+      <p className="login-sub">Toca tu nombre para entrar.</p>
+      <div className="user-grid">
+        {usuarios.map((u) => (
+          <button key={u.id} type="button" className="user-tile" aria-label={u.nombre} onClick={() => elegir(u.id)}>
+            <span className="avatar" style={{ background: colorAvatar(u.id) }} aria-hidden="true">{iniciales(u.nombre)}</span>
+            <span className="user-tile-nombre">{u.nombre}</span>
+          </button>
         ))}
       </div>
-      {sel && (
-        <form onSubmit={entrar}>
-          <label className="sr-only" htmlFor={idPin}>PIN</label>
-          <input id={idPin} className="pin-input" type="password" inputMode="numeric" autoComplete="off" placeholder="PIN" autoFocus
-            aria-invalid={!!err} aria-describedby={err ? idPin + "-e" : undefined}
-            value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))} />
-          {err && <div className="login-err" id={idPin + "-e"} role="alert">{err}</div>}
-          <button type="submit" className="btn btn-primary btn-block" disabled={busy || !pin}>{busy ? "Entrando…" : "Entrar"}</button>
-        </form>
-      )}
     </>);
+  } else {
+    cuerpo = (
+      <form onSubmit={entrar} key={agitar} className={agitar ? "agitar" : ""}>
+        <button type="button" className="volver" onClick={() => elegir(null)}><ArrowLeft size={16} aria-hidden="true" /> Cambiar de usuario</button>
+        <div className="quien">
+          <span className="avatar grande" style={{ background: colorAvatar(elegido.id) }} aria-hidden="true">{iniciales(elegido.nombre)}</span>
+          <div><h1 className="quien-nombre">{elegido.nombre}</h1><p className="login-sub">Escribe tu PIN</p></div>
+        </div>
+        <label className="sr-only" htmlFor={idPin}>PIN</label>
+        <input id={idPin} ref={pinRef} className="pin-input" type="password" inputMode="numeric" autoComplete="off" placeholder="••••"
+          aria-invalid={!!err} aria-describedby={err ? idPin + "-e" : undefined}
+          value={pin} onChange={(e) => { setErr(""); setPin(e.target.value.replace(/\D/g, "").slice(0, 8)); }} />
+        {err && <div className="login-err" id={idPin + "-e"} role="alert">{err}</div>}
+        <div className="teclado" role="group" aria-label="Teclado numérico">
+          {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (
+            <button key={d} type="button" className="tecla" onClick={() => tecla(d)}>{d}</button>
+          ))}
+          <button type="button" className="tecla secundaria" aria-label="Borrar último dígito" onClick={borrar}><Delete size={22} aria-hidden="true" /></button>
+          <button type="button" className="tecla" onClick={() => tecla("0")}>0</button>
+          <button type="submit" className="tecla entrar" disabled={busy || !pin}>{busy ? <Loader2 size={20} className="girando" aria-hidden="true" /> : null}{busy ? "…" : "Entrar"}</button>
+        </div>
+      </form>
+    );
   }
 
   return (
-    <div className="login">
-      <style>{CSS}</style>
-      <div className="login-card">
-        <div className="brand-mark" aria-hidden="true">🌵</div>
-        <h1 className="brand-title">{pantalla?.negocio || "La Tequería"}</h1>
-        <p className="brand-sub">Sistema de comandas</p>
-        {aviso && <div className="login-err" role="alert">{aviso}</div>}
-        {cuerpo}
-        <p className="login-hint" style={{ color: connCol }}>{connTxt}</p>
-      </div>
-    </div>
+    <EntradaShell negocio={pantalla?.negocio} sinRed={sinRed} error={error}>
+      {aviso && <div className="login-err" role="alert" style={{ marginBottom: 12 }}>{aviso}</div>}
+      {cuerpo}
+    </EntradaShell>
   );
 }
 
@@ -402,7 +520,8 @@ function CrearAdminLocal({ onListo }) {
   };
   return (
     <form onSubmit={crear}>
-      <p className="login-setup">Primera vez en este navegador: crea el administrador.</p>
+      <h1 className="login-titulo">Bienvenido</h1>
+      <p className="login-sub">Primera vez en este navegador: crea el administrador.</p>
       <div className="campo"><label htmlFor={id + "n"}>Nombre</label>
         <input id={id + "n"} className="inp" value={nombre} onChange={(e) => setNombre(e.target.value)} autoComplete="off" /></div>
       <div className="campo"><label htmlFor={id + "p"}>PIN (4 a 8 dígitos, no trivial)</label>
@@ -415,7 +534,7 @@ function CrearAdminLocal({ onListo }) {
 }
 
 /* ============================== CAMBIO DE PIN ============================== */
-function CambiarPin({ forzado, usuario, onListo, onCancelar, onSalir }) {
+function CambiarPin({ forzado, usuario, negocio, sinRed, onListo, onCancelar, onSalir }) {
   const [actual, setActual] = useState("");
   const [nuevo, setNuevo] = useState("");
   const [conf, setConf] = useState("");
@@ -439,15 +558,20 @@ function CambiarPin({ forzado, usuario, onListo, onCancelar, onSalir }) {
   };
 
   const form = (
-    <form onSubmit={guardar} className="modal-body">
-      {forzado && <p style={{ margin: "0 0 8px" }}>Hola, <b>{usuario.nombre}</b>. Tu PIN es de demostración o muy fácil de adivinar: elige uno nuevo para continuar.</p>}
-      <label htmlFor={id + "a"}>PIN actual</label>
-      <input id={id + "a"} className="inp" type="password" inputMode="numeric" autoComplete="off" data-autofocus value={actual} onChange={soloDigitos(setActual)} />
-      <label htmlFor={id + "n"}>PIN nuevo (4 a 8 dígitos)</label>
-      <input id={id + "n"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={nuevo} onChange={soloDigitos(setNuevo)} />
-      <label htmlFor={id + "c"}>Confirma el PIN nuevo</label>
-      <input id={id + "c"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={conf} onChange={soloDigitos(setConf)} />
-      {err && <div className="login-err" role="alert" style={{ marginTop: 8 }}>{err}</div>}
+    <form onSubmit={guardar} className={forzado ? "" : "modal-body"}>
+      {forzado && (<>
+        <div className="quien">
+          <span className="avatar grande" style={{ background: colorAvatar(usuario.id) }} aria-hidden="true">{iniciales(usuario.nombre)}</span>
+          <div><h1 className="quien-nombre">Cambia tu PIN</h1><p className="login-sub">Hola, {usuario.nombre}. Tu PIN es de demostración o muy fácil de adivinar.</p></div>
+        </div>
+      </>)}
+      <div className="campo"><label htmlFor={id + "a"}>PIN actual</label>
+        <input id={id + "a"} className="inp" type="password" inputMode="numeric" autoComplete="off" data-autofocus autoFocus={forzado} value={actual} onChange={soloDigitos(setActual)} /></div>
+      <div className="campo"><label htmlFor={id + "n"}>PIN nuevo (4 a 8 dígitos)</label>
+        <input id={id + "n"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={nuevo} onChange={soloDigitos(setNuevo)} /></div>
+      <div className="campo"><label htmlFor={id + "c"}>Confirma el PIN nuevo</label>
+        <input id={id + "c"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={conf} onChange={soloDigitos(setConf)} /></div>
+      {err && <div className="login-err" role="alert">{err}</div>}
       <div className="modal-actions" style={{ padding: "12px 0 0", border: 0 }}>
         {forzado
           ? <button type="button" className="btn btn-ghost" onClick={() => onSalir(null)}>Salir</button>
@@ -458,15 +582,7 @@ function CambiarPin({ forzado, usuario, onListo, onCancelar, onSalir }) {
   );
 
   if (!forzado) return <Modal titulo="Cambiar mi PIN" icono={<KeyRound size={20} aria-hidden="true" />} onClose={onCancelar}>{form}</Modal>;
-  return (
-    <div className="login">
-      <style>{CSS}</style>
-      <div className="login-card" style={{ textAlign: "left" }}>
-        <h1 className="brand-title" style={{ fontSize: 24 }}>Cambia tu PIN</h1>
-        {form}
-      </div>
-    </div>
-  );
+  return <EntradaShell negocio={negocio} sinRed={sinRed}>{form}</EntradaShell>;
 }
 
 /* ============================== TOPBAR ============================== */
@@ -484,7 +600,7 @@ function TopBar({ data, user, view, go, conn, onLogout, onCambiarPin }) {
     : conn === "sinred" ? "Sin conexión con el servidor" : "Modo local (solo este navegador)";
   return (
     <header className="topbar">
-      <div className="topbar-brand"><span className="topbar-cactus" aria-hidden="true">🌵</span>
+      <div className="topbar-brand"><Logo className="topbar-logo" />
         <span className="topbar-name">{data.nombreNegocio}</span>
         <span className="conn-dot" role="img" aria-label={connTitle} title={connTitle} style={{ background: connCol }} /></div>
       <nav className="topbar-nav" aria-label="Secciones" style={{ "--n": items.length }}>
@@ -510,8 +626,18 @@ function TopBar({ data, user, view, go, conn, onLogout, onCambiarPin }) {
 }
 
 /* ============================== MESAS ============================== */
-function Mesas({ data, go, user, borradores }) {
+function Mesas({ data, go, user, borradores, abrirCobro }) {
   const puedeComanda = puede(user, "comanda");
+  const porCobrar = data.porCobrar || [];
+  const sumar = (ts) => redondear(ts.reduce((a, t) => a + (Number(t.total) || 0), 0));
+  // Grupos por cobrar: una fila por mesa y una por cada pedido para llevar / domicilio
+  const grupos = [];
+  porCobrar.forEach((t) => {
+    if (t.mesaId) {
+      const g = grupos.find((x) => x.mesaId === t.mesaId);
+      if (g) g.cuentas.push(t); else grupos.push({ mesaId: t.mesaId, titulo: `Mesa ${t.mesaId}`, cuentas: [t] });
+    } else grupos.push({ mesaId: null, titulo: t.origen, cuentas: [t] });
+  });
   const domsActivos = (data.cocina || []).filter((t) => t.tipo === "domicilio" && t.estado !== "listo").length;
   const capturando = (k) => tieneCambios(borradores[k]);
   return (
@@ -531,10 +657,11 @@ function Mesas({ data, go, user, borradores }) {
           const items = contarProductos(m.pedido);
           const etiqueta = { ocupada: "Ocupada", borrador: "Borrador", libre: "Libre" }[estado];
           const local = capturando(`mesa-${m.id}`);
+          const adeudo = sumar(porCobrarDeMesa(porCobrar, m.id));
           return (
             <button key={m.id} type="button" className={"mesa-card " + estado + (puedeComanda ? "" : " solo-ver")}
               aria-disabled={!puedeComanda}
-              aria-label={`Mesa ${m.id}, ${etiqueta}${estado === "borrador" ? " (guardado, no enviado a cocina)" : ""}${local ? ", con cambios sin guardar en este dispositivo" : ""}`}
+              aria-label={`Mesa ${m.id}, ${etiqueta}${estado === "borrador" ? " (guardado, no enviado a cocina)" : ""}${local ? ", con cambios sin guardar en este dispositivo" : ""}${adeudo > 0 ? `, por cobrar ${money(adeudo)}` : ""}`}
               onClick={() => puedeComanda && go("comanda", { tipo: "aqui", mesaId: m.id })}>
               {local && <span className="sin-guardar" aria-hidden="true">Sin guardar</span>}
               <div className="mesa-num" aria-hidden="true">{m.id}</div>
@@ -546,6 +673,7 @@ function Mesas({ data, go, user, borradores }) {
                   {estado === "borrador" && <span>No enviado a cocina</span>}
                 </div>
               )}
+              {adeudo > 0 && <span className="mesa-cobrar" aria-hidden="true">Por cobrar {money(adeudo)}</span>}
             </button>
           );
         })}
@@ -566,12 +694,33 @@ function Mesas({ data, go, user, borradores }) {
           </button>
         )}
       </div>
+
+      {puedeComanda && grupos.length > 0 && (
+        <section className="por-cobrar" aria-labelledby="h-por-cobrar">
+          <h3 className="sub-h" id="h-por-cobrar">Cuentas por cobrar · {money(sumar(porCobrar))}</h3>
+          <div className="por-cobrar-list">
+            {grupos.map((g) => (
+              <div key={g.mesaId ? `m${g.mesaId}` : g.cuentas[0].id} className="pc-row">
+                <div className="pc-info">
+                  <div className="pc-origen">{g.titulo}</div>
+                  <div className="muted small">
+                    {g.cuentas.length > 1 ? `${g.cuentas.length} cuentas · ` : ""}{g.cuentas.map((t) => `#${t.folio ?? "—"}`).join(", ")} · {g.cuentas[g.cuentas.length - 1].hora} · {g.cuentas[0].mesero}
+                  </div>
+                </div>
+                <div className="pc-total">{money(sumar(g.cuentas))}</div>
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => abrirCobro(g.cuentas, g.titulo, g.mesaId)}
+                  aria-label={`Cobrar ${g.titulo}, ${money(sumar(g.cuentas))}`}><Banknote size={16} aria-hidden="true" /> Cobrar</button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
 /* ============================== COMANDA ============================== */
-function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrador }) {
+function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrador, abrirCobro }) {
   const isPhone = useIsPhone();
   const menu = useMemo(() => buildMenu(data.carnes, data.bebidas, data.extras, data.precios, data.ocultos),
     [data.carnes, data.bebidas, data.extras, data.precios, data.ocultos]);
@@ -720,8 +869,11 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
     const r = await db.liberarMesa(mesaId);
     if (r.ok) { quitarBorrador(); toast(`Mesa ${mesaId} liberada`, "ok"); go("mesas"); }
   };
+  const deudaMesa = mesaId ? porCobrarDeMesa(data.porCobrar, mesaId) : [];
+  const totalDeuda = redondear(deudaMesa.reduce((a, t) => a + (Number(t.total) || 0), 0));
   const confirmLiberar = async () => {
-    const msg = mesaBorrador ? `¿Eliminar el borrador de la Mesa ${mesaId}? No se envió a cocina.` : `¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.`;
+    const msg = mesaBorrador ? `¿Eliminar el borrador de la Mesa ${mesaId}? No se envió a cocina.`
+      : `¿Marcar la Mesa ${mesaId} como libre? Se borrará su orden guardada.${totalDeuda > 0 ? ` Aún tiene ${money(totalDeuda)} por cobrar: seguirá en «Cuentas por cobrar».` : ""}`;
     if (await confirmDialog({ titulo: mesaBorrador ? "Eliminar borrador" : "Liberar mesa", mensaje: msg, confirmar: mesaBorrador ? "Eliminar" : "Liberar", peligro: true })) liberarMesa();
   };
 
@@ -986,6 +1138,11 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
           <div className="ticket-total"><span>Total</span><b>{money(tot)}</b></div>
         </div>
         <div className="resumen-actions">
+          {totalDeuda > 0 && (
+            <button type="button" className="btn btn-primary btn-block" onClick={() => abrirCobro(deudaMesa, `Mesa ${mesaId}`, mesaId)}>
+              <Banknote size={16} aria-hidden="true" /> Cobrar mesa · {money(totalDeuda)}
+            </button>
+          )}
           <button type="button" className="btn btn-barro btn-block" onClick={() => { cambiar((d) => ({ ...d, esExtra: true, pedido: nuevoPedido(), activa: 0, envio: null, envioId: null, sucio: false }), false); setPane("menu"); }}>
             <Plus size={16} aria-hidden="true" /> Agregar orden extra
           </button>
@@ -1233,12 +1390,158 @@ function notificar(titulo, cuerpo) {
   } catch {}
 }
 
-function TicketModal({ t, negocio, onClose, autoPrint }) {
+/* ============================== COBRO ============================== */
+const ICONO_PAGO = { efectivo: Banknote, tarjeta: CreditCard, transferencia: ArrowLeftRight };
+
+function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
+  const id = useId();
+  const cobroId = useRef(uid());            // el mismo id en reintentos: el servidor no duplica
+  const [sel, setSel] = useState(() => new Set(cuentas.map((t) => t.id)));
+  const [metodo, setMetodo] = useState("efectivo");
+  const [recibidoTxt, setRecibidoTxt] = useState("");
+  const [propinaTxt, setPropinaTxt] = useState("");
+  const [liberar, setLiberar] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [hecho, setHecho] = useState(null);
+  const [ticket, setTicket] = useState(null);
+
+  const elegidas = cuentas.filter((t) => sel.has(t.id));
+  const subtotal = redondear(elegidas.reduce((a, t) => a + (Number(t.total) || 0), 0));
+  const propina = leerImporte(propinaTxt) ?? 0;
+  const aPagar = redondear(subtotal + propina);
+  const recibido = metodo === "efectivo" ? (recibidoTxt.trim() === "" ? aPagar : leerImporte(recibidoTxt)) : aPagar;
+  const cambio = recibido == null ? null : redondear(recibido - aPagar);
+  const todasDeLaMesa = mesaId && elegidas.length === cuentas.length;
+  const puede = elegidas.length > 0 && !busy && (metodo !== "efectivo" || (cambio != null && cambio >= 0));
+
+  const alternar = (tid) => setSel((s) => { const n = new Set(s); n.has(tid) ? n.delete(tid) : n.add(tid); return n; });
+  const propinaPct = (pct) => setPropinaTxt(pct ? String(redondear(subtotal * pct / 100)) : "");
+
+  const cobrar = async () => {
+    if (!puede) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await db.cobrar(cobroId.current, elegidas.map((t) => t.id), metodo,
+        metodo === "efectivo" ? recibido : null, propina, mesaId && todasDeLaMesa && liberar);
+      setHecho({ ...r.cobro, mesaLiberada: r.mesaLiberada, cuentas: elegidas });
+    } catch (e) {
+      setErr(e.message || "No se pudo cobrar.");
+    } finally { setBusy(false); }
+  };
+
+  // Cuenta impresa con todas las órdenes cobradas juntas
+  const cuentaImpresa = () => {
+    const c = hecho.cuentas;
+    return {
+      id: hecho.id, folio: c.map((t) => t.folio).filter(Boolean).join(", "), tipo: c[0].tipo, origen: titulo,
+      paraLlevar: c.length === 1 && c[0].paraLlevar, ordenes: c.flatMap((t) => t.ordenes || []), extras: c.flatMap((t) => t.extras || []),
+      mesero: c[0].mesero, hora: hora(), fecha: fecha(), domicilio: c.length === 1 ? c[0].domicilio : null, cuenta: "junta",
+      cobro: { metodo: hecho.metodo, total: hecho.total, propina: hecho.propina, recibido: hecho.recibido, hora: hora() },
+    };
+  };
+
+  if (hecho) {
+    return (
+      <Modal titulo={`Cobrado · ${titulo}`} icono={<Check size={20} aria-hidden="true" />} onClose={onClose} className="modal-cobro">
+        <div className="cobro-hecho" role="status">
+          <div className="muted">{METODO_LABEL[hecho.metodo]}{hecho.propina > 0 ? ` · incluye propina de ${money(hecho.propina)}` : ""}</div>
+          <div className="cobro-monto">{money(hecho.total + hecho.propina)}</div>
+          {hecho.metodo === "efectivo" && (
+            <div className="cambio"><span>Cambio</span><span>{money(hecho.cambio)}</span></div>
+          )}
+          {hecho.mesaLiberada && <p className="muted" style={{ marginTop: 12 }}>La Mesa {mesaId} quedó libre.</p>}
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-line" onClick={() => setTicket(cuentaImpresa())}><Receipt size={16} aria-hidden="true" /> Imprimir cuenta</button>
+          <button type="button" className="btn btn-primary" data-autofocus onClick={onClose}>Listo</button>
+        </div>
+        {ticket && <TicketModal t={ticket} negocio={negocio} formatoInicial="cuenta" onClose={() => setTicket(null)} />}
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal titulo={`Cobrar · ${titulo}`} icono={<Banknote size={20} aria-hidden="true" />} onClose={onClose} className="modal-cobro">
+      <div className="modal-body">
+        {cuentas.length > 1 && <div className="etq-sec" id={id + "c"}>Cuentas</div>}
+        <div className="cobro-cuentas" role={cuentas.length > 1 ? "group" : undefined} aria-labelledby={cuentas.length > 1 ? id + "c" : undefined}>
+          {cuentas.map((t) => (
+            <label key={t.id} className="cobro-cuenta">
+              {cuentas.length > 1 && <input type="checkbox" checked={sel.has(t.id)} onChange={() => alternar(t.id)} />}
+              <span>#{t.folio ?? "—"} · {t.esExtra ? "Orden extra" : t.origen} · {t.hora}</span>
+              <b className="cobro-monto" style={{ fontSize: 18 }}>{money(t.total)}</b>
+            </label>
+          ))}
+        </div>
+
+        <div className="etq-sec" id={id + "m"}>Método de pago</div>
+        <div className="segmento" role="group" aria-labelledby={id + "m"}>
+          {METODOS_PAGO.map((m) => {
+            const I = ICONO_PAGO[m.k];
+            return (
+              <button key={m.k} type="button" aria-pressed={metodo === m.k} onClick={() => setMetodo(m.k)}>
+                <I size={20} aria-hidden="true" />{m.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="etq-sec" id={id + "p"}>Propina</div>
+        <div className="chips" role="group" aria-labelledby={id + "p"}>
+          {[0, 10, 15].map((pct) => {
+            const v = pct ? redondear(subtotal * pct / 100) : 0;
+            return <button key={pct} type="button" aria-pressed={propina === v} onClick={() => propinaPct(pct)}>{pct ? `${pct}% · ${money(v)}` : "Sin propina"}</button>;
+          })}
+        </div>
+        <label className="sr-only" htmlFor={id + "pi"}>Otra propina</label>
+        <input id={id + "pi"} className="inp" style={{ marginTop: 6 }} inputMode="decimal" placeholder="Otra propina ($)" value={propinaTxt}
+          onChange={(e) => setPropinaTxt(e.target.value)} />
+
+        {metodo === "efectivo" && (<>
+          <div className="etq-sec"><label htmlFor={id + "r"}>Efectivo recibido</label></div>
+          <input id={id + "r"} className="inp" inputMode="decimal" placeholder={`Exacto: ${money(aPagar)}`} value={recibidoTxt}
+            onChange={(e) => setRecibidoTxt(e.target.value)} />
+          <div className="chips" role="group" aria-label="Montos rápidos">
+            {sugerenciasEfectivo(aPagar).map((v) => (
+              <button key={v} type="button" aria-pressed={recibido === v} onClick={() => setRecibidoTxt(String(v))}>{v === aPagar ? "Exacto" : money(v)}</button>
+            ))}
+          </div>
+          <div className={"cambio" + (cambio != null && cambio < 0 ? " falta" : "")} aria-live="polite">
+            <span>{cambio != null && cambio < 0 ? "Falta" : "Cambio"}</span><span>{cambio == null ? "—" : money(Math.abs(cambio))}</span>
+          </div>
+        </>)}
+
+        {mesaId && todasDeLaMesa && (
+          <label className="check-linea"><input type="checkbox" checked={liberar} onChange={(e) => setLiberar(e.target.checked)} /> Liberar la Mesa {mesaId} al cobrar</label>
+        )}
+
+        <div className="cobro-total"><span className="muted">Total a cobrar</span><span className="cobro-monto">{money(aPagar)}</span></div>
+        {err && <div className="login-err" role="alert">{err}</div>}
+      </div>
+      <div className="modal-actions">
+        <button type="button" className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+        <button type="button" className="btn btn-primary" disabled={!puede} onClick={cobrar} aria-busy={busy}>
+          {busy ? <Loader2 size={16} className="girando" aria-hidden="true" /> : <Check size={16} aria-hidden="true" />} Cobrar {money(aPagar)}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================== TICKET ============================== */
+const PAPEL_KEY = "tequeria_papel";
+const leerPapel = () => { try { return localStorage.getItem(PAPEL_KEY) === "80" ? 80 : 58; } catch { return 58; } };
+
+function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta" }) {
   const ex = t.extras || [];
   const ordenes = t.ordenes || [];
-  const [modo, setModo] = useState(t.cuenta || "junta");   // "junta" | "separada"
+  const [formato, setFormato] = useState(formatoInicial);   // "cuenta" (cliente) | "cocina"
+  const [modo, setModo] = useState(t.cuenta || "junta");     // "junta" | "separada"
+  const [papel, setPapel] = useState(leerPapel);
   const [auto, setAuto] = useState(getAutoprint());
   const doPrint = () => { setTimeout(() => window.print(), 80); };
+  const cambiarPapel = (mm) => { setPapel(mm); try { localStorage.setItem(PAPEL_KEY, String(mm)); } catch {} };
 
   useEffect(() => {
     if (autoPrint) {
@@ -1248,8 +1551,9 @@ function TicketModal({ t, negocio, onClose, autoPrint }) {
   }, []);
 
   const total = ordenes.reduce((s, o) => s + o.items.reduce((a, i) => a + itemPrecio(i), 0), 0) + ex.reduce((a, e) => a + itemPrecio(e), 0);
+  const tv = ticketView(t);
 
-  // En modo JUNTA agrupamos las bebidas de todas las órdenes hasta abajo
+  // En cuenta JUNTA las bebidas de todas las órdenes van agrupadas al final
   const bebidasJuntas = [];
   if (modo === "junta") {
     const map = {};
@@ -1258,78 +1562,119 @@ function TicketModal({ t, negocio, onClose, autoPrint }) {
     }));
   }
 
-  const Item = ({ it }) => (
+  const Item = ({ it, precios = true }) => (<>
     <div className="tp-item">
       <span className="tp-q">{it.cantidad}</span>
-      <span className="tp-n">{nombreTicket(it)}</span>
-      <span className="tp-p">{itemPrecio(it) > 0 ? money(itemPrecio(it)) : ""}</span>
+      <span className="tp-n">{formato === "cocina" ? it.nombre : nombreTicket(it)}</span>
+      {precios && <span className="tp-p">{itemPrecio(it) > 0 ? money(itemPrecio(it)) : ""}</span>}
+    </div>
+    {precios && it.cantidad > 1 && it.precio > 0 && <div className="tp-unit">@ {money(it.precio)}</div>}
+  </>);
+
+  const domicilio = t.domicilio && !t.domicilio.anonimizado ? (
+    <div className="tp-dom">
+      {t.domicilio.nombre && <div>Cliente: {t.domicilio.nombre}</div>}
+      <div>Dir: {t.domicilio.direccion}</div>
+      {t.domicilio.referencia && <div>Ref: {t.domicilio.referencia}</div>}
+      <div>Tel: {t.domicilio.telefono}</div>
+      <div>Pago: {t.domicilio.pago}{t.domicilio.tiempo ? ` · ${t.domicilio.tiempo} min` : ""}</div>
+    </div>
+  ) : null;
+
+  const cocina = (
+    <div id="print-area" className={`ticket-print t${papel} tp-cocina`}>
+      <div className="tp-head">
+        <div className="tp-tipo">{t.reenvio ? "Reimpresión" : tv.label}</div>
+        <div className="tp-origen">{t.origen}</div>
+      </div>
+      <div className="tp-folio"><span>{t.folio ? `#${t.folio}` : ""}</span><span>{t.hora}</span></div>
+      <div className="tp-meta"><span>Mesero: {t.mesero}</span><span>{t.fecha}</span></div>
+      {domicilio}
+      {ordenes.map((o) => (
+        <div key={o.id} className="tp-orden">
+          <div className="tp-oname">{o.nombre}</div>
+          {o.prep && <div className="tp-prep">» {PREP_LABEL[o.prep] || o.prep}</div>}
+          {o.items.map((it) => <Item key={it.key} it={it} precios={false} />)}
+        </div>
+      ))}
+      {ex.length > 0 && (<div className="tp-orden"><div className="tp-oname">PARA TODO EL PEDIDO</div>{ex.map((it) => <Item key={it.key} it={it} precios={false} />)}</div>)}
+      <div className="tp-tacos">TACOS: {contarTacos(t)}</div>
+    </div>
+  );
+
+  const cuenta = (
+    <div id="print-area" className={`ticket-print t${papel}`}>
+      <div className="tp-name">{negocio}</div>
+      <div className="tp-sub">{t.origen}{t.paraLlevar ? " · para llevar" : ""}{t.reenvio ? " · REIMPRESIÓN" : ""}</div>
+      <div className="tp-folio"><span>{t.folio ? `Folio #${t.folio}` : ""}</span><span className="tp-modo-tag">{modo === "separada" ? "CUENTA SEPARADA" : "CUENTA"}</span></div>
+      <div className="tp-meta"><span>{t.fecha} {t.hora}</span><span>Mesero: {t.mesero}</span></div>
+      {domicilio}
+      <div className="tp-line" />
+      {modo === "separada" ? (
+        ordenes.map((o) => {
+          const sub = o.items.reduce((a, i) => a + itemPrecio(i), 0);
+          return (
+            <div key={o.id} className="tp-orden">
+              <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
+              <div className="tp-items">{o.items.map((it) => <Item key={it.key} it={it} />)}</div>
+              <div className="tp-suborden"><span>Subtotal {o.nombre}</span><span>{money(sub)}</span></div>
+            </div>
+          );
+        })
+      ) : (<>
+        {ordenes.map((o) => {
+          const comida = o.items.filter((it) => !esBebida(it));
+          if (comida.length === 0) return null;
+          return (
+            <div key={o.id} className="tp-orden">
+              <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
+              <div className="tp-items">{comida.map((it) => <Item key={it.key} it={it} />)}</div>
+            </div>
+          );
+        })}
+        {bebidasJuntas.length > 0 && (
+          <div className="tp-orden tp-bebidas">
+            <div className="tp-oname">BEBIDAS</div>
+            <div className="tp-items">{bebidasJuntas.map((it) => <Item key={it.key} it={it} />)}</div>
+          </div>
+        )}
+      </>)}
+      {ex.length > 0 && (<>
+        <div className="tp-line" />
+        <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
+        <div className="tp-items">{ex.map((it) => <Item key={it.key} it={it} />)}</div>
+      </>)}
+      <div className="tp-line" />
+      <div className="tp-total"><span>TOTAL</span><span>{t.reenvio ? "—" : money(total)}</span></div>
+      {t.cobro && !t.cobro.previo && (
+        <div className="tp-pago">
+          {t.cobro.propina > 0 && <div><span>Propina</span><span>{money(t.cobro.propina)}</span></div>}
+          <div><span>Pagado ({METODO_LABEL[t.cobro.metodo] || t.cobro.metodo})</span><span>{money(t.cobro.total + (t.cobro.propina || 0))}</span></div>
+          {t.cobro.metodo === "efectivo" && t.cobro.recibido != null && (<>
+            <div><span>Recibido</span><span>{money(t.cobro.recibido)}</span></div>
+            <div><span>Cambio</span><span>{money(t.cobro.recibido - t.cobro.total - (t.cobro.propina || 0))}</span></div>
+          </>)}
+        </div>
+      )}
+      <div className="tp-foot">¡Gracias por su visita!</div>
     </div>
   );
 
   return (
     <Modal titulo={`Ticket · ${t.origen}`} icono={<Printer size={20} aria-hidden="true" />} onClose={onClose} className="modal-ticket">
-      <div id="print-area" className="ticket-print t58">
-        <div className="tp-name">{negocio}</div>
-        <div className="tp-sub">{t.origen}{t.paraLlevar ? " · para llevar" : ""}{t.reenvio ? " · REIMPRESIÓN" : ""}</div>
-        <div className="tp-meta"><span>Mesero: {t.mesero}</span><span>{t.hora}</span></div>
-        <div className="tp-meta"><span>{t.fecha}</span><span className="tp-modo-tag">{modo === "separada" ? "CUENTA SEPARADA" : "CUENTA"}</span></div>
-        {t.domicilio && !t.domicilio.anonimizado && (
-          <div className="tp-dom">
-            {t.domicilio.nombre && <div>Cliente: {t.domicilio.nombre}</div>}
-            <div>Dir: {t.domicilio.direccion}</div>
-            {t.domicilio.referencia && <div>Ref: {t.domicilio.referencia}</div>}
-            <div>Tel: {t.domicilio.telefono}</div>
-            <div>Pago: {t.domicilio.pago}{t.domicilio.tiempo ? ` · ${t.domicilio.tiempo} min` : ""}</div>
-          </div>
-        )}
-        <div className="tp-line" />
-
-        {modo === "separada" ? (
-          ordenes.map((o) => {
-            const sub = o.items.reduce((a, i) => a + itemPrecio(i), 0);
-            return (
-              <div key={o.id} className="tp-orden">
-                <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
-                <div className="tp-items">{o.items.map((it) => <Item key={it.key} it={it} />)}</div>
-                <div className="tp-suborden"><span>Subtotal {o.nombre}</span><span>{money(sub)}</span></div>
-              </div>
-            );
-          })
-        ) : (
-          <>
-            {ordenes.map((o) => {
-              const comida = o.items.filter((it) => !esBebida(it));
-              if (comida.length === 0) return null;
-              return (
-                <div key={o.id} className="tp-orden">
-                  <div className="tp-oname">{o.nombre}{o.prep ? " · " + (PREP_LABEL[o.prep] || o.prep) : ""}</div>
-                  <div className="tp-items">{comida.map((it) => <Item key={it.key} it={it} />)}</div>
-                </div>
-              );
-            })}
-            {bebidasJuntas.length > 0 && (
-              <div className="tp-orden tp-bebidas">
-                <div className="tp-oname">BEBIDAS</div>
-                <div className="tp-items">{bebidasJuntas.map((it) => <Item key={it.key} it={it} />)}</div>
-              </div>
-            )}
-          </>
-        )}
-
-        {ex.length > 0 && (
-          <>
-            <div className="tp-line" />
-            <div className="tp-extras-h">* PARA TODO EL PEDIDO</div>
-            <div className="tp-items">{ex.map((it) => <Item key={it.key} it={it} />)}</div>
-          </>
-        )}
-
-        <div className="tp-line" />
-        <div className="tp-total"><span>TOTAL</span><span>{t.reenvio ? "—" : money(total)}</span></div>
-        <div className="tp-foot">¡Gracias por su compra!</div>
+      <style>{`@media print{@page{size:${papel}mm auto;} html,body{width:${papel}mm;} #print-area{width:${papel}mm!important;}}`}</style>
+      {formato === "cocina" ? cocina : cuenta}
+      <div className="ticket-opciones no-print">
+        <div className="ticket-modos" role="group" aria-label="Formato">
+          <button type="button" className="seg-b" aria-pressed={formato === "cuenta"} onClick={() => setFormato("cuenta")}>Cuenta</button>
+          <button type="button" className="seg-b" aria-pressed={formato === "cocina"} onClick={() => setFormato("cocina")}>Cocina</button>
+        </div>
+        <div className="ticket-modos" role="group" aria-label="Ancho del papel">
+          <button type="button" className="seg-b" aria-pressed={papel === 58} onClick={() => cambiarPapel(58)}>58 mm</button>
+          <button type="button" className="seg-b" aria-pressed={papel === 80} onClick={() => cambiarPapel(80)}>80 mm</button>
+        </div>
       </div>
-
-      {ordenes.length > 1 && (
+      {formato === "cuenta" && ordenes.length > 1 && (
         <div className="ticket-modos no-print" role="group" aria-label="Formato de la cuenta">
           <button type="button" className="seg-b" aria-pressed={modo === "junta"} onClick={() => setModo("junta")}>Junta</button>
           <button type="button" className="seg-b" aria-pressed={modo === "separada"} onClick={() => setModo("separada")}>Separada</button>
@@ -1337,7 +1682,7 @@ function TicketModal({ t, negocio, onClose, autoPrint }) {
       )}
       <label className="auto-print no-print">
         <input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); setAutoprintLS(e.target.checked); }} />
-        Auto-imprimir nuevos pedidos (cocina)
+        Auto-imprimir nuevos pedidos en cocina
       </label>
       <div className="modal-actions no-print">
         <button type="button" className="btn btn-ghost" onClick={onClose}>Cerrar</button>
@@ -1390,10 +1735,36 @@ function CocinaAlertas({ data, onAbrir }) {
 }
 
 /* ============================== COCINA ============================== */
+// Minutos desde que llegó la comanda (se actualiza cada 30 s)
+function useMinuto() {
+  const [ahora, setAhora] = useState(() => Date.now());
+  useEffect(() => { const iv = setInterval(() => setAhora(Date.now()), 30000); return () => clearInterval(iv); }, []);
+  return ahora;
+}
+function EstadoPago({ t }) {
+  if (t.reenvio) return null;
+  if (!t.cobro) return <span className="pago-chip pendiente">Por cobrar</span>;
+  if (t.cobro.previo) return <span className="pago-chip previo" title="Venta anterior al registro de cobros">Sin registro</span>;
+  return <span className="pago-chip pagado"><Check size={12} aria-hidden="true" /> {METODO_LABEL[t.cobro.metodo] || "Pagado"}</span>;
+}
+
 function Cocina({ data, db, user, errorCarga }) {
   const edita = puedeEditar(user, "cocina");
   const [tab, setTab] = useState("pendientes");
   const [ticket, setTicket] = useState(null);
+  const [formato, setFormato] = useState("cocina");
+  const ahora = useMinuto();
+  const verTicket = (t, f) => { setFormato(f); setTicket(t); };
+  const espera = (t) => {
+    const min = t.creado ? Math.max(0, Math.floor((ahora - new Date(t.creado).getTime()) / 60000)) : null;
+    if (min == null) return null;
+    return <span className={"kt-espera" + (min >= 20 ? " alta" : min >= 10 ? " media" : "")} aria-label={`Espera de ${min} minutos`}>{min} min</span>;
+  };
+  const anular = async (t) => {
+    const motivo = window.prompt(`Motivo para anular el cobro de ${t.origen}:`);
+    if (!motivo || !motivo.trim()) return;
+    db.anularCobro(t.cobro.id, motivo.trim());
+  };
 
   const pend = (data.cocina || []).filter((t) => t.estado !== "listo");
   const listos = (data.cocina || []).filter((t) => t.estado === "listo");
@@ -1406,14 +1777,16 @@ function Cocina({ data, db, user, errorCarga }) {
     catch { try { navigator.clipboard.writeText(txt); toast("Resumen copiado", "ok"); } catch {} }
   };
 
+  const cob = res.cobrado || { total: 0, efectivo: 0, tarjeta: 0, transferencia: 0, propinas: 0, count: 0 };
   const hacerCorte = async () => {
     if (errorCarga) { toast("No se puede hacer el corte con datos desactualizados. Reintenta la carga primero.", "error"); return; }
-    if (!res.count) { toast("No hay ventas en este periodo.", "info"); return; }
-    if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${res.count} · Total: ${money(res.total)}. El servidor calculará el total definitivo. Las comandas pendientes seguirán en cocina.`, confirmar: "Hacer corte" }))) return;
+    if (!res.count && !cob.count) { toast("No hay ventas ni cobros en este periodo.", "info"); return; }
+    const pendiente = res.porCobrar > 0 ? ` Quedan ${money(res.porCobrar)} por cobrar (${res.porCobrarCount} cuenta(s)): seguirán pendientes después del corte.` : "";
+    if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${res.count} · ${money(res.total)}. Cobrado: ${money(cob.total)}.${pendiente} Las comandas pendientes seguirán en cocina.`, confirmar: "Hacer corte" }))) return;
     const pin = await pedirPin({ titulo: "Corte del día", mensaje: "Escribe el PIN de un administrador para autorizar el corte.", etiqueta: "PIN de administrador" });
     if (pin === null) return;
     const r = await db.corte(pin);
-    if (r.ok) toast(`Corte guardado: ${r.r.corte.tickets} venta(s) · ${money(r.r.corte.total)}`, "ok");
+    if (r.ok) toast(`Corte guardado: ${r.r.corte.tickets} venta(s) · ${money(r.r.corte.total)} · cobrado ${money(r.r.corte.cobrado?.total || 0)}`, "ok");
   };
 
   return (
@@ -1437,8 +1810,8 @@ function Cocina({ data, db, user, errorCarga }) {
               return (
                 <article key={t.id} className={"kticket " + t.estado} aria-label={`${tv.label}: ${t.origen}, ${t.hora}`}>
                   <div className="kt-tipo" style={{ background: tv.color }}>{tv.label}</div>
-                  <div className="kt-head"><span className="kt-origen">{t.origen}</span><span className="kt-hora">{t.hora}</span></div>
-                  <div className="kt-mesero">{t.mesero}</div>
+                  <div className="kt-head"><span className="kt-origen">{t.origen}</span>{espera(t)}</div>
+                  <div className="kt-mesero">{t.folio ? <span className="kt-folio">#{t.folio} · </span> : null}{t.hora} · {t.mesero}</div>
                   {t.estado === "preparando" && <div className="kt-estado">En preparación</div>}
                   {t.domicilio && !t.domicilio.anonimizado && (
                     <div className="kt-dom">📍 {t.domicilio.direccion}{t.domicilio.referencia ? ` · ${t.domicilio.referencia}` : ""}<br />📞 {t.domicilio.telefono} · {t.domicilio.pago}</div>
@@ -1459,7 +1832,7 @@ function Cocina({ data, db, user, errorCarga }) {
                   <div className="kt-tacos"><span aria-hidden="true">🌮 </span>Tacos en total: <b>{contarTacos(t)}</b></div>
                   {edita && (
                     <div className="kt-actions">
-                      <button type="button" className="btn btn-line btn-sm" onClick={() => setTicket(t)}><Printer size={14} aria-hidden="true" /> Imprimir</button>
+                      <button type="button" className="btn btn-line btn-sm" onClick={() => verTicket(t, "cocina")}><Printer size={14} aria-hidden="true" /> Imprimir</button>
                       {t.estado === "pendiente" && <button type="button" className="btn btn-line btn-sm" onClick={() => db.setTicketEstado(t.id, "preparando")}>Preparando</button>}
                       <button type="button" className="btn btn-primary btn-sm" onClick={() => db.setTicketEstado(t.id, "listo")}><Check size={14} aria-hidden="true" /> Listo</button>
                     </div>
@@ -1486,13 +1859,19 @@ function Cocina({ data, db, user, errorCarga }) {
         <>
           <div className="corte-bar">
             <div><div className="corte-total">{money(res.total)}</div>
-              <div className="muted small">{res.count} venta(s) en el periodo{res.gastos > 0 ? ` · gastos ${money(res.gastos)} · neto ${money(res.total - res.gastos)}` : ""}</div></div>
+              <div className="muted small">{res.count} venta(s) en el periodo{res.gastos > 0 ? ` · gastos ${money(res.gastos)} · neto ${money(res.total - res.gastos)}` : ""}</div>
+              <div className="cobrado-grid">
+                <span>Cobrado <b>{money(cob.total)}</b></span>
+                {METODOS_PAGO.map((m) => <span key={m.k}>{m.label} <b>{money(cob[m.k] || 0)}</b></span>)}
+                {cob.propinas > 0 && <span>Propinas <b>{money(cob.propinas)}</b></span>}
+                {res.porCobrar > 0 && <span className="pago-chip pendiente">Por cobrar {money(res.porCobrar)}</span>}
+              </div></div>
             <div className="corte-btns">
               <button type="button" className="btn btn-line" onClick={compartirWhatsApp} disabled={res.count === 0}>Compartir</button>
               <button type="button" className="btn btn-primary" onClick={hacerCorte} disabled={!!errorCarga}>Hacer corte</button>
             </div>
           </div>
-          <p className="muted small" style={{ marginTop: -6 }}>Ventas = comandas enviadas a cocina (los reenvíos no cuentan). El corte no confirma cobros.</p>
+          <p className="muted small" style={{ marginTop: -6 }}>Ventas = comandas enviadas a cocina (los reenvíos no cuentan). Cobrado = pagos registrados, por método e incluye propinas.</p>
 
           {res.count > 0 && (
             <div className="corte-desglose">
@@ -1520,11 +1899,15 @@ function Cocina({ data, db, user, errorCarga }) {
                 <div key={t.id} className="hist-row">
                   <span className="hist-dot" aria-hidden="true" style={{ background: tv.color }} />
                   <div className="hist-info">
-                    <div className="hist-origen">{t.origen}{t.esExtra ? " · orden extra" : ""}</div>
+                    <div className="hist-origen">{t.folio ? `#${t.folio} · ` : ""}{t.origen}{t.esExtra ? " · orden extra" : ""}</div>
                     <div className="muted small">{t.hora} · {t.mesero} · {contarProductos(t)} prod.</div>
                   </div>
+                  <EstadoPago t={t} />
                   <div className="hist-total">{money(t.total != null ? t.total : ticketTotal(t))}</div>
-                  <button type="button" className="btn btn-line btn-sm" onClick={() => setTicket(t)} aria-label={`Ver ticket de ${t.origen}, ${t.hora}`}><Printer size={14} aria-hidden="true" /> Ver</button>
+                  <button type="button" className="btn btn-line btn-sm" onClick={() => verTicket(t, "cuenta")} aria-label={`Ver ticket de ${t.origen}, ${t.hora}`}><Printer size={14} aria-hidden="true" /> Ver</button>
+                  {user.rol === "admin" && t.cobro && !t.cobro.previo && !t.cobro.enCorte && (
+                    <button type="button" className="btn btn-danger-ghost btn-sm" onClick={() => anular(t)} aria-label={`Anular cobro de ${t.origen}`}>Anular cobro</button>
+                  )}
                 </div>
               );
             })}
@@ -1535,7 +1918,7 @@ function Cocina({ data, db, user, errorCarga }) {
                 {data.cortes.map((c) => (
                   <div key={c.id} className="hist-row">
                     <div className="hist-info"><div className="hist-origen">Corte {c.fecha}</div>
-                      <div className="muted small">{c.hora} · {c.tickets} ventas{c.gastos > 0 ? ` · gastos ${money(c.gastos)}` : ""}{c.detalle?.top?.[0] ? ` · top: ${c.detalle.top[0].nombre}` : ""}</div></div>
+                      <div className="muted small">{c.hora} · {c.tickets} ventas{c.cobrado > 0 ? ` · cobrado ${money(c.cobrado)}` : ""}{c.porCobrar > 0 ? ` · por cobrar ${money(c.porCobrar)}` : ""}{c.gastos > 0 ? ` · gastos ${money(c.gastos)}` : ""}{c.detalle?.top?.[0] ? ` · top: ${c.detalle.top[0].nombre}` : ""}</div></div>
                     <div className="hist-total">{money(c.total)}</div>
                   </div>
                 ))}
@@ -1544,7 +1927,7 @@ function Cocina({ data, db, user, errorCarga }) {
         </>
       )}
 
-      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} onClose={() => setTicket(null)} />}
+      {ticket && <TicketModal t={ticket} negocio={data.nombreNegocio} formatoInicial={formato} onClose={() => setTicket(null)} />}
     </div>
   );
 }

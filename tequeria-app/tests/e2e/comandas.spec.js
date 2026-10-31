@@ -48,7 +48,7 @@ test("UX-03: un envío rechazado no muestra éxito, conserva la comanda y permit
   await existencia.fill("1");
   await existencia.press("Enter");
   await page.getByRole("button", { name: /^Mesas/ }).click();
-  await page.getByRole("button", { name: "Para llevar" }).click();
+  await page.getByRole("button", { name: "Para llevar", exact: true }).click();
   await producto(page, "Coca-Cola").click();
   await producto(page, "Coca-Cola").click();
   await page.getByRole("button", { name: "Enviar a cocina" }).click();
@@ -126,7 +126,7 @@ test("UX-06/07/09/11: contraste, objetivos táctiles, navegación en 320 px y zo
 test("cocina: lo listo se puede regresar a preparación y el corte no borra pendientes", async ({ page }) => {
   await entrarComoAdmin(page);
   for (const tipo of ["Para llevar", "Para llevar"]) {
-    await page.getByRole("button", { name: tipo }).click();
+    await page.getByRole("button", { name: tipo, exact: true }).click();
     await producto(page, "Taco Pastor").click();
     await page.getByRole("button", { name: "Enviar a cocina" }).click();
     await expect(page.getByRole("heading", { name: "Mesas" })).toBeVisible();
@@ -143,4 +143,47 @@ test("cocina: lo listo se puede regresar a preparación y el corte no borra pend
   await expect(page.getByText("Corte guardado: 2 venta(s) · $40")).toBeVisible();
   await page.getByRole("tab", { name: /Pendientes/ }).click();
   await expect(page.locator(".kticket")).toHaveCount(1);
+});
+
+test("cobros: cambio en efectivo, mesa liberada y el corte separa lo cobrado de lo pendiente", async ({ page }) => {
+  await entrarComoAdmin(page);
+  await mesa(page, 4).click();
+  await producto(page, "Taco Pastor").click();
+  await producto(page, "Taco Pastor").click();
+  await page.getByRole("button", { name: "Enviar a cocina" }).click();
+  await expect(page.getByRole("heading", { name: "Mesas" })).toBeVisible();
+  await page.getByRole("button", { name: "Para llevar", exact: true }).click();
+  await producto(page, "Taco Pastor").click();
+  await page.getByRole("button", { name: "Enviar a cocina" }).click();
+  await expect(page.getByRole("heading", { name: "Cuentas por cobrar · $60" })).toBeVisible();
+  await expect(mesa(page, 4)).toHaveAccessibleName(/por cobrar \$40/);
+
+  await page.getByRole("button", { name: /^Cobrar Mesa 4, \$40/ }).click();
+  const dlg = page.getByRole("dialog", { name: "Cobrar · Mesa 4" });
+  await dlg.getByLabel("Efectivo recibido").fill("30");
+  await expect(dlg.getByText("Falta")).toBeVisible();
+  await expect(dlg.getByRole("button", { name: /^Cobrar \$40/ })).toBeDisabled();
+  await dlg.getByLabel("Efectivo recibido").fill("100");
+  await dlg.getByRole("button", { name: /^Cobrar \$40/ }).click();
+  const hecho = page.getByRole("dialog", { name: "Cobrado · Mesa 4" });
+  await expect(hecho.locator(".cambio")).toContainText("$60");
+  await expect(hecho).toContainText("La Mesa 4 quedó libre.");
+  await hecho.getByRole("button", { name: "Listo" }).click();
+  await expect(mesa(page, 4)).toHaveAccessibleName(/Libre/);
+  await expect(page.getByRole("heading", { name: "Cuentas por cobrar · $20" })).toBeVisible();
+
+  await page.getByRole("button", { name: /^Cocina/ }).click();
+  await page.getByRole("tab", { name: "Ventas / Corte" }).click();
+  await expect(page.locator(".corte-total")).toHaveText("$60");
+  await expect(page.locator(".corte-bar")).toContainText("Efectivo $40");
+  await expect(page.locator(".corte-bar")).toContainText("Por cobrar $20");
+  await page.getByRole("button", { name: "Hacer corte" }).click();
+  const corte = page.getByRole("dialog", { name: "Corte del día" });
+  await expect(corte).toContainText("Quedan $20 por cobrar");
+  await corte.getByRole("button", { name: "Hacer corte" }).click();
+  await page.getByLabel("PIN de administrador").fill("8642");
+  await page.getByRole("button", { name: "Autorizar" }).click();
+  await expect(page.getByText("Corte guardado: 2 venta(s) · $60 · cobrado $40")).toBeVisible();
+  await page.getByRole("button", { name: /^Mesas/ }).click();
+  await expect(page.getByRole("heading", { name: "Cuentas por cobrar · $20" })).toBeVisible();
 });

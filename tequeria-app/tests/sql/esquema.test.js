@@ -154,6 +154,10 @@ d("actualización desde v2", () => {
     const est = await api.rpc("estado", { p_token: r.token });
     expect(est.precios["taco-pastor"]).toBe(21.5);
     expect(est.historial.map((t) => t.id).sort()).toEqual(["t-viejo-1", "t-viejo-2"]);
+    // lo vendido antes de registrar cobros no aparece como deuda
+    expect(est.historial.every((t) => t.cobro?.previo)).toBe(true);
+    expect(est.porCobrar).toEqual([]);
+    expect(est.historial.every((t) => Number.isInteger(t.folio))).toBe(true);
     // lo que v2 ya había cortado no reaparece en cocina; lo abierto sí sigue ahí
     expect(est.cocina.map((t) => t.id).sort()).toEqual(["t-viejo-1", "t-viejo-2"]);
     expect((await falla(api.query("select * from public.app_state"))).message).toMatch(/permission denied/);
@@ -302,6 +306,41 @@ d("operación", () => {
     expect(e.message).toBe("DOMICILIO");
   });
 
+  it("cobra cuentas con cambio, evita el doble cobro, libera la mesa y permite anular", async () => {
+    const t1 = ticket("cobro-mesa6-1", { tipo: "aqui", mesaId: 6, ordenes: [{ id: "o1", items: [item("taco-pastor", 3)] }] });
+    const t2 = ticket("cobro-mesa6-2", { tipo: "aqui", mesaId: 6, esExtra: true, ordenes: [{ id: "o1", items: [item("taco-bistec", 1)] }] });
+    await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: t1 });
+    await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: t2 });
+    const pc = await api.rpc("estado", { p_token: mesero, p_partes: ["porCobrar"] });
+    const ids = pc.porCobrar.filter((t) => t.mesaId === 6).map((t) => t.id).sort();
+    expect(ids).toEqual(["cobro-mesa6-1", "cobro-mesa6-2"]);
+    const cobro = { p_token: mesero, p_id: "cobro-mesa6-a", p_tickets: ids, p_metodo: "efectivo" };
+    expect((await falla(api.rpc("cobrar", { ...cobro, p_recibido: 50 }))).message).toBe("PAGO");
+    expect((await falla(api.rpc("cobrar", { ...cobro, p_token: cocina }))).message).toBe("PERMISO");
+    const r = await api.rpc("cobrar", { ...cobro, p_recibido: 100, p_propina: 10, p_liberar_mesa: true });
+    expect(r.cobro).toMatchObject({ total: 80, propina: 10, recibido: 100, cambio: 10, origen: "Mesa 6" });
+    expect(r.mesaLiberada).toBe(true);
+    expect((await api.rpc("cobrar", { ...cobro, p_recibido: 100, p_propina: 10 })).duplicado).toBe(true);
+    const doble = await falla(api.rpc("cobrar", { ...cobro, p_id: "cobro-mesa6-b", p_tickets: [ids[0]], p_metodo: "tarjeta" }));
+    expect(doble.message).toBe("YA_COBRADO");
+
+    let est = await api.rpc("estado", { p_token: admin, p_partes: ["historial", "porCobrar", "mesas"] });
+    expect(est.mesas.find((m) => m.id === 6).estado).toBe("libre");
+    expect(est.porCobrar.some((t) => t.mesaId === 6)).toBe(false);
+    expect(est.historial.find((t) => t.id === "cobro-mesa6-1").cobro).toMatchObject({ metodo: "efectivo", total: 80 });
+    expect(est.periodo.cobrado).toMatchObject({ ventas: 80, propinas: 10, efectivo: 90, tarjeta: 0 });
+
+    expect((await falla(api.rpc("anular_cobro", { p_token: mesero, p_id: "cobro-mesa6-a", p_motivo: "x" }))).message).toBe("PERMISO");
+    await api.rpc("anular_cobro", { p_token: admin, p_id: "cobro-mesa6-a", p_motivo: "Se cobró con tarjeta" });
+    est = await api.rpc("estado", { p_token: admin, p_partes: ["historial", "porCobrar"] });
+    expect(est.porCobrar.filter((t) => t.mesaId === 6)).toHaveLength(2);
+    expect(est.periodo.cobrado.ventas).toBe(0);
+    const t = await api.rpc("cobrar", { ...cobro, p_id: "cobro-mesa6-c", p_metodo: "tarjeta", p_recibido: 999 });
+    expect(t.cobro).toMatchObject({ metodo: "tarjeta", recibido: 80, cambio: 0 });
+    const { rows } = await sql.query("select count(*)::int n from bitacora where accion in ('cobro', 'anular_cobro')");
+    expect(rows[0].n).toBe(3);
+  });
+
   it("el corte exige PIN admin, no oculta pendientes de cocina y no pierde tickets concurrentes", async () => {
     expect((await api.rpc("hacer_corte", { p_token: cocina, p_admin_pin: "0000" })).error).toBe("pin");
     await api.rpc("agregar_gasto", { p_token: admin, p_id: "gasto-corte-1", p_concepto: "Hielo", p_monto: 30.5 });
@@ -321,6 +360,9 @@ d("operación", () => {
     expect(corte.corte.total).toBe(antes.periodo.total);
     expect(corte.corte.tickets).toBe(antes.periodo.count);
     expect(corte.corte.gastos).toBe(30.5);
+    expect(corte.corte.cobrado).toMatchObject({ tarjeta: 80, efectivo: 0 });
+    expect(corte.corte.porCobrar).toBe(antes.periodo.porCobrar);
+    expect(antes.periodo.porCobrar).toBeGreaterThan(0);
     expect(corte2.ok).toBe(true);
     expect(corte2.corte.tickets).toBe(1); // solo el ticket que llegó durante el primer corte
 

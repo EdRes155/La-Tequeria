@@ -8,12 +8,12 @@
    ============================================================ */
 import {
   CARNES_DEFAULT, BEBIDAS_DEFAULT, NUM_MESAS, preciosDefault, preciosCarne, resolverItem, resumenPeriodo,
-  clone, uid, hora, fecha, redondear, slug, PIN_RE, pinDebil, ticketTotal,
+  clone, uid, hora, fecha, redondear, slug, PIN_RE, pinDebil, ticketTotal, METODO_LABEL,
 } from "./dominio.js";
 
 const KEY = "tequeria_local_v3";
 const SESION_KEY = "tequeria_sesion_local";
-const PARTES = ["config", "carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos"];
+const PARTES = ["config", "carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos", "porCobrar"];
 
 function inicial() {
   return {
@@ -21,7 +21,7 @@ function inicial() {
     carnes: clone(CARNES_DEFAULT), bebidas: clone(BEBIDAS_DEFAULT),
     usuarios: [],
     mesas: Array.from({ length: NUM_MESAS }, (_, i) => ({ id: i + 1, estado: "libre", pedido: null, mesero: null, hora: null, extras: [], version: 0 })),
-    tickets: [], cortes: [], gastos: [], intentos: {},
+    tickets: [], cortes: [], gastos: [], cobros: [], folio: 0, intentos: {},
   };
 }
 
@@ -44,7 +44,10 @@ export function crearLocal({ ErrorApi, mensajePin }) {
   const oyentes = new Set();
 
   function cargarDb() {
-    try { const v = JSON.parse(localStorage.getItem(KEY) || "null"); if (v && v.config) return v; } catch {}
+    try {
+      const v = JSON.parse(localStorage.getItem(KEY) || "null");
+      if (v && v.config) return { cobros: [], folio: v.tickets?.length || 0, ...v };
+    } catch {}
     return inicial();
   }
   function guardar(partes = PARTES) {
@@ -103,6 +106,11 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     });
   }
 
+  function conCobro(t) {
+    const c = t.cobroId && db.cobros.find((x) => x.id === t.cobroId);
+    return { ...t, cobro: c ? { id: c.id, metodo: c.metodo, hora: c.hora, total: c.total, propina: c.propina, recibido: c.recibido, enCorte: !!c.corteId } : null };
+  }
+
   function estado(partes) {
     const u = yo();
     const todo = !partes;
@@ -114,12 +122,15 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     if (quiere("bebidas")) r.bebidas = [...db.bebidas].sort((a, b) => a.nombre.localeCompare(b.nombre));
     if (quiere("usuarios")) r.usuarios = db.usuarios.map(({ id, nombre, rol }) => ({ id, nombre, rol }));
     if (quiere("mesas")) r.mesas = db.mesas;
-    if (quiere("cocina")) r.cocina = db.tickets.filter((t) => !t.archivado)
-      .map((t) => (u.rol === "mesero" && t.creadoPor !== u.id ? { ...t, domicilio: null } : t));
+    const privado = (t) => (u.rol === "mesero" && t.creadoPor !== u.id ? { ...t, domicilio: null } : t);
+    if (quiere("cocina")) r.cocina = db.tickets.filter((t) => !t.archivado).map((t) => privado(conCobro(t)));
     if (caja && quiere("historial")) {
       const abiertos = db.tickets.filter((t) => !t.corteId);
-      r.historial = abiertos.filter((t) => !t.reenvio);
-      r.periodo = resumenPeriodo(abiertos, db.gastos.filter((g) => !g.corteId));
+      r.historial = abiertos.filter((t) => !t.reenvio).map(conCobro);
+      r.periodo = resumenPeriodo(abiertos, db.gastos.filter((g) => !g.corteId), db.cobros.filter((c) => !c.corteId));
+    }
+    if ((u.rol === "mesero" || u.rol === "admin") && quiere("porCobrar")) {
+      r.porCobrar = db.tickets.filter((t) => !t.reenvio && !t.cobroId).map((t) => privado(conCobro(t)));
     }
     if (caja && quiere("cortes")) r.cortes = db.cortes.slice(0, 60);
     if (u.rol === "admin" && quiere("gastos")) r.gastos = db.gastos.filter((g) => !g.corteId);
@@ -191,14 +202,15 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       if (m && p.esExtra) m.extras = [...(m.extras || []), { id: p.id, ordenes, extras, hora: h, total }];
       else if (m) Object.assign(m, { estado: "ocupada", pedido: { ordenes, extras }, mesero: u.nombre, hora: h, extras: [] });
       if (m) m.version = (m.version || 0) + 1;
+      db.folio = (db.folio || 0) + 1;
       const t = {
-        id: p.id, tipo, esExtra: !!p.esExtra, origen, mesaId: m ? m.id : null, ordenes, extras, mesero: u.nombre,
+        id: p.id, folio: db.folio, tipo, esExtra: !!p.esExtra, origen, mesaId: m ? m.id : null, ordenes, extras, mesero: u.nombre,
         hora: h, fecha: fecha(), estado: "pendiente", total, domicilio, reenvio: false,
         cuenta: p.cuenta === "separada" ? "separada" : "junta", paraLlevar: tipo === "aqui" && !p.esExtra && !!p.paraLlevar,
         referencia: tipo === "llevar" ? (p.referencia || "").trim() || null : null, creadoPor: u.id, archivado: false,
       };
       db.tickets.unshift(t);
-      guardar(["mesas", "bebidas", "cocina", "historial"]);
+      guardar(["mesas", "bebidas", "cocina", "historial", "porCobrar"]);
       return { ok: true, ticket: clone(t) };
     },
     async reenviar(id, mesaId) {
@@ -233,19 +245,69 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       const u = exigir(["cocinero", "admin"]);
       const a = conPin(await reautenticar(adminPin));
       const abiertos = db.tickets.filter((t) => !t.corteId);
-      if (!abiertos.some((t) => !t.reenvio)) conPin({ ok: false, error: "vacio" });
+      const cobros = db.cobros.filter((c) => !c.corteId);
+      if (!abiertos.some((t) => !t.reenvio) && !cobros.some((c) => !c.anulado)) conPin({ ok: false, error: "vacio" });
       const id = uid();
       const gastos = db.gastos.filter((g) => !g.corteId);
-      const res = resumenPeriodo(abiertos, gastos);
+      const res = resumenPeriodo(abiertos, gastos, cobros);
       db.cortes.unshift({ id, fecha: fecha(), hora: hora(), tickets: res.count, total: res.total, gastos: res.gastos,
-        detalle: { porTipo: res.porTipo, porMesero: res.porMesero, top: res.top, gastos: res.gastos }, hechoPor: u.id, autorizadoPor: a.admin.id });
+        cobrado: res.cobrado.total, porCobrar: res.porCobrar,
+        detalle: { porTipo: res.porTipo, porMesero: res.porMesero, top: res.top, gastos: res.gastos, cobrado: res.cobrado, porCobrar: res.porCobrar },
+        hechoPor: u.id, autorizadoPor: a.admin.id });
+      cobros.forEach((c) => { c.corteId = id; });
       // lo ya contabilizado y archivado se borra (con sus domicilios); lo que sigue en cocina se conserva
       abiertos.forEach((t) => { t.corteId = id; });
       gastos.forEach((g) => { g.corteId = id; });
-      db.tickets = db.tickets.filter((t) => !t.corteId || !t.archivado);
+      // se conservan los tickets aún por cobrar o en cocina; lo demás ya quedó en el corte
+      db.tickets = db.tickets.filter((t) => !t.corteId || !t.archivado || (!t.cobroId && !t.reenvio));
       db.gastos = db.gastos.filter((g) => !g.corteId);
-      guardar(["cocina", "historial", "cortes", "gastos"]);
-      return { ok: true, corte: { id, tickets: res.count, total: res.total, gastos: res.gastos, autorizo: a.admin.nombre } };
+      db.cobros = db.cobros.filter((c) => !c.corteId || db.tickets.some((t) => t.cobroId === c.id));
+      guardar(["cocina", "historial", "cortes", "gastos", "porCobrar"]);
+      return { ok: true, corte: { id, tickets: res.count, total: res.total, gastos: res.gastos, autorizo: a.admin.nombre,
+        cobrado: res.cobrado, porCobrar: res.porCobrar } };
+    },
+    async cobrar(id, ids, metodo, recibido, propina = 0, liberarMesa = false) {
+      const u = exigir(["mesero", "admin"]);
+      const previo = db.cobros.find((c) => c.id === id);
+      if (previo) return { ok: true, duplicado: true, cobro: { ...previo, cambio: Math.max(0, previo.recibido - previo.total - previo.propina) } };
+      if (!METODO_LABEL[metodo]) fallar("DATOS", "Elige un método de pago.");
+      const ts = [...new Set(ids)].map((x) => db.tickets.find((t) => t.id === x && !t.reenvio));
+      if (!ts.length || ts.some((t) => !t)) fallar("TICKET", "Alguna cuenta ya no existe o es una reimpresión.");
+      const ya = ts.find((t) => t.cobroId);
+      if (ya) fallar("YA_COBRADO", `La cuenta de ${ya.origen} ya estaba cobrada. Actualiza la pantalla.`);
+      const total = redondear(ts.reduce((s, t) => s + t.total, 0));
+      const prop = redondear(propina || 0);
+      if (prop < 0) fallar("DATOS", "Propina no válida.");
+      let rec = total + prop;
+      if (metodo === "efectivo") {
+        rec = redondear(recibido ?? total + prop);
+        if (rec < total + prop) fallar("PAGO", `El efectivo recibido no alcanza: faltan $${redondear(total + prop - rec)}.`);
+      }
+      const mesas = [...new Set(ts.map((t) => t.mesaId).filter(Boolean))];
+      const origen = ts.length === 1 ? ts[0].origen : mesas.length === 1 ? `Mesa ${mesas[0]}` : "Varias cuentas";
+      const c = { id, metodo, total, propina: prop, recibido: rec, tickets: ts.length, origen, cobradoPor: u.id, cobradoNombre: u.nombre,
+        fecha: fecha(), hora: hora(), corteId: null, anulado: false };
+      db.cobros.unshift(c);
+      ts.forEach((t) => { t.cobroId = id; });
+      let mesaLiberada = false;
+      if (liberarMesa && mesas.length === 1 && !db.tickets.some((t) => t.mesaId === mesas[0] && !t.cobroId && !t.reenvio)) {
+        const m = mesa(mesas[0]);
+        if (m.estado === "ocupada") {
+          Object.assign(m, { estado: "libre", pedido: null, mesero: null, hora: null, extras: [], version: (m.version || 0) + 1 });
+          mesaLiberada = true;
+        }
+      }
+      guardar(["porCobrar", "historial", "mesas", "cocina"]);
+      return { ok: true, mesaLiberada, cobro: { id, metodo, total, propina: prop, recibido: rec, cambio: redondear(rec - total - prop), origen } };
+    },
+    async anularCobro(id, motivo) {
+      exigir(["admin"]);
+      const c = db.cobros.find((x) => x.id === id && !x.anulado) || fallar("COBRO", "El cobro no existe o ya estaba anulado.");
+      if (c.corteId) fallar("COBRO", "Ese cobro ya pertenece a un corte y no se puede anular.");
+      if (!motivo?.trim()) fallar("DATOS", "Escribe el motivo de la anulación.");
+      c.anulado = true; c.anuladoMotivo = motivo.trim();
+      db.tickets.forEach((t) => { if (t.cobroId === id) t.cobroId = null; });
+      guardar(["porCobrar", "historial"]);
     },
     async ajustarBebida(id, delta) {
       exigir(["admin"]);

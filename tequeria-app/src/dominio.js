@@ -194,8 +194,36 @@ export function pedidoParaEnviar(pedido) {
   };
 }
 
+/* Cobros */
+export const METODOS_PAGO = [
+  { k: "efectivo", label: "Efectivo" },
+  { k: "tarjeta", label: "Tarjeta" },
+  { k: "transferencia", label: "Transferencia" },
+];
+export const METODO_LABEL = Object.fromEntries(METODOS_PAGO.map((m) => [m.k, m.label]));
+// Montos rápidos para el efectivo: exacto y los billetes que lo cubren
+export function sugerenciasEfectivo(total) {
+  const t = redondear(total);
+  const out = [t];
+  [20, 50, 100, 200, 500, 1000].forEach((b) => {
+    const v = Math.ceil(t / b) * b;
+    if (v > t && !out.includes(v)) out.push(v);
+  });
+  return out.sort((a, b) => a - b).slice(0, 5);
+}
+export const porCobrarDeMesa = (porCobrar, mesaId) => (porCobrar || []).filter((t) => t.mesaId === mesaId);
+
+/* Avatar del login: iniciales y un color estable por usuario */
+export const iniciales = (nombre) => (nombre || "?").trim().split(/\s+/).slice(0, 2).map((p) => p[0]).join("").toUpperCase();
+const COLORES_AVATAR = ["#11634A", "#A15C07", "#1D4E89", "#8B1E3F", "#C2410C", "#55702A", "#5B3E8C", "#0F6E78"];
+export function colorAvatar(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return COLORES_AVATAR[h % COLORES_AVATAR.length];
+}
+
 /* Resumen de un periodo (lo calcula el servidor; aquí solo para el modo local) */
-export function resumenPeriodo(tickets, gastos = []) {
+export function resumenPeriodo(tickets, gastos = [], cobros = []) {
   const porTipo = {}, porMesero = {}, prod = {};
   let total = 0;
   const etiquetas = { aqui: "Para comer aquí", llevar: "Para llevar", domicilio: "Domicilio" };
@@ -210,9 +238,19 @@ export function resumenPeriodo(tickets, gastos = []) {
     }));
   });
   const top = Object.entries(prod).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([nombre, cant]) => ({ nombre, cant }));
+  const validos = cobros.filter((c) => !c.anulado);
+  const metodo = (k) => redondear(validos.filter((c) => c.metodo === k).reduce((s, c) => s + c.total + c.propina, 0));
+  const pendientes = tickets.filter((t) => !t.reenvio && !t.cobroId);
   return {
     total: redondear(total), count: tickets.filter((t) => !t.reenvio).length, porTipo, porMesero, top,
     gastos: redondear(gastos.reduce((s, g) => s + (Number(g.monto) || 0), 0)),
+    porCobrar: redondear(pendientes.reduce((s, t) => s + (Number(t.total) || 0), 0)), porCobrarCount: pendientes.length,
+    cobrado: {
+      count: validos.length, ventas: redondear(validos.reduce((s, c) => s + c.total, 0)),
+      propinas: redondear(validos.reduce((s, c) => s + c.propina, 0)),
+      total: redondear(validos.reduce((s, c) => s + c.total + c.propina, 0)),
+      efectivo: metodo("efectivo"), tarjeta: metodo("tarjeta"), transferencia: metodo("transferencia"),
+    },
   };
 }
 
@@ -228,6 +266,12 @@ export function textoCorteWhatsApp(neg, r, fechaStr) {
   L.push("Por mesero:");
   Object.entries(r.porMesero || {}).forEach(([k, v]) => L.push(`• ${k}: ${money(v)}`));
   if (r.top?.length) { L.push(""); L.push("Más vendidos:"); r.top.forEach((p, i) => L.push(`${i + 1}. ${p.nombre} ×${p.cant}`)); }
+  if (r.cobrado) {
+    L.push(""); L.push("Cobrado:");
+    METODOS_PAGO.forEach((m) => { if (r.cobrado[m.k] > 0) L.push(`• ${m.label}: ${money(r.cobrado[m.k])}`); });
+    if (r.cobrado.propinas > 0) L.push(`• (incluye propinas: ${money(r.cobrado.propinas)})`);
+    if (r.porCobrar > 0) L.push(`Por cobrar: ${money(r.porCobrar)}`);
+  }
   if (r.gastos > 0) { L.push(""); L.push(`Gastos del periodo: ${money(r.gastos)}`); L.push(`*Neto: ${money(r.total - r.gastos)}*`); }
   return L.join("\n");
 }

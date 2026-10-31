@@ -18,10 +18,11 @@ export class ErrorApi extends Error {
 }
 
 // Qué partes del estado hay que recargar cuando cambia cada tabla
-export const TODAS = ["config", "carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos"];
+export const TODAS = ["config", "carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos", "porCobrar"];
 export const TABLA_PARTES = {
   config: ["config"], carnes: ["carnes"], bebidas: ["bebidas"], usuarios: ["usuarios"], mesas: ["mesas"],
-  tickets: ["cocina", "historial"], cortes: ["cortes", "historial"], gastos: ["gastos", "historial"],
+  tickets: ["cocina", "historial", "porCobrar"], cortes: ["cortes", "historial"], gastos: ["gastos", "historial"],
+  cobros: ["porCobrar", "historial", "cortes"],
 };
 
 const SESION_KEY = "tequeria_sesion";
@@ -155,6 +156,10 @@ function crearRemoto() {
       crearUsuario: (adminPin, nombre, pin, rol) => conPin("crear_usuario", { p_admin_pin: adminPin, p_nombre: nombre, p_pin: pin, p_rol: rol }),
       eliminarUsuario: (adminPin, id) => conPin("eliminar_usuario", { p_admin_pin: adminPin, p_id: id }),
       restablecerPin: (adminPin, id, pin) => conPin("restablecer_pin", { p_admin_pin: adminPin, p_id: id, p_pin_nuevo: pin }),
+      cobrar: (id, tickets, metodo, recibido, propina, liberarMesa) => conToken("cobrar", {
+        p_id: id, p_tickets: tickets, p_metodo: metodo, p_recibido: recibido ?? null, p_propina: propina || 0, p_liberar_mesa: !!liberarMesa,
+      }),
+      anularCobro: (id, motivo) => conToken("anular_cobro", { p_id: id, p_motivo: motivo }),
     },
   };
 }
