@@ -161,6 +161,7 @@ function crearRemoto() {
       }),
       anularCobro: (id, motivo) => conToken("anular_cobro", { p_id: id, p_motivo: motivo }),
       marcarRecibido: (ids) => conToken("marcar_recibido", { p_ids: ids }),
+      fijarAjuste: (clave, valor) => conToken("fijar_ajuste", { p_clave: clave, p_valor: valor }),
       noCobrar: (adminPin, tickets, motivo, liberarMesa) => conPin("no_cobrar", {
         p_admin_pin: adminPin, p_tickets: tickets, p_motivo: motivo, p_liberar_mesa: !!liberarMesa,
       }),

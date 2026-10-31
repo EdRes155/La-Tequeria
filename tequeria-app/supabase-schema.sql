@@ -29,6 +29,8 @@ create table if not exists public.config (
 );
 alter table public.config add column if not exists zona_horaria text default 'America/Mexico_City';
 alter table public.config add column if not exists retencion_domicilio_dias int default 90;
+-- Ajustes del negocio que cambia el administrador (modo de la cocina, etc.)
+alter table public.config add column if not exists ajustes jsonb not null default '{}'::jsonb;
 
 create table if not exists public.carnes (
   id text primary key, nombre text not null,
@@ -715,7 +717,7 @@ begin
   if todo or 'config' = any(p_partes) then
     r := r || jsonb_build_object('nombreNegocio', coalesce(cfg.nombre_negocio, 'La Tequería'),
       'precios', coalesce(cfg.precios, '{}'::jsonb), 'extras', coalesce(cfg.extras, '[]'::jsonb),
-      'ocultos', coalesce(cfg.ocultos, '[]'::jsonb));
+      'ocultos', coalesce(cfg.ocultos, '[]'::jsonb), 'ajustes', coalesce(cfg.ajustes, '{}'::jsonb));
   end if;
   if todo or 'carnes' = any(p_partes) then
     r := r || jsonb_build_object('carnes', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'nombre', nombre,
@@ -1356,6 +1358,24 @@ begin
    where id = 1;
 end $$;
 
+-- Ajustes del negocio: solo claves conocidas y valores válidos
+--   modoCocina: 'impresora' (la cocina imprime cada comanda) o 'monitor' (pantalla de cocina)
+--   imprimirCocinaMonitor: en modo monitor, imprimir también la comanda en cocina
+create or replace function public.fijar_ajuste(p_token text, p_clave text, p_valor jsonb)
+returns json language plpgsql security definer set search_path = public as $$
+declare s record; v jsonb;
+begin
+  select * into s from public._exigir(p_token, array['admin']);
+  if not ((p_clave = 'modoCocina' and jsonb_typeof(p_valor) = 'string' and p_valor #>> '{}' in ('impresora', 'monitor'))
+       or (p_clave = 'imprimirCocinaMonitor' and jsonb_typeof(p_valor) = 'boolean')) then
+    perform public._error('DATOS', 'Ajuste no válido.');
+  end if;
+  update public.config set ajustes = coalesce(ajustes, '{}'::jsonb) || jsonb_build_object(p_clave, p_valor)
+   where id = 1 returning ajustes into v;
+  perform public._log(s.uid, s.nombre, 'ajuste', jsonb_build_object('clave', p_clave, 'valor', p_valor));
+  return v::json;
+end $$;
+
 -- ---------------------------------------------------------------------
 --  API: gastos (administrador)
 -- ---------------------------------------------------------------------
@@ -1522,7 +1542,7 @@ begin
              'liberar_cocina','hacer_corte','ajustar_bebida','actualizar_bebida','agregar_bebida','eliminar_bebida',
              'actualizar_carne','agregar_carne','eliminar_carne','fijar_precio','fijar_precio_extra','agregar_extra',
              'eliminar_extra','alternar_oculto','agregar_gasto','eliminar_gasto','crear_usuario','eliminar_usuario',
-             'restablecer_pin','cobrar','anular_cobro','marcar_recibido','no_cobrar')
+             'restablecer_pin','cobrar','anular_cobro','marcar_recibido','no_cobrar','fijar_ajuste')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;
@@ -1546,7 +1566,8 @@ grant execute on function
   public.crear_usuario(text, text, text, text, text), public.eliminar_usuario(text, text, text),
   public.restablecer_pin(text, text, text, text),
   public.cobrar(text, text, text[], text, numeric, numeric, boolean), public.anular_cobro(text, text, text),
-  public.marcar_recibido(text, text[]), public.no_cobrar(text, text, text[], text, boolean)
+  public.marcar_recibido(text, text[]), public.no_cobrar(text, text, text[], text, boolean),
+  public.fijar_ajuste(text, text, jsonb)
 to anon, authenticated;
 
 commit;

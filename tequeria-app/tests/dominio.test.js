@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   money, leerImporte, buildMenu, resolverItem, pinDebil, nombreTicket, resumenPeriodo, pedidoParaEnviar,
   preciosDefault, CARNES_DEFAULT, BEBIDAS_DEFAULT, ticketTotal, puede, puedeEditar,
-  ordenarItems, nombreCocina, estadoPedido, pedidosDeMesa, unirTickets,
+  ordenarItems, nombreCocina, estadoPedido, pedidosDeMesa, unirTickets, porPreparar, leerAjustes,
 } from "../src/dominio.js";
 
 const datos = {
@@ -132,5 +132,22 @@ describe("ticket de cocina y estatus del pedido", () => {
     expect(pedidosDeMesa(todos, mesa).map((t) => t.id)).toEqual(["b", "c"]);
     expect(pedidosDeMesa(todos, { ...mesa, estado: "libre" })).toEqual([]);
     expect(pedidosDeMesa(todos, { ...mesa, desde: null }).map((t) => t.id)).toEqual(["b"]);
+  });
+});
+
+describe("monitor de cocina", () => {
+  it("suma lo que falta por preparar en orden de categoría, sin reimpresiones ni lo ya tachado", () => {
+    const t1 = { id: "a", ordenes: [{ id: "o1", items: [{ key: "beb-coca", nombre: "Coca-Cola", cat: "bebida", cantidad: 1 }, { key: "taco-pastor", nombre: "Taco Pastor", cat: "taco", cantidad: 3 }] }] };
+    const t2 = { id: "b", ordenes: [{ id: "o1", items: [{ key: "taco-pastor", nombre: "Taco Pastor", cat: "taco", cantidad: 2 }, { key: "gringa-pastor", nombre: "Gringa Pastor", cat: "quesa", cantidad: 1 }] }],
+      extras: [{ key: "tortilla-maiz", corto: "Tortillas maíz", nombre: "Tortillas extra (maíz)", cat: "empaque", cantidad: 1 }] };
+    const re = { id: "c", reenvio: true, ordenes: [{ id: "o1", items: [{ key: "taco-pastor", nombre: "Taco Pastor", cat: "taco", cantidad: 9 }] }] };
+    expect(porPreparar([t1, t2, re]).map((x) => `${x.cantidad} ${x.nombre}`))
+      .toEqual(["5 Taco Pastor", "1 Gringa Pastor", "1 Coca-Cola", "1 Tortillas maíz"]);
+    expect(porPreparar([t1, t2], (k) => k === "a|o1|taco-pastor")[0]).toMatchObject({ key: "taco-pastor", cantidad: 2 });
+  });
+
+  it("los ajustes del negocio tienen valores por defecto", () => {
+    expect(leerAjustes({})).toEqual({ modoCocina: "impresora", imprimirCocinaMonitor: false });
+    expect(leerAjustes({ ajustes: { modoCocina: "monitor" } }).modoCocina).toBe("monitor");
   });
 });

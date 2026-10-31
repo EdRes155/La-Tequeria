@@ -117,6 +117,8 @@ valores que hoy usa La Tequería, que se indican entre paréntesis.
 - **Estatus del pedido:** cuándo pasa a «Recibido» (hoy en cuanto aparece en la pantalla de
   cocina; la otra opción es un botón en cocina).
 - **Cocina**
+  - Modo de la cocina: impresora o monitor, y si en modo monitor también se imprime la comanda
+    (hoy ya se configura en Administración → Cocina; por defecto impresora).
   - Minutos para marcar la espera (hoy 10 y 20).
   - Una sola cocina activa a la vez (hoy sí).
   - Auto-imprimir los pedidos nuevos y los avisos (hoy se eligen en cada dispositivo).

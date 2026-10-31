@@ -381,6 +381,21 @@ d("operación", () => {
     expect(rows).toEqual([{ motivo: "El cliente se fue", autorizo: expect.any(String) }]);
   });
 
+  it("solo el administrador cambia los ajustes del negocio y todos los leen", async () => {
+    const aj = { p_token: admin, p_clave: "modoCocina", p_valor: JSON.stringify("monitor") };
+    expect((await falla(api.rpc("fijar_ajuste", { ...aj, p_token: mesero }))).message).toBe("PERMISO");
+    expect((await falla(api.rpc("fijar_ajuste", { ...aj, p_valor: JSON.stringify("pantalla") }))).message).toBe("DATOS");
+    expect((await falla(api.rpc("fijar_ajuste", { ...aj, p_clave: "precios" }))).message).toBe("DATOS");
+    expect((await falla(api.rpc("fijar_ajuste", { ...aj, p_clave: "imprimirCocinaMonitor" }))).message).toBe("DATOS");
+    expect(await api.rpc("fijar_ajuste", aj)).toEqual({ modoCocina: "monitor" });
+    expect(await api.rpc("fijar_ajuste", { p_token: admin, p_clave: "imprimirCocinaMonitor", p_valor: "true" }))
+      .toEqual({ modoCocina: "monitor", imprimirCocinaMonitor: true });
+    const est = await api.rpc("estado", { p_token: cocina, p_partes: ["config"] });
+    expect(est.ajustes).toEqual({ modoCocina: "monitor", imprimirCocinaMonitor: true });
+    const { rows } = await sql.query("select count(*)::int n from bitacora where accion = 'ajuste'");
+    expect(rows[0].n).toBe(2);
+  });
+
   it("el corte exige PIN admin, no oculta pendientes de cocina y no pierde tickets concurrentes", async () => {
     expect((await api.rpc("hacer_corte", { p_token: cocina, p_admin_pin: "0000" })).error).toBe("pin");
     await api.rpc("agregar_gasto", { p_token: admin, p_id: "gasto-corte-1", p_concepto: "Hielo", p_monto: 30.5 });

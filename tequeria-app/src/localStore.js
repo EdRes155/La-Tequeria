@@ -7,7 +7,7 @@
    · Al hacer corte se borran los tickets cerrados (y sus domicilios).
    ============================================================ */
 import {
-  CARNES_DEFAULT, BEBIDAS_DEFAULT, NUM_MESAS, preciosDefault, preciosCarne, resolverItem, resumenPeriodo,
+  CARNES_DEFAULT, BEBIDAS_DEFAULT, NUM_MESAS, preciosDefault, preciosCarne, resolverItem, resumenPeriodo, AJUSTES_VALIDOS,
   clone, uid, hora, fecha, redondear, slug, PIN_RE, pinDebil, ticketTotal, METODO_LABEL,
 } from "./dominio.js";
 
@@ -118,7 +118,8 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     const quiere = (p) => todo || partes.includes(p);
     const caja = u.rol === "cocinero" || u.rol === "admin";
     const r = { yo: { id: u.id, nombre: u.nombre, rol: u.rol, cambiarPin: !!u.debeCambiarPin } };
-    if (quiere("config")) Object.assign(r, { nombreNegocio: db.config.nombreNegocio, precios: db.config.precios, extras: db.config.extras, ocultos: db.config.ocultos });
+    if (quiere("config")) Object.assign(r, { nombreNegocio: db.config.nombreNegocio, precios: db.config.precios, extras: db.config.extras,
+      ocultos: db.config.ocultos, ajustes: db.config.ajustes || {} });
     if (quiere("carnes")) r.carnes = db.carnes;
     if (quiere("bebidas")) r.bebidas = [...db.bebidas].sort((a, b) => a.nombre.localeCompare(b.nombre));
     if (quiere("usuarios")) r.usuarios = db.usuarios.map(({ id, nombre, rol }) => ({ id, nombre, rol }));
@@ -404,6 +405,13 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       return { id };
     },
     async eliminarExtra(id) { exigir(["admin"]); db.config.extras = db.config.extras.filter((e) => e.id !== id); guardar(["config"]); },
+    async fijarAjuste(clave, valor) {
+      exigir(["admin"]);
+      if (!AJUSTES_VALIDOS[clave]?.(valor)) fallar("DATOS", "Ajuste no válido.");
+      db.config.ajustes = { ...(db.config.ajustes || {}), [clave]: valor };
+      guardar(["config"]);
+      return clone(db.config.ajustes);
+    },
     async alternarOculto(clave) {
       exigir(["admin"]);
       const s = new Set(db.config.ocultos); s.has(clave) ? s.delete(clave) : s.add(clave);

@@ -28,9 +28,9 @@ Comprobaciones hechas en producción:
 
 | Verificación | Resultado |
 |---|---|
-| `npm test` (dominio y modo local) | 20 pruebas ✓ |
-| `npm run test:sql` (PostgreSQL 16 real, actualización v2→v3, concurrencia con dos conexiones, cobros, estatus, adaptador remoto) | 24 pruebas ✓ |
-| `npm run test:e2e` (Chromium, escenarios UX de la auditoría, cobro y estatus) | 8 recorridos ✓ |
+| `npm test` (dominio y modo local) | 23 pruebas ✓ |
+| `npm run test:sql` (PostgreSQL 16 real, actualización v2→v3, concurrencia con dos conexiones, cobros, estatus, ajustes, adaptador remoto) | 25 pruebas ✓ |
+| `npm run test:e2e` (Chromium, escenarios UX de la auditoría, cobro, estatus, barra y monitor) | 10 recorridos ✓ |
 | `npm run build` y `npm run check:secrets` | ✓ |
 
 ## Seguridad y datos
@@ -100,6 +100,10 @@ Comprobaciones hechas en producción:
   costras, bebidas) y abrevia (T, G, V, C…). El mesero ve el estatus de cada pedido (enviado,
   recibido, en proceso, entregado, cobrado). Una mesa no se libera sin cobrar: el servidor lo
   rechaza y solo un administrador puede cerrarla sin cobro, con PIN y motivo en la bitácora.
+- **Modo de cocina**: «Impresora» o «Monitor» (pantalla grande de cocina con tiempos, «Empezar» y
+  «Listo», panel «Por preparar» y teclas 1–9), guardado en `config.ajustes` mediante
+  `fijar_ajuste` (solo administrador, valores validados y en la bitácora). Cada dispositivo elige
+  su estación de impresión: Barra (ticket del cliente) o Cocina (comanda).
 - **Diseño**: paleta «nopal» con contraste de 4.5:1 o más en todos los textos,
   tipografías Figtree y Bricolage Grotesque incluidas en el build, un inicio de sesión
   con tarjetas de usuario y teclado numérico, y en cocina el tiempo de espera de cada

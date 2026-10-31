@@ -218,6 +218,29 @@ export function sugerenciasEfectivo(total) {
 }
 export const porCobrarDeMesa = (porCobrar, mesaId) => (porCobrar || []).filter((t) => t.mesaId === mesaId);
 
+/* Ajustes del negocio (Administración → Cocina). Mismas reglas que public.fijar_ajuste */
+export const AJUSTES_DEFAULT = { modoCocina: "impresora", imprimirCocinaMonitor: false };
+export const AJUSTES_VALIDOS = {
+  modoCocina: (v) => v === "impresora" || v === "monitor",
+  imprimirCocinaMonitor: (v) => typeof v === "boolean",
+};
+export const leerAjustes = (data) => ({ ...AJUSTES_DEFAULT, ...(data?.ajustes || {}) });
+
+// Totales por producto de varias comandas: lo que la cocina tiene por preparar
+export function porPreparar(tickets, hecho = () => false) {
+  const m = new Map();
+  (tickets || []).filter((t) => !t.reenvio).forEach((t) => {
+    const lineas = [...(t.ordenes || []).flatMap((o) => (o.items || []).map((it) => [o.id, it])), ...(t.extras || []).map((it) => ["extras", it])];
+    lineas.forEach(([oid, it]) => {
+      if (hecho(`${t.id}|${oid}|${it.key}`)) return;
+      const x = m.get(it.key) || { key: it.key, nombre: it.corto || it.nombre, cat: it.cat, cantidad: 0 };
+      x.cantidad += it.cantidad || 0;
+      m.set(it.key, x);
+    });
+  });
+  return ordenarItems([...m.values()]);
+}
+
 /* Estatus del pedido para el mesero. Cocina: enviado → recibido (ya está en la pantalla de cocina)
    → en proceso → entregado (marcado como listo). Cobrado cierra el pedido. */
 export const PASOS_PEDIDO = [

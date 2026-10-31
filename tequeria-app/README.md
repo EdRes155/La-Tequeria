@@ -55,6 +55,39 @@ Cada mesa y cada pedido para llevar o domicilio muestra su estatus: **Enviado** 
 **Cobrado**. Si se paga antes de que salga de cocina se ve, por ejemplo, «En proceso · pagado».
 En «Mesas», la lista «Pedidos en curso» junta lo que falta cobrar y lo que sigue en cocina.
 
+## Modo de cocina: impresora o monitor
+
+Se elige en **Administración → Cocina** y aplica a todo el negocio:
+
+- **Impresora** (como siempre): la cocina imprime la comanda de cada pedido y la barra el
+  ticket del cliente.
+- **Monitor**: la cocina trabaja en una pantalla grande (tablet, iPad o monitor). Al entrar con
+  un usuario **Cocinero** se abre directo; un administrador la abre desde Cocina → «Abrir
+  monitor». La barra sigue imprimiendo el ticket del cliente; imprimir la comanda en cocina es
+  opcional («Imprimir también la comanda en cocina»).
+
+El monitor muestra las comandas de la más antigua a la más nueva, con:
+- tiempo de espera en vivo (amarillo a los 10 min, rojo a los 20);
+- productos en orden de categoría;
+- «Empezar» (pasa a En proceso) y «Listo», y la tira de listos para regresar o quitar;
+- el panel «Por preparar» con el total de cada producto;
+- aviso con sonido cuando llega una comanda nueva.
+
+Los productos se pueden tachar al prepararlos (se guarda solo en esa pantalla). Las teclas
+1–9 avanzan la comanda de esa posición, para usar un teclado o una «bump bar». El monitor
+evita que la pantalla se apague y tiene pantalla completa.
+
+### Estaciones de impresión
+
+Cada dispositivo elige su estación con el botón de impresora de la barra superior (se guarda
+solo en ese dispositivo):
+- **Barra**: imprime el ticket del cliente (folio y precios) de cada pedido nuevo.
+- **Cocina**: imprime la comanda de cada pedido nuevo (en modo monitor, solo si está activado).
+- **Ninguna**: no imprime solo; cualquier ticket se puede imprimir a mano.
+
+Para imprimir sin la ventana del navegador, abre Chrome con impresión silenciosa
+(`--kiosk-printing`).
+
 ## Tickets
 
 - **Cuenta**: folio, precio unitario, total y el bloque de pago (método, propina, recibido

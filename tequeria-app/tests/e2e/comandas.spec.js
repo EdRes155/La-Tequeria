@@ -237,3 +237,85 @@ test("cocina ordenada y abreviada, estatus para el mesero y no se libera una mes
   await page.getByRole("tab", { name: "Ventas / Corte" }).click();
   await expect(page.locator(".corte-bar")).toContainText("No cobrado $");
 });
+
+// window.print() de prueba: guarda el texto del ticket y avisa que terminó, como un navegador real
+const simularImpresora = (page) => page.addInitScript(() => {
+  window.__impresiones = [];
+  window.print = () => {
+    const areas = [...document.querySelectorAll("#print-area")];
+    window.__impresiones.push(areas.map((a) => a.innerText).join("\n---\n"));
+    setTimeout(() => window.dispatchEvent(new Event("afterprint")), 20);
+  };
+});
+const impresiones = (page) => page.evaluate(() => window.__impresiones);
+
+test("barra: el dispositivo marcado como barra imprime solo el ticket del cliente de cada pedido nuevo", async ({ page }) => {
+  await simularImpresora(page);
+  await entrarComoAdmin(page);
+  await page.getByRole("button", { name: "Impresión en este dispositivo" }).click();
+  const dlg = page.getByRole("dialog", { name: "Impresión en este dispositivo" });
+  await dlg.getByRole("radio", { name: /^Barra/ }).check();
+  await dlg.getByRole("button", { name: "Listo" }).click();
+  await expect(page.getByRole("button", { name: "Impresión en este dispositivo: Barra" })).toBeVisible();
+
+  for (const ref of ["Luis", "Marta"]) {
+    await page.getByRole("button", { name: "Para llevar", exact: true }).click();
+    await page.getByLabel("Nombre de referencia del cliente").fill(ref);
+    await producto(page, "Taco Pastor").click();
+    await page.getByRole("button", { name: "Enviar a cocina" }).click();
+    await expect(page.getByRole("heading", { name: "Mesas" })).toBeVisible();
+  }
+  await expect.poll(async () => (await impresiones(page)).length).toBe(2);
+  const [uno, dos] = await impresiones(page);
+  expect(uno).toContain("Para llevar · Luis");
+  expect(uno).toMatch(/TOTAL\s+\$20/);
+  expect(dos).toContain("Para llevar · Marta");
+  await expect(page.locator(".impresion-oculta")).toHaveCount(0);
+});
+
+test("modo monitor: el cocinero entra a la pantalla de cocina y procesa las comandas", async ({ page }) => {
+  await simularImpresora(page);
+  await entrarComoAdmin(page);
+  await page.getByRole("button", { name: /^Admin/ }).click();
+  await page.getByRole("tab", { name: "Cocina" }).click();
+  await page.getByRole("button", { name: /^Monitor/ }).click();
+  await expect(page.getByRole("button", { name: /^Monitor/ })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("tab", { name: "Usuarios" }).click();
+  await page.getByLabel("Nombre", { exact: true }).fill("Toño");
+  await page.getByLabel("PIN del nuevo usuario").fill("5173");
+  await page.getByLabel("Rol").selectOption("cocinero");
+  await page.getByRole("button", { name: "Crear usuario" }).click();
+  await page.getByLabel("Tu PIN de administrador").fill("8642");
+  await page.getByRole("dialog").getByRole("button", { name: /Autorizar|Confirmar|Continuar/ }).click();
+  await expect(page.getByText('Usuario "Toño" creado')).toBeVisible();
+
+  await page.getByRole("button", { name: /^Mesas/ }).click();
+  await mesa(page, 6).click();
+  for (const p of ["Coca-Cola", "Taco Pastor"]) await producto(page, p).click();
+  await page.getByRole("button", { name: "Enviar a cocina" }).click();
+  await expect(mesa(page, 6)).toHaveAccessibleName(/estatus Enviado/);
+  await page.getByRole("button", { name: "Cerrar sesión de Ana" }).click();
+
+  await page.getByRole("button", { name: "Cambiar de usuario" }).click();   // la entrada recuerda al último usuario
+  await page.getByRole("button", { name: "Toño" }).click();
+  await page.getByLabel("PIN", { exact: true }).fill("5173");
+  await page.getByRole("button", { name: "Entrar" }).click();
+  const tablero = page.getByRole("main", { name: "Comandas por preparar" });
+  await expect(tablero).toBeVisible();
+  const tarjeta = tablero.getByRole("article", { name: /^1\. Mesa 6, por empezar/ });
+  await expect(tarjeta.locator(".mon-n")).toHaveText(["Taco Pastor", "Coca-Cola"]);
+  await expect(page.getByRole("complementary", { name: "Por preparar" })).toContainText("1Taco Pastor");
+  expect(await impresiones(page)).toEqual([]);   // en modo monitor la cocina no imprime si no se pide
+
+  await tarjeta.getByRole("button", { name: "Empezar Mesa 6" }).click();
+  await expect(tablero.getByRole("article", { name: /^1\. Mesa 6, en proceso/ })).toBeVisible();
+  const taco = tablero.getByRole("button", { name: "1 Taco Pastor" });
+  await taco.click();
+  await expect(tablero.getByRole("button", { name: "1 Taco Pastor, preparado" })).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("1");   // bump bar: la tecla 1 avanza la primera comanda (en proceso → listo)
+  await expect(tablero.getByText("Sin comandas pendientes")).toBeVisible();
+  await expect(page.getByRole("contentinfo", { name: "Listos" })).toContainText("Mesa 6");
+
+  await page.getByRole("button", { name: "Cocina clásica" }).click();
+  await expect(page.getByRole("navigation", { name: "Secciones" })).toBeVisible();
+});

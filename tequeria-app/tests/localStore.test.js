@@ -108,6 +108,18 @@ describe("modo local", () => {
     expect(est.periodo).toMatchObject({ noCobrado: 40, porCobrar: 0 });
   });
 
+  it("guarda los ajustes del negocio solo con valores válidos", async () => {
+    await api.crearAdminInicial("Ana", "8642");
+    const { usuarios } = await api.pantallaLogin();
+    await api.entrar(usuarios[0].id, "8642");
+    expect((await api.cargar()).ajustes).toEqual({});
+    expect((await falla(api.acciones.fijarAjuste("modoCocina", "pantalla"))).codigo).toBe("DATOS");
+    expect((await falla(api.acciones.fijarAjuste("otra", true))).codigo).toBe("DATOS");
+    await api.acciones.fijarAjuste("modoCocina", "monitor");
+    await api.acciones.fijarAjuste("imprimirCocinaMonitor", true);
+    expect((await api.cargar(["config"])).ajustes).toEqual({ modoCocina: "monitor", imprimirCocinaMonitor: true });
+  });
+
   it("aplica permisos por rol y obliga a cambiar un PIN débil", async () => {
     await api.crearAdminInicial("Ana", "8642");
     let { usuarios } = await api.pantallaLogin();

@@ -3,6 +3,7 @@ import {
   Plus, Minus, Trash2, Printer, Send, LogOut, ArrowLeft, Bike, Package, Wallet, Utensils, ShoppingBag,
   ChefHat, Check, Pencil, Settings, KeyRound, Save, Undo2, Loader2, RefreshCw, X,
   Banknote, CreditCard, ArrowLeftRight, Delete, Receipt,
+  Monitor as MonitorIcon, Maximize, Minimize, Volume2, VolumeX, ListChecks, Play,
 } from "lucide-react";
 import { api, remoto, ErrorApi, mensajePin, TODAS } from "./store.js";
 import {
@@ -10,7 +11,7 @@ import {
   empaqueItems, catalogoBase, buildMenu, uid, clone, nuevaOrden, nuevoPedido, domVacio, telefonoValido,
   pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, pinDebil, hora, fecha,
   METODOS_PAGO, METODO_LABEL, sugerenciasEfectivo, porCobrarDeMesa, iniciales, colorAvatar, redondear,
-  ordenarItems, nombreCocina, PASOS_PEDIDO, estadoPedido, unirTickets, pedidosDeMesa,
+  ordenarItems, nombreCocina, PASOS_PEDIDO, estadoPedido, unirTickets, pedidosDeMesa, leerAjustes, porPreparar,
 } from "./dominio.js";
 import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
 import { CSS } from "./estilos.js";
@@ -107,7 +108,9 @@ export default function App() {
   const [ctx, setCtx] = useState(null);
   const [borradores, setBorradores] = useState({});
   const [printTicket, setPrintTicket] = useState(null);
-  const [printAuto, setPrintAuto] = useState(false);
+  const [monitorPref, setMonitorPref] = useState(null);   // null: según rol y modo; true/false: abierto o cerrado a mano
+  const [, setEstacionVer] = useState(0);                 // vuelve a leer la estación de este dispositivo
+  const [dispositivoAbierto, setDispositivoAbierto] = useState(false);
   const [cocinaIncierta, setCocinaIncierta] = useState(false);
   const [cambiandoPin, setCambiandoPin] = useState(false);
   const [cobro, setCobro] = useState(null);       // { cuentas, titulo, mesaId } para el diálogo de cobro
@@ -127,7 +130,7 @@ export default function App() {
   const cerrarSesion = useCallback((mensaje = null) => {
     api.salir();
     setSesion(null); setData(null); setBorradores({}); setView("mesas"); setCtx(null);
-    setAviso(mensaje); setCocinaIncierta(false); setErrorCarga(null); setCambiandoPin(false);
+    setAviso(mensaje); setCocinaIncierta(false); setErrorCarga(null); setCambiandoPin(false); setMonitorPref(null);
   }, []);
 
   const manejarError = useCallback((e) => {
@@ -148,7 +151,7 @@ export default function App() {
       const r = await api.cargar(partes);
       const vigente = (p) => pedidas.current[p] === n;
       const parche = { yo: r.yo };
-      if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, precios: r.precios, extras: r.extras, ocultos: r.ocultos });
+      if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, precios: r.precios, extras: r.extras, ocultos: r.ocultos, ajustes: r.ajustes || {} });
       ["carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos", "porCobrar"].forEach((p) => { if (p in r && vigente(p)) parche[p] = r[p]; });
       if ("periodo" in r && vigente("historial")) parche.periodo = r.periodo;
       setData((d) => ({ ...(d || {}), ...parche }));
@@ -282,6 +285,8 @@ export default function App() {
           throw e;
         }
       },
+      fijarAjuste: (clave, valor) => ejecutar(() => a.fijarAjuste(clave, valor), { partes: ["config"], ok: "Ajuste guardado",
+        optimista: (nd) => { nd.ajustes = { ...(nd.ajustes || {}), [clave]: valor }; } }),
       anularCobro: (id, motivo) => ejecutar(() => a.anularCobro(id, motivo), { partes: ["porCobrar", "historial"], ok: "Cobro anulado: las cuentas vuelven a estar por cobrar" }),
     };
   }, [manejarError, refrescar]);
@@ -327,14 +332,42 @@ export default function App() {
   const userActual = data.yo || usuario;
   const abrirCobro = (cuentas, titulo, mesaId = null) => setCobro({ cuentas, titulo, mesaId });
   const props = { data, db, user: userActual, go, ctx, abrirCobro };
-  const abrirImpresion = (t, auto = false) => { setPrintAuto(!!auto); setPrintTicket(t); };
+  const abrirImpresion = (t) => setPrintTicket(t);
   const claveCtx = ctx && view === "comanda" ? claveBorrador(ctx) : null;
+  const ajustes = leerAjustes(data);
+  const estacion = leerEstacion(userActual.rol);
+  const cambiarEstacion = (v) => { guardarEstacion(v); setEstacionVer((n) => n + 1); };
+  // Modo monitor: el cocinero entra directo a la pantalla de cocina; el administrador la abre desde Cocina
+  const enMonitor = puedeEditar(userActual, "cocina") && (monitorPref ?? (userActual.rol === "cocinero" && ajustes.modoCocina === "monitor"));
+  const comunes = (<>
+    <ImpresionAutomatica data={data} estacion={estacion} ajustes={ajustes} />
+    {printTicket && <TicketModal t={printTicket} negocio={data.nombreNegocio} formatoInicial="cocina" onClose={() => setPrintTicket(null)} />}
+    {dispositivoAbierto && <DispositivoModal user={userActual} ajustes={ajustes} estacion={estacion} onCambiar={cambiarEstacion}
+      onClose={() => setDispositivoAbierto(false)} />}
+    {cambiandoPin && (
+      <CambiarPin usuario={userActual} onSalir={cerrarSesion} onCancelar={() => setCambiandoPin(false)}
+        onListo={() => { setCambiandoPin(false); toast("PIN actualizado", "ok"); }} />
+    )}
+    {hosts}
+  </>);
+
+  if (enMonitor) {
+    return (
+      <div className="app-monitor">
+        <style>{CSS}</style>
+        <MonitorCocina data={data} db={db} user={userActual} conn={sinRed ? "sinred" : conn} incierta={cocinaIncierta}
+          errorCarga={errorCarga} onImprimir={abrirImpresion} onDispositivo={() => setDispositivoAbierto(true)}
+          onCerrar={() => setMonitorPref(false)} onSalir={salir} />
+        {comunes}
+      </div>
+    );
+  }
 
   return (
     <div className="app">
       <style>{CSS}</style>
-      <TopBar data={data} user={userActual} view={view} go={go} conn={sinRed ? "sinred" : conn}
-        onLogout={salir} onCambiarPin={() => setCambiandoPin(true)} />
+      <TopBar data={data} user={userActual} view={view} go={go} conn={sinRed ? "sinred" : conn} estacion={estacion}
+        onLogout={salir} onCambiarPin={() => setCambiandoPin(true)} onDispositivo={() => setDispositivoAbierto(true)} />
       {(errorCarga || sinRed) && (
         <div className={"aviso-barra" + (sinRed ? " error" : "")} role="alert">
           <span>{sinRed ? "Sin conexión con el servidor. Lo que ves puede no estar actualizado; los envíos no se confirmarán hasta reconectar."
@@ -359,19 +392,14 @@ export default function App() {
                 const n = { ...bs }; delete n[claveCtx]; return n;
               })} />
           : <SinAcceso />)}
-        {view === "cocina"     && (puede(userActual, "cocina") ? <Cocina {...props} errorCarga={errorCarga || (sinRed ? { message: "sin conexión" } : null)} /> : <SinAcceso />)}
+        {view === "cocina"     && (puede(userActual, "cocina") ? <Cocina {...props} errorCarga={errorCarga || (sinRed ? { message: "sin conexión" } : null)}
+          abrirMonitor={() => setMonitorPref(true)} /> : <SinAcceso />)}
         {view === "inventario" && (puede(userActual, "inventario") ? <Inventario {...props} /> : <SinAcceso />)}
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
       </main>
-      {printTicket && <TicketModal t={printTicket} negocio={data.nombreNegocio} autoPrint={printAuto} formatoInicial="cocina"
-        onClose={() => { setPrintTicket(null); setPrintAuto(false); }} />}
       {cobro && <CobroModal {...cobro} db={db} negocio={data.nombreNegocio} onClose={() => setCobro(null)} />}
-      {cambiandoPin && (
-        <CambiarPin usuario={userActual} onSalir={cerrarSesion} onCancelar={() => setCambiandoPin(false)}
-          onListo={() => { setCambiandoPin(false); toast("PIN actualizado", "ok"); }} />
-      )}
-      {hosts}
+      {comunes}
     </div>
   );
 }
@@ -603,7 +631,7 @@ function CambiarPin({ forzado, usuario, negocio, sinRed, onListo, onCancelar, on
 }
 
 /* ============================== TOPBAR ============================== */
-function TopBar({ data, user, view, go, conn, onLogout, onCambiarPin }) {
+function TopBar({ data, user, view, go, conn, estacion, onLogout, onCambiarPin, onDispositivo }) {
   const items = [
     { id: "mesas", label: "Mesas", corto: "Mesas", icon: Utensils },
     { id: "cocina", label: "Cocina", corto: "Cocina", icon: ChefHat },
@@ -635,6 +663,10 @@ function TopBar({ data, user, view, go, conn, onLogout, onCambiarPin }) {
       <div className="topbar-user">
         <span className="user-name">{user.nombre}</span>
         <span className={"rol-tag " + user.rol}>{ROLES[user.rol] || user.rol}</span>
+        <button type="button" className={"nav-btn ghost" + (estacion ? " con-estacion" : "")} onClick={onDispositivo}
+          aria-label={`Impresión en este dispositivo${estacion ? `: ${ESTACION_LABEL[estacion]}` : ""}`} title="Impresión en este dispositivo">
+          <Printer size={18} aria-hidden="true" />{estacion && <span className="estacion-tag">{ESTACION_LABEL[estacion]}</span>}
+        </button>
         <button type="button" className="nav-btn ghost" onClick={onCambiarPin} aria-label="Cambiar mi PIN" title="Cambiar mi PIN"><KeyRound size={18} aria-hidden="true" /></button>
         <button type="button" className="nav-btn ghost" onClick={onLogout} aria-label={`Cerrar sesión de ${user.nombre}`} title="Cerrar sesión"><LogOut size={18} aria-hidden="true" /></button>
       </div>
@@ -1418,9 +1450,7 @@ function ticketView(t) {
 const esBebida = (it) => it.cat === "bebida" || (it.key || "").startsWith("beb-");
 const itemPrecio = (it) => (it.precio || 0) * it.cantidad;
 
-const AUTOPRINT_KEY = "tequeria_autoprint";
-const getAutoprint = () => { try { return localStorage.getItem(AUTOPRINT_KEY) === "1"; } catch { return false; } };
-const setAutoprintLS = (v) => { try { localStorage.setItem(AUTOPRINT_KEY, v ? "1" : "0"); } catch {} };
+const AUTOPRINT_KEY = "tequeria_autoprint";   // versión anterior: «auto-imprimir en cocina»
 
 // Sonido corto (beep) sin archivos
 function beep() {
@@ -1640,23 +1670,13 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
 const PAPEL_KEY = "tequeria_papel";
 const leerPapel = () => { try { return localStorage.getItem(PAPEL_KEY) === "80" ? 80 : 58; } catch { return 58; } };
 
-function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta" }) {
+const guardarPapel = (mm) => { try { localStorage.setItem(PAPEL_KEY, String(mm)); } catch {} };
+const estiloPapel = (papel) => `@media print{@page{size:${papel}mm auto;} html,body{width:${papel}mm;} #print-area{width:${papel}mm!important;}}`;
+
+// El papel del ticket: «cuenta» para el cliente (con precios) o «cocina» (comanda sin precios)
+function TicketPapel({ t, negocio, formato, papel, modo = t.cuenta || "junta" }) {
   const ex = t.extras || [];
   const ordenes = t.ordenes || [];
-  const [formato, setFormato] = useState(formatoInicial);   // "cuenta" (cliente) | "cocina"
-  const [modo, setModo] = useState(t.cuenta || "junta");     // "junta" | "separada"
-  const [papel, setPapel] = useState(leerPapel);
-  const [auto, setAuto] = useState(getAutoprint());
-  const doPrint = () => { setTimeout(() => window.print(), 80); };
-  const cambiarPapel = (mm) => { setPapel(mm); try { localStorage.setItem(PAPEL_KEY, String(mm)); } catch {} };
-
-  useEffect(() => {
-    if (autoPrint) {
-      const id = setTimeout(() => window.print(), 350);
-      return () => clearTimeout(id);
-    }
-  }, []);
-
   const total = ordenes.reduce((s, o) => s + o.items.reduce((a, i) => a + itemPrecio(i), 0), 0) + ex.reduce((a, e) => a + itemPrecio(e), 0);
   const tv = ticketView(t);
 
@@ -1767,10 +1787,20 @@ function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta"
     </div>
   );
 
+  return formato === "cocina" ? cocina : cuenta;
+}
+
+function TicketModal({ t, negocio, onClose, formatoInicial = "cuenta" }) {
+  const ordenes = t.ordenes || [];
+  const [formato, setFormato] = useState(formatoInicial);   // "cuenta" (cliente) | "cocina"
+  const [modo, setModo] = useState(t.cuenta || "junta");     // "junta" | "separada"
+  const [papel, setPapel] = useState(leerPapel);
+  const doPrint = () => { setTimeout(() => window.print(), 80); };
+  const cambiarPapel = (mm) => { setPapel(mm); guardarPapel(mm); };
   return (
     <Modal titulo={`Ticket · ${t.origen}`} icono={<Printer size={20} aria-hidden="true" />} onClose={onClose} className="modal-ticket">
-      <style>{`@media print{@page{size:${papel}mm auto;} html,body{width:${papel}mm;} #print-area{width:${papel}mm!important;}}`}</style>
-      {formato === "cocina" ? cocina : cuenta}
+      <style>{estiloPapel(papel)}</style>
+      <TicketPapel t={t} negocio={negocio} formato={formato} papel={papel} modo={modo} />
       <div className="ticket-opciones no-print">
         <div className="ticket-modos" role="group" aria-label="Formato">
           <button type="button" className="seg-b" aria-pressed={formato === "cuenta"} onClick={() => setFormato("cuenta")}>Cuenta</button>
@@ -1787,15 +1817,343 @@ function TicketModal({ t, negocio, onClose, autoPrint, formatoInicial = "cuenta"
           <button type="button" className="seg-b" aria-pressed={modo === "separada"} onClick={() => setModo("separada")}>Separada</button>
         </div>
       )}
-      <label className="auto-print no-print">
-        <input type="checkbox" checked={auto} onChange={(e) => { setAuto(e.target.checked); setAutoprintLS(e.target.checked); }} />
-        Auto-imprimir nuevos pedidos en cocina
-      </label>
       <div className="modal-actions no-print">
         <button type="button" className="btn btn-ghost" onClick={onClose}>Cerrar</button>
         <button type="button" className="btn btn-primary" onClick={doPrint}><Printer size={16} aria-hidden="true" /> Imprimir</button>
       </div>
     </Modal>
+  );
+}
+
+/* ============================== ESTACIONES DE IMPRESIÓN ============================== */
+// Cada dispositivo puede ser la «barra» (imprime el ticket del cliente de cada pedido nuevo)
+// o la «cocina» (imprime la comanda). En modo monitor la cocina imprime solo si el negocio lo pide.
+const ESTACION_KEY = "tequeria_estacion";
+const ESTACIONES = { barra: ["mesero", "admin"], cocina: ["cocinero", "admin"] };
+const ESTACION_LABEL = { barra: "Barra", cocina: "Cocina" };
+function leerEstacion(rol) {
+  let v = "";
+  try { v = localStorage.getItem(ESTACION_KEY) ?? (localStorage.getItem(AUTOPRINT_KEY) === "1" ? "cocina" : ""); } catch {}
+  return ESTACIONES[v]?.includes(rol) ? v : "";
+}
+const guardarEstacion = (v) => { try { localStorage.setItem(ESTACION_KEY, v); localStorage.removeItem(AUTOPRINT_KEY); } catch {} };
+
+// Imprime en cola, sin abrir diálogos, lo que le toca a la estación de este dispositivo
+function ImpresionAutomatica({ data, estacion, ajustes }) {
+  const vistos = useRef(null);
+  const [cola, setCola] = useState([]);
+  const cocinaImprime = estacion === "cocina" && (ajustes.modoCocina === "impresora" || ajustes.imprimirCocinaMonitor);
+
+  useEffect(() => {
+    const ts = data.cocina || [];
+    if (vistos.current === null) { vistos.current = new Set(ts.map((t) => t.id)); return; }   // lo que ya estaba no se reimprime
+    const nuevos = ts.filter((t) => !vistos.current.has(t.id)).reverse();                      // del más antiguo al más nuevo
+    nuevos.forEach((t) => vistos.current.add(t.id));
+    const trabajos = nuevos.flatMap((t) => (estacion === "barra" ? (t.reenvio ? [] : [{ t, formato: "cuenta" }])
+      : cocinaImprime ? [{ t, formato: "cocina" }] : []));
+    if (trabajos.length) setCola((c) => [...c, ...trabajos]);
+  }, [data.cocina]);
+
+  const actual = cola[0];
+  useEffect(() => {
+    if (!actual) return;
+    let fin = false, espera, respaldo;
+    const siguiente = () => {
+      if (fin) return;
+      fin = true; clearTimeout(espera); clearTimeout(respaldo);
+      window.removeEventListener("afterprint", siguiente);
+      setCola((c) => c.slice(1));
+    };
+    const imprimir = () => {
+      // si hay otro ticket abierto en pantalla (por ejemplo una cuenta), espera a que se cierre
+      if (document.querySelectorAll("#print-area").length > 1) { espera = setTimeout(imprimir, 1500); return; }
+      window.addEventListener("afterprint", siguiente);
+      respaldo = setTimeout(siguiente, 20000);   // por si el navegador no avisa al terminar
+      window.print();
+    };
+    espera = setTimeout(imprimir, 300);
+    return () => { fin = true; clearTimeout(espera); clearTimeout(respaldo); window.removeEventListener("afterprint", siguiente); };
+  }, [actual]);
+
+  if (!actual) return null;
+  const papel = leerPapel();
+  return (
+    <div className="impresion-oculta" aria-hidden="true">
+      <style>{estiloPapel(papel)}</style>
+      <TicketPapel t={actual.t} negocio={data.nombreNegocio} formato={actual.formato} papel={papel} />
+    </div>
+  );
+}
+
+function DispositivoModal({ user, ajustes, estacion, onCambiar, onClose }) {
+  const id = useId();
+  const [papel, setPapel] = useState(leerPapel);
+  const monitor = ajustes.modoCocina === "monitor";
+  const opciones = [
+    { k: "", label: "Ninguna", desc: "No imprime solo. Cualquier ticket se puede imprimir a mano." },
+    { k: "barra", label: "Barra", desc: "Imprime el ticket del cliente (con folio y precios) de cada pedido nuevo." },
+    { k: "cocina", label: "Cocina", desc: !monitor ? "Imprime la comanda de cada pedido nuevo."
+      : ajustes.imprimirCocinaMonitor ? "Modo monitor: además de la pantalla, imprime la comanda de cada pedido nuevo."
+      : "Modo monitor: la cocina trabaja en la pantalla y no imprime (se puede activar en Administración → Cocina)." },
+  ].filter((o) => !o.k || ESTACIONES[o.k].includes(user.rol));
+  return (
+    <Modal titulo="Impresión en este dispositivo" icono={<Printer size={20} aria-hidden="true" />} onClose={onClose}>
+      <div className="modal-body">
+        <p className="muted small" style={{ margin: 0 }}>Se guarda solo en este dispositivo. Para imprimir sin la ventana del navegador, usa Chrome con impresión silenciosa (opción <code>--kiosk-printing</code>).</p>
+        <div className="etq-sec" id={id + "e"}>Estación</div>
+        <div className="opciones-estacion" role="radiogroup" aria-labelledby={id + "e"}>
+          {opciones.map((o) => (
+            <label key={o.k || "ninguna"} className="opcion-estacion">
+              <input type="radio" name={id + "estacion"} checked={estacion === o.k} onChange={() => onCambiar(o.k)} />
+              <span><b>{o.label}</b><span className="muted small">{o.desc}</span></span>
+            </label>
+          ))}
+        </div>
+        <div className="etq-sec" id={id + "p"}>Papel</div>
+        <div className="ticket-modos" role="group" aria-labelledby={id + "p"}>
+          {[58, 80].map((mm) => (
+            <button key={mm} type="button" className="seg-b" aria-pressed={papel === mm} onClick={() => { setPapel(mm); guardarPapel(mm); }}>{mm} mm</button>
+          ))}
+        </div>
+      </div>
+      <div className="modal-actions"><button type="button" className="btn btn-primary" data-autofocus onClick={onClose}>Listo</button></div>
+    </Modal>
+  );
+}
+
+/* ============================== MONITOR DE COCINA ============================== */
+const SONIDO_KEY = "tequeria_monitor_sonido";
+const HECHOS_KEY = "tequeria_monitor_hechos";
+const leerLS = (k, def) => { try { const v = localStorage.getItem(k); return v == null ? def : JSON.parse(v); } catch { return def; } };
+const guardarLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+function pitido() {
+  try {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return;
+    const ctx = pitido.ctx || (pitido.ctx = new C());
+    [0, 0.22].forEach((d) => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t0 = ctx.currentTime + d;
+      o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.25, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+      o.connect(g).connect(ctx.destination);
+      o.start(t0); o.stop(t0 + 0.2);
+    });
+  } catch {}
+}
+const fmtCrono = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  return (h ? `${h}:${String(m).padStart(2, "0")}` : String(m)) + ":" + String(x).padStart(2, "0");
+};
+const creadoMs = (t) => (t.creado ? new Date(t.creado).getTime() : null);
+
+// Pantalla grande para la cocina: comandas de la más antigua a la más nueva, con tiempo de espera,
+// productos en orden de categoría, «Empezar» y «Listo». Los productos se pueden tachar al prepararlos.
+function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir, onDispositivo, onCerrar, onSalir }) {
+  const [ahora, setAhora] = useState(() => Date.now());
+  const [sonido, setSonido] = useState(() => leerLS(SONIDO_KEY, true));
+  const [resumen, setResumen] = useState(() => typeof window !== "undefined" && window.innerWidth >= 1100);
+  const [hechos, setHechos] = useState(() => new Set(leerLS(HECHOS_KEY, [])));
+  const [nuevos, setNuevos] = useState(() => new Set());
+  const [completa, setCompleta] = useState(false);
+  const vistos = useRef(null);
+  const confirmados = useRef(new Set());
+
+  const todos = data.cocina || [];
+  const orden = (a, b) => (creadoMs(a) ?? 0) - (creadoMs(b) ?? 0);
+  const pend = todos.filter((t) => t.estado !== "listo").sort(orden);
+  const listos = todos.filter((t) => t.estado === "listo").sort((a, b) => orden(b, a));
+  const enProceso = pend.filter((t) => t.estado === "preparando").length;
+
+  useEffect(() => { const iv = setInterval(() => setAhora(Date.now()), 1000); return () => clearInterval(iv); }, []);
+
+  // Comanda nueva: se resalta unos segundos y suena (si el sonido está activo)
+  useEffect(() => {
+    const ids = pend.map((t) => t.id);
+    if (vistos.current === null) { vistos.current = new Set(ids); return; }
+    const recien = ids.filter((x) => !vistos.current.has(x));
+    ids.forEach((x) => vistos.current.add(x));
+    if (!recien.length) return;
+    if (sonido) pitido();
+    setNuevos((s) => new Set([...s, ...recien]));
+    const t = setTimeout(() => setNuevos((s) => { const n = new Set(s); recien.forEach((x) => n.delete(x)); return n; }), 8000);
+    return () => clearTimeout(t);
+  }, [data.cocina]);
+
+  // Lo que aparece en el monitor pasa a «Recibido» para el mesero
+  useEffect(() => {
+    if (document.visibilityState !== "visible") return;
+    const ids = pend.filter((t) => !t.recibido && !confirmados.current.has(t.id)).map((t) => t.id);
+    if (!ids.length) return;
+    ids.forEach((x) => confirmados.current.add(x));
+    db.marcarRecibido(ids);
+  }, [data.cocina]);
+
+  // Los tachados solo se guardan mientras la comanda siga pendiente
+  useEffect(() => {
+    const vivos = new Set(pend.map((t) => t.id));
+    const limpio = [...hechos].filter((k) => vivos.has(k.split("|")[0]));
+    if (limpio.length !== hechos.size) setHechos(new Set(limpio));
+  }, [data.cocina]);
+  useEffect(() => { guardarLS(HECHOS_KEY, [...hechos]); }, [hechos]);
+  useEffect(() => { guardarLS(SONIDO_KEY, sonido); }, [sonido]);
+
+  // La pantalla no se apaga mientras el monitor está abierto
+  useEffect(() => {
+    let lock = null, vivo = true;
+    const pedir = async () => {
+      try { if (vivo && document.visibilityState === "visible" && navigator.wakeLock) lock = await navigator.wakeLock.request("screen"); } catch {}
+    };
+    pedir();
+    document.addEventListener("visibilitychange", pedir);
+    return () => { vivo = false; document.removeEventListener("visibilitychange", pedir); try { lock?.release(); } catch {} };
+  }, []);
+
+  useEffect(() => {
+    const f = () => setCompleta(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", f);
+    return () => document.removeEventListener("fullscreenchange", f);
+  }, []);
+  const pantallaCompleta = () => {
+    try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.(); } catch {}
+  };
+
+  const avanzar = (t) => db.setTicketEstado(t.id, t.estado === "pendiente" ? "preparando" : "listo");
+  // Teclado o «bump bar»: 1–9 avanza la comanda de esa posición
+  const avanzarRef = useRef(null);
+  avanzarRef.current = (n) => { const t = pend[n - 1]; if (t) avanzar(t); };
+  useEffect(() => {
+    const f = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || /input|select|textarea/i.test(e.target?.tagName || "")) return;
+      if (document.querySelector(".modal-bg")) return;
+      if (/^[1-9]$/.test(e.key)) avanzarRef.current(Number(e.key));
+    };
+    window.addEventListener("keydown", f);
+    return () => window.removeEventListener("keydown", f);
+  }, []);
+
+  const alternarHecho = (k) => setHechos((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
+  const quitarListos = () => listos.forEach((t) => db.archivarTicket(t.id));
+  const totales = porPreparar(pend, (k) => hechos.has(k));
+  const reloj = fmtHora.format(new Date(ahora));
+  const avisoConexion = conn === "sinred" ? "Sin conexión: lo que ves puede no estar actualizado."
+    : errorCarga ? "No se pudieron actualizar los datos." : incierta ? "No se pudo confirmar que este dispositivo siga siendo la cocina activa." : null;
+
+  // (función y no componente: así los botones no se vuelven a montar con cada segundo del reloj)
+  const linea = (t, oid, it) => {
+    const k = `${t.id}|${oid}|${it.key}`;
+    const hecho = hechos.has(k);
+    return (
+      <button key={it.key} type="button" className={"mon-item" + (hecho ? " hecho" : "")} aria-pressed={hecho} onClick={() => alternarHecho(k)}
+        aria-label={`${it.cantidad} ${it.nombre}${hecho ? ", preparado" : ""}`}>
+        <span className="mon-q" aria-hidden="true">{it.cantidad}</span><span className="mon-n" aria-hidden="true">{it.corto || it.nombre}</span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="monitor">
+      <header className="mon-top">
+        <div className="mon-marca"><Logo className="mon-logo" /><div><b>{data.nombreNegocio}</b><span>Monitor de cocina</span></div></div>
+        <div className="mon-cuentas" role="status" aria-live="polite">
+          <span className="mon-c nuevo">Por empezar <b>{pend.length - enProceso}</b></span>
+          <span className="mon-c proceso">En proceso <b>{enProceso}</b></span>
+          <span className="mon-c listo">Listos <b>{listos.length}</b></span>
+        </div>
+        <div className="mon-reloj" aria-label={`Hora ${reloj}`}>{reloj}</div>
+        <div className="mon-acciones">
+          <button type="button" className="mon-tool" aria-pressed={resumen} onClick={() => setResumen((v) => !v)} aria-label="Por preparar" title="Por preparar"><ListChecks size={20} aria-hidden="true" /><span>Por preparar</span></button>
+          <button type="button" className="mon-tool" aria-pressed={sonido} onClick={() => { setSonido((v) => !v); if (!sonido) pitido(); }} aria-label={sonido ? "Sonido activado" : "Sonido desactivado"} title="Sonido">
+            {sonido ? <Volume2 size={20} aria-hidden="true" /> : <VolumeX size={20} aria-hidden="true" />}</button>
+          <button type="button" className="mon-tool" onClick={pantallaCompleta} aria-label={completa ? "Salir de pantalla completa" : "Pantalla completa"} title="Pantalla completa">
+            {completa ? <Minimize size={20} aria-hidden="true" /> : <Maximize size={20} aria-hidden="true" />}</button>
+          <button type="button" className="mon-tool" onClick={onDispositivo} aria-label="Impresión en este dispositivo" title="Impresión"><Printer size={20} aria-hidden="true" /></button>
+          <button type="button" className="mon-tool" onClick={onCerrar} aria-label="Cocina clásica" title="Ver la cocina clásica (ventas y corte)"><ChefHat size={20} aria-hidden="true" /><span>Clásica</span></button>
+          {user.rol === "cocinero" && (
+            <button type="button" className="mon-tool" onClick={onSalir} aria-label={`Cerrar sesión de ${user.nombre}`} title="Cerrar sesión"><LogOut size={20} aria-hidden="true" /></button>
+          )}
+        </div>
+      </header>
+      {avisoConexion && <div className="mon-aviso" role="alert">{avisoConexion}</div>}
+
+      <div className="mon-cuerpo">
+        <main className="mon-grid" aria-label="Comandas por preparar">
+          {pend.length === 0 && <div className="mon-vacio"><Check size={40} aria-hidden="true" /><p>Sin comandas pendientes</p></div>}
+          {pend.map((t, i) => {
+            const tv = ticketView(t);
+            const ms = creadoMs(t) != null ? ahora - creadoMs(t) : null;
+            const min = ms != null ? ms / 60000 : 0;
+            const nivel = min >= 20 ? " alta" : min >= 10 ? " media" : "";
+            return (
+              <article key={t.id} className={"mon-card " + t.estado + nivel + (nuevos.has(t.id) ? " nuevo" : "")}
+                aria-label={`${i + 1}. ${t.origen}${t.esExtra ? ", orden extra" : ""}, ${t.estado === "preparando" ? "en proceso" : "por empezar"}`}>
+                <header className="mon-card-h" style={{ background: tv.color }}>
+                  <span className="mon-pos" aria-hidden="true">{i + 1}</span>
+                  <div className="mon-orig"><b>{t.origen}</b>
+                    <small>{tv.label}{t.esExtra ? " · orden extra" : ""}{t.reenvio ? " · reimpresión" : ""}</small></div>
+                  {ms != null && <span className="mon-tiempo" aria-label={`Espera ${Math.floor(min)} minutos`}>{fmtCrono(ms)}</span>}
+                </header>
+                <div className="mon-meta">
+                  <span>{t.folio ? `#${t.folio} · ` : ""}{t.hora} · {t.mesero}</span>
+                  {t.estado === "preparando" && <b className="mon-en-proceso">EN PROCESO</b>}
+                  <span className="mon-tacos" title="Tacos en total"><span aria-hidden="true">🌮 </span>{contarTacos(t)}<span className="sr-only"> tacos</span></span>
+                </div>
+                {t.domicilio && !t.domicilio.anonimizado && t.domicilio.nombre && <div className="mon-dom">Para: {t.domicilio.nombre}</div>}
+                <div className="mon-items">
+                  {(t.ordenes || []).map((o) => (
+                    <section key={o.id} className="mon-orden">
+                      <div className="mon-oname">{o.nombre}{o.prep ? <em> · {PREP_LABEL[o.prep] || o.prep}</em> : null}</div>
+                      {ordenarItems(o.items).map((it) => linea(t, o.id, it))}
+                    </section>
+                  ))}
+                  {(t.extras || []).length > 0 && (
+                    <section className="mon-orden">
+                      <div className="mon-oname">Para todo el pedido</div>
+                      {ordenarItems(t.extras).map((it) => linea(t, "extras", it))}
+                    </section>
+                  )}
+                </div>
+                <footer className="mon-card-f">
+                  <button type="button" className="mon-ico" onClick={() => onImprimir(t)} aria-label={`Imprimir ${t.origen}`} title="Imprimir"><Printer size={18} aria-hidden="true" /></button>
+                  {t.estado === "pendiente" && (
+                    <button type="button" className="mon-btn empezar" onClick={() => db.setTicketEstado(t.id, "preparando")}
+                      aria-label={`Empezar ${t.origen}`}><Play size={18} aria-hidden="true" /> Empezar</button>
+                  )}
+                  <button type="button" className="mon-btn listo" onClick={() => db.setTicketEstado(t.id, "listo")}
+                    aria-label={`Listo ${t.origen}`}><Check size={18} aria-hidden="true" /> Listo</button>
+                </footer>
+              </article>
+            );
+          })}
+        </main>
+        {resumen && (
+          <aside className="mon-resumen" aria-label="Por preparar">
+            <h2>Por preparar</h2>
+            {totales.length === 0 ? <p className="mon-resumen-vacio">Nada pendiente</p> : (
+              <ul>{totales.map((x) => <li key={x.key}><b>{x.cantidad}</b><span>{x.nombre}</span></li>)}</ul>
+            )}
+            <p className="mon-ayuda">Toca un producto para tacharlo. Teclas 1–9: avanzar esa comanda.</p>
+          </aside>
+        )}
+      </div>
+
+      {listos.length > 0 && (
+        <footer className="mon-listos" aria-label="Listos">
+          <span className="mon-listos-t">Listos</span>
+          <div className="mon-listos-fila">
+            {listos.slice(0, 12).map((t) => (
+              <span key={t.id} className="mon-listo">
+                {t.folio ? `#${t.folio} ` : ""}{t.origen}
+                <button type="button" onClick={() => db.setTicketEstado(t.id, "preparando")} aria-label={`Regresar ${t.origen} a preparación`} title="Regresar"><Undo2 size={16} aria-hidden="true" /></button>
+                <button type="button" onClick={() => db.archivarTicket(t.id)} aria-label={`Quitar ${t.origen} de listos`} title="Quitar"><X size={16} aria-hidden="true" /></button>
+              </span>
+            ))}
+          </div>
+          <button type="button" className="mon-tool" onClick={quitarListos}>Quitar todos</button>
+        </footer>
+      )}
+    </div>
   );
 }
 
@@ -1815,7 +2173,6 @@ function CocinaAlertas({ data, onAbrir }) {
       const t0 = recien[0];
       notificar("Nuevo pedido", (t0.esExtra ? "Orden extra · " : "") + t0.origen + (recien.length > 1 ? ` (+${recien.length - 1})` : ""));
       setNuevos((xs) => [...recien, ...xs].slice(0, 8));
-      if (getAutoprint()) onAbrir(recien[0], true);
     }
   }, [data.cocina]);
 
@@ -1875,7 +2232,7 @@ function EstadoPedido({ ts }) {
   );
 }
 
-function Cocina({ data, db, user, errorCarga }) {
+function Cocina({ data, db, user, errorCarga, abrirMonitor }) {
   const edita = puedeEditar(user, "cocina");
   const [tab, setTab] = useState("pendientes");
   const [ticket, setTicket] = useState(null);
@@ -1929,7 +2286,9 @@ function Cocina({ data, db, user, errorCarga }) {
   return (
     <div className="screen">
       <div className="screen-head"><div><h2>Cocina</h2>
-        <p className="muted">{edita ? "Comandas en preparación y ventas del periodo (desde el último corte)." : "Vista de comandas pendientes (solo lectura)."}</p></div></div>
+        <p className="muted">{edita ? "Comandas en preparación y ventas del periodo (desde el último corte)." : "Vista de comandas pendientes (solo lectura)."}</p></div>
+        {edita && <button type="button" className="btn btn-line" onClick={abrirMonitor}><MonitorIcon size={16} aria-hidden="true" /> Abrir monitor</button>}
+      </div>
 
       {edita && (
         <div className="admin-tabs" role="tablist" aria-label="Secciones de cocina">
@@ -2178,7 +2537,7 @@ function Admin({ data, db, user }) {
       <div className="screen-head"><div><h2>Administración</h2>
         <p className="muted">Solo el administrador. Aquí defines precios, productos y usuarios.</p></div></div>
       <div className="admin-tabs" role="tablist" aria-label="Secciones de administración">
-        {[["precios", "Precios"], ["productos", "Productos"], ["meseros", "Usuarios"]].map(([k, l]) => (
+        {[["precios", "Precios"], ["productos", "Productos"], ["meseros", "Usuarios"], ["cocina", "Cocina"]].map(([k, l]) => (
           <button type="button" role="tab" key={k} aria-selected={tab === k} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
@@ -2186,7 +2545,41 @@ function Admin({ data, db, user }) {
         {tab === "precios" && <AdminPrecios data={data} db={db} />}
         {tab === "productos" && <AdminProductos data={data} db={db} />}
         {tab === "meseros" && <AdminMeseros data={data} db={db} user={user} />}
+        {tab === "cocina" && <AdminCocina data={data} db={db} />}
       </div>
+    </div>
+  );
+}
+
+function AdminCocina({ data, db }) {
+  const aj = leerAjustes(data);
+  const id = useId();
+  return (
+    <div className="admin-cocina">
+      <h3 className="sub-h" id={id + "m"}>Modo de la cocina</h3>
+      <div className="modos-cocina" role="group" aria-labelledby={id + "m"}>
+        <button type="button" aria-pressed={aj.modoCocina === "impresora"} onClick={() => db.fijarAjuste("modoCocina", "impresora")}>
+          <Printer size={26} aria-hidden="true" /><b>Impresora</b>
+          <span>La cocina imprime cada comanda y la barra el ticket del cliente.</span>
+        </button>
+        <button type="button" aria-pressed={aj.modoCocina === "monitor"} onClick={() => db.fijarAjuste("modoCocina", "monitor")}>
+          <MonitorIcon size={26} aria-hidden="true" /><b>Monitor</b>
+          <span>La cocina ve y procesa las comandas en una pantalla grande. La barra sigue imprimiendo el ticket del cliente.</span>
+        </button>
+      </div>
+      {aj.modoCocina === "monitor" && (
+        <label className="check-linea">
+          <input type="checkbox" checked={aj.imprimirCocinaMonitor} onChange={(e) => db.fijarAjuste("imprimirCocinaMonitor", e.target.checked)} />
+          Imprimir también la comanda en cocina
+        </label>
+      )}
+      <h3 className="sub-h">Cómo se usa</h3>
+      <ol className="pasos-cocina">
+        <li>En cada dispositivo toca el botón de impresora (arriba) y elige su estación: <b>Barra</b> para el que imprime los tickets de los clientes, <b>Cocina</b> para el de la cocina.</li>
+        <li>En modo <b>Monitor</b>, al entrar con un usuario <b>Cocinero</b> se abre la pantalla de cocina. Un administrador la abre desde Cocina → «Abrir monitor».</li>
+        <li>En el monitor: «Empezar» marca la comanda en proceso y «Listo» la entrega. Toca un producto para tacharlo; las teclas 1–9 avanzan la comanda de esa posición.</li>
+        <li>Para imprimir sin la ventana del navegador, abre Chrome con impresión silenciosa (<code>--kiosk-printing</code>).</li>
+      </ol>
     </div>
   );
 }
