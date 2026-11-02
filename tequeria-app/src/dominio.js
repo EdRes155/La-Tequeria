@@ -219,26 +219,47 @@ export function sugerenciasEfectivo(total) {
 export const porCobrarDeMesa = (porCobrar, mesaId) => (porCobrar || []).filter((t) => t.mesaId === mesaId);
 
 /* Ajustes del negocio (Administración → Cocina). Mismas reglas que public.fijar_ajuste */
-export const AJUSTES_DEFAULT = { modoCocina: "impresora", imprimirCocinaMonitor: false };
+export const AJUSTES_DEFAULT = { modoCocina: "impresora", imprimirCocinaMonitor: false, variasCocinas: false };
 export const AJUSTES_VALIDOS = {
   modoCocina: (v) => v === "impresora" || v === "monitor",
   imprimirCocinaMonitor: (v) => typeof v === "boolean",
+  variasCocinas: (v) => typeof v === "boolean",
 };
 export const leerAjustes = (data) => ({ ...AJUSTES_DEFAULT, ...(data?.ajustes || {}) });
 
-// Totales por producto de varias comandas: lo que la cocina tiene por preparar
-export function porPreparar(tickets, hecho = () => false) {
+// Cada producto de una comanda se identifica en cocina como «<orden>|<producto>»
+export const lineaCocina = (ordenId, it) => `${ordenId}|${it.key}`;
+
+// Totales por producto de varias comandas: lo que la cocina tiene por preparar (sin lo ya tachado)
+export function porPreparar(tickets) {
   const m = new Map();
   (tickets || []).filter((t) => !t.reenvio).forEach((t) => {
+    const hechos = new Set(t.hechos || []);
     const lineas = [...(t.ordenes || []).flatMap((o) => (o.items || []).map((it) => [o.id, it])), ...(t.extras || []).map((it) => ["extras", it])];
     lineas.forEach(([oid, it]) => {
-      if (hecho(`${t.id}|${oid}|${it.key}`)) return;
+      if (hechos.has(lineaCocina(oid, it))) return;
       const x = m.get(it.key) || { key: it.key, nombre: it.corto || it.nombre, cat: it.cat, cantidad: 0 };
       x.cantidad += it.cantidad || 0;
       m.set(it.key, x);
     });
   });
   return ordenarItems([...m.values()]);
+}
+
+// Monitor: una tarjeta por mesa (comanda original, órdenes extra y reenvíos juntos) para no repetir
+// mesas; para llevar y domicilio, una por pedido. Se respeta el orden de llegada de cada grupo.
+export function agruparComandas(tickets) {
+  const grupos = [], porMesa = new Map();
+  (tickets || []).forEach((t) => {
+    if (t.mesaId != null) {
+      const g = porMesa.get(t.mesaId);
+      if (g) { g.tickets.push(t); return; }
+      const n = { clave: `mesa-${t.mesaId}`, mesaId: t.mesaId, titulo: `Mesa ${t.mesaId}`, tickets: [t] };
+      porMesa.set(t.mesaId, n);
+      grupos.push(n);
+    } else grupos.push({ clave: t.id, mesaId: null, titulo: t.origen, tickets: [t] });
+  });
+  return grupos.map((g) => ({ ...g, comandas: g.tickets.filter((t) => !t.reenvio), reenvios: g.tickets.filter((t) => t.reenvio) }));
 }
 
 /* Estatus del pedido para el mesero. Cocina: enviado → recibido (ya está en la pantalla de cocina)

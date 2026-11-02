@@ -12,6 +12,7 @@ import {
   pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, pinDebil, hora, fecha,
   METODOS_PAGO, METODO_LABEL, sugerenciasEfectivo, porCobrarDeMesa, iniciales, colorAvatar, redondear,
   ordenarItems, nombreCocina, PASOS_PEDIDO, estadoPedido, unirTickets, pedidosDeMesa, leerAjustes, porPreparar,
+  agruparComandas, lineaCocina,
 } from "./dominio.js";
 import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
 import { CSS } from "./estilos.js";
@@ -95,6 +96,36 @@ const tieneCambios = (b) => !!b && b.sucio && tieneProductos(b);
 const claveBorrador = (ctx) => (ctx.tipo === "aqui" ? `mesa-${ctx.mesaId}` : ctx.tipo);
 
 /* ============================================================ */
+// Partes pesadas del estado y la sección que las usa (ver refrescar en App)
+const PESADAS = {
+  historial: (v) => v.view === "cocina" && !v.monitor,
+  cortes: (v) => v.view === "cocina" && !v.monitor,
+  gastos: (v) => v.view === "gastos",
+};
+
+// Si una pantalla falla al dibujarse, se muestra un aviso en vez de dejar la página en blanco
+class Resguardo extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Falla en pantalla:", error, info?.componentStack); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="screen">
+        <div className="falla" role="alert">
+          <h2>Algo falló en esta pantalla</h2>
+          <p className="muted">Lo que ya se envió está guardado en el servidor. Intenta de nuevo; si se repite, recarga la página.</p>
+          <div className="falla-acciones">
+            <button type="button" className="btn btn-primary" onClick={() => { this.setState({ error: null }); this.props.onReintentar?.(); }}>Intentar de nuevo</button>
+            <button type="button" className="btn btn-line" onClick={() => window.location.reload()}>Recargar la página</button>
+          </div>
+          <details><summary>Detalle técnico</summary><pre>{String(this.state.error?.message || this.state.error)}</pre></details>
+        </div>
+      </div>
+    );
+  }
+}
+
 export default function App() {
   const [sesion, setSesion] = useState(() => api.sesionGuardada());
   const [pantalla, setPantalla] = useState(null);
@@ -141,14 +172,30 @@ export default function App() {
     toast(e.message, "error");
   }, [cerrarSesion]);
 
+  // Partes pesadas (historial, cortes, gastos): con la pantalla en otra sección no se recargan con cada
+  // cambio; quedan pendientes y se cargan al abrir la sección que las usa.
+  const vistaRef = useRef({ view: "mesas", monitor: false });
+  const [diferidas, setDiferidas] = useState([]);
+  const diferidasRef = useRef(new Set());
+  const marcarDiferidas = (fn) => { fn(diferidasRef.current); setDiferidas([...diferidasRef.current]); };
+  const reintento = useRef(null);
+
   // Cada parte del estado solo se reemplaza con la respuesta más reciente que se pidió para ella
   const pedidas = useRef({});
   const contador = useRef(0);
-  const refrescar = useCallback(async (partes = null) => {
+  const refrescar = useCallback(async (pedido = null) => {
+    let partes = pedido;
+    if (pedido) {
+      const luego = pedido.filter((p) => PESADAS[p] && !PESADAS[p](vistaRef.current));
+      if (luego.length) marcarDiferidas((s) => luego.forEach((p) => s.add(p)));
+      partes = pedido.filter((p) => !luego.includes(p));
+      if (!partes.length) return;
+    }
     const n = ++contador.current;
     (partes || TODAS).forEach((p) => { pedidas.current[p] = n; });
     try {
       const r = await api.cargar(partes);
+      if (diferidasRef.current.size) marcarDiferidas((s) => (partes || TODAS).forEach((p) => s.delete(p)));
       const vigente = (p) => pedidas.current[p] === n;
       const parche = { yo: r.yo };
       if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, precios: r.precios, extras: r.extras, ocultos: r.ocultos, ajustes: r.ajustes || {} });
@@ -161,8 +208,11 @@ export default function App() {
       if (e.codigo === "SESION") { cerrarSesion(e.message); return; }
       if (e.codigo === "RED") setSinRed(true);
       setErrorCarga(e);
+      // se vuelve a intentar sola en unos segundos (una sola espera a la vez)
+      if (!reintento.current) reintento.current = setTimeout(() => { reintento.current = null; refrescar(pedido); }, 5000);
     }
   }, [cerrarSesion]);
+  useEffect(() => () => clearTimeout(reintento.current), []);
 
   // Cargar estado y escuchar cambios mientras haya sesión
   useEffect(() => {
@@ -172,6 +222,16 @@ export default function App() {
     const unsub = api.suscribir((partes) => { if (vivo) refrescar(partes); }, (st) => { if (vivo) setConn(st); });
     return () => { vivo = false; unsub(); };
   }, [usuario?.id, debeCambiar, refrescar]);
+
+  // Monitor: el cocinero entra directo en modo monitor; el administrador lo abre desde Cocina
+  const rolActual = (data?.yo || usuario)?.rol;
+  const monitorActivo = !!data && puedeEditar({ rol: rolActual }, "cocina")
+    && (monitorPref ?? (rolActual === "cocinero" && leerAjustes(data).modoCocina === "monitor"));
+  vistaRef.current = { view, monitor: monitorActivo };
+  useEffect(() => {
+    const listas = [...diferidasRef.current].filter((p) => PESADAS[p](vistaRef.current));
+    if (listas.length) refrescar(listas);
+  }, [view, monitorActivo, refrescar]);
 
   // Sesión única de cocina: latido mientras el cocinero esté dentro
   useEffect(() => {
@@ -217,7 +277,7 @@ export default function App() {
         return { ok: false, error: e };
       }
     };
-    const enCocina = (nd, id, fn) => [nd.cocina, nd.historial].forEach((arr) => { const x = (arr || []).find((t) => t.id === id); if (x) fn(x); });
+    const cadenas = new Map();   // peticiones en curso por producto tachado
     return {
       async enviar(t) {
         try {
@@ -237,8 +297,39 @@ export default function App() {
       // La cocina confirma lo que ya tiene en pantalla; si falla no se avisa (se reintenta con la siguiente comanda)
       marcarRecibido: async (ids) => { try { await a.marcarRecibido(ids); refrescar(["cocina", "porCobrar"]); } catch {} },
       reenviar: (mesaId) => ejecutar(() => a.reenviar(uid(), mesaId), { partes: ["cocina"], ok: "Reenviado a cocina" }),
-      setTicketEstado: (id, estado) => ejecutar(() => a.estadoTicket(id, estado), { partes: ["cocina", "historial", "porCobrar"], optimista: (nd) => enCocina(nd, id, (x) => { x.estado = estado; }) }),
-      archivarTicket: (id) => ejecutar(() => a.archivar(id), { partes: ["cocina"], optimista: (nd) => { nd.cocina = nd.cocina.filter((t) => t.id !== id); } }),
+      // Cocina: el cambio solo se aplica si la comanda sigue como la vio esta pantalla (varias pantallas a la vez)
+      async moverTickets(lista, hacia) {
+        const vistos = new Map(lista.map((x) => [x.id, x.estado]));
+        const res = await ejecutar(() => a.moverTickets(lista, hacia), {
+          partes: ["cocina", "historial", "porCobrar"],
+          optimista: (nd) => [nd.cocina, nd.historial].forEach((arr) => (arr || []).forEach((t) => {
+            if (vistos.get(t.id) === (t.estado || "pendiente")) t.estado = hacia;
+          })),
+        });
+        const n = res.ok ? res.r?.conflictos?.length || 0 : 0;
+        if (n) toast(n === lista.length ? "Otra pantalla ya había cambiado esta comanda. Se actualizó la vista."
+          : `${n} comanda(s) ya habían cambiado en otra pantalla. Se actualizó la vista.`, "info");
+        return res;
+      },
+      archivarTickets: (ids) => ejecutar(() => a.archivarTickets(ids), { partes: ["cocina"],
+        optimista: (nd) => { const s = new Set(ids); nd.cocina = (nd.cocina || []).filter((t) => !(s.has(t.id) && t.estado === "listo")); } }),
+      // Tachar un producto se ve al instante; las peticiones de un mismo producto salen en orden
+      marcarHecho(ticketId, linea, hecho) {
+        setData((d) => d && { ...d, cocina: (d.cocina || []).map((t) => {
+          if (t.id !== ticketId) return t;
+          const s = new Set(t.hechos || []);
+          if (hecho) s.add(linea); else s.delete(linea);
+          return { ...t, hechos: [...s].sort() };
+        }) });
+        const k = ticketId + "|" + linea;
+        const sig = (cadenas.get(k) || Promise.resolve()).then(async () => {
+          try { await a.marcarHecho(ticketId, linea, hecho); setSinRed(false); }
+          catch (e) { manejarError(e); refrescar(["cocina"]); }
+        });
+        cadenas.set(k, sig);
+        sig.finally(() => { if (cadenas.get(k) === sig) cadenas.delete(k); });
+        return sig;
+      },
       corte: (adminPin) => ejecutar(() => a.corte(adminPin), { partes: ["cocina", "historial", "cortes", "gastos"] }),
       ajustarBebida: (id, delta) => ejecutar(() => a.ajustarBebida(id, delta), { partes: ["bebidas"], optimista: (nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) b.cantidad = Math.max(0, b.cantidad + delta); } }),
       updateBebida: (id, cambios) => ejecutar(() => a.actualizarBebida(id, cambios), { partes: ["bebidas"], optimista: (nd) => { const b = nd.bebidas.find((x) => x.id === id); if (b) Object.assign(b, cambios); } }),
@@ -337,8 +428,7 @@ export default function App() {
   const ajustes = leerAjustes(data);
   const estacion = leerEstacion(userActual.rol);
   const cambiarEstacion = (v) => { guardarEstacion(v); setEstacionVer((n) => n + 1); };
-  // Modo monitor: el cocinero entra directo a la pantalla de cocina; el administrador la abre desde Cocina
-  const enMonitor = puedeEditar(userActual, "cocina") && (monitorPref ?? (userActual.rol === "cocinero" && ajustes.modoCocina === "monitor"));
+  const enMonitor = monitorActivo;
   const comunes = (<>
     <ImpresionAutomatica data={data} estacion={estacion} ajustes={ajustes} />
     {printTicket && <TicketModal t={printTicket} negocio={data.nombreNegocio} formatoInicial="cocina" onClose={() => setPrintTicket(null)} />}
@@ -355,9 +445,11 @@ export default function App() {
     return (
       <div className="app-monitor">
         <style>{CSS}</style>
-        <MonitorCocina data={data} db={db} user={userActual} conn={sinRed ? "sinred" : conn} incierta={cocinaIncierta}
-          errorCarga={errorCarga} onImprimir={abrirImpresion} onDispositivo={() => setDispositivoAbierto(true)}
-          onCerrar={() => setMonitorPref(false)} onSalir={salir} />
+        <Resguardo onReintentar={() => refrescar(null)}>
+          <MonitorCocina data={data} db={db} user={userActual} conn={sinRed ? "sinred" : conn} incierta={cocinaIncierta}
+            errorCarga={errorCarga} onImprimir={abrirImpresion} onDispositivo={() => setDispositivoAbierto(true)}
+            onCerrar={() => setMonitorPref(false)} onSalir={salir} />
+        </Resguardo>
         {comunes}
       </div>
     );
@@ -381,7 +473,7 @@ export default function App() {
         </div>
       )}
       {userActual.rol === "cocinero" && <CocinaAlertas data={data} onAbrir={abrirImpresion} />}
-      <main className="main">
+      <main className="main"><Resguardo key={view} onReintentar={() => refrescar(null)}>
         {view === "mesas"      && (puede(userActual, "mesas") ? <Mesas {...props} borradores={borradores} /> : <SinAcceso />)}
         {view === "comanda"    && (puede(userActual, "comanda") && ctx
           ? <Comanda key={claveCtx} {...props} borrador={borradores[claveCtx]}
@@ -393,11 +485,11 @@ export default function App() {
               })} />
           : <SinAcceso />)}
         {view === "cocina"     && (puede(userActual, "cocina") ? <Cocina {...props} errorCarga={errorCarga || (sinRed ? { message: "sin conexión" } : null)}
-          abrirMonitor={() => setMonitorPref(true)} /> : <SinAcceso />)}
+          desactualizado={diferidas.includes("historial")} abrirMonitor={() => setMonitorPref(true)} /> : <SinAcceso />)}
         {view === "inventario" && (puede(userActual, "inventario") ? <Inventario {...props} /> : <SinAcceso />)}
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
-      </main>
+      </Resguardo></main>
       {cobro && <CobroModal {...cobro} db={db} negocio={data.nombreNegocio} onClose={() => setCobro(null)} />}
       {comunes}
     </div>
@@ -480,7 +572,9 @@ function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
     if (busy || !sel || !pin) return;
     setBusy(true); setErr("");
     try {
-      const r = await api.entrar(sel, pin);
+      let r = await api.entrar(sel, pin);
+      // con varias pantallas de cocina permitidas, otra pantalla pudo entrar en el mismo segundo: se reintenta una vez
+      if (!r.ok && r.error === "cocina_ocupada") { await new Promise((ok) => setTimeout(ok, 2000)); r = await api.entrar(sel, pin); }
       if (!r.ok) { setErr(mensajePin(r)); setPin(""); setAgitar((n) => n + 1); return; }
       try { localStorage.setItem(ULTIMO_KEY, sel); } catch {}
       onEntrar(r);
@@ -1923,7 +2017,6 @@ function DispositivoModal({ user, ajustes, estacion, onCambiar, onClose }) {
 
 /* ============================== MONITOR DE COCINA ============================== */
 const SONIDO_KEY = "tequeria_monitor_sonido";
-const HECHOS_KEY = "tequeria_monitor_hechos";
 const leerLS = (k, def) => { try { const v = localStorage.getItem(k); return v == null ? def : JSON.parse(v); } catch { return def; } };
 const guardarLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 function pitido() {
@@ -1948,14 +2041,15 @@ const fmtCrono = (ms) => {
 };
 const creadoMs = (t) => (t.creado ? new Date(t.creado).getTime() : null);
 
-// Pantalla grande para la cocina: comandas de la más antigua a la más nueva, con tiempo de espera,
-// productos en orden de categoría, «Empezar» y «Listo». Los productos se pueden tachar al prepararlos.
+// Pantalla grande para la cocina: una tarjeta por mesa o pedido, de la más antigua a la más nueva, con
+// tiempo de espera, productos en orden de categoría, «Empezar» y «Listo». Los productos tachados se
+// guardan en el servidor, así que todas las pantallas de cocina ven lo mismo.
 function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir, onDispositivo, onCerrar, onSalir }) {
   const [ahora, setAhora] = useState(() => Date.now());
   const [sonido, setSonido] = useState(() => leerLS(SONIDO_KEY, true));
   const [resumen, setResumen] = useState(() => typeof window !== "undefined" && window.innerWidth >= 1100);
-  const [hechos, setHechos] = useState(() => new Set(leerLS(HECHOS_KEY, [])));
   const [nuevos, setNuevos] = useState(() => new Set());
+  const [ocupados, setOcupados] = useState(() => new Set());   // tarjetas con una petición en curso
   const [completa, setCompleta] = useState(false);
   const vistos = useRef(null);
   const confirmados = useRef(new Set());
@@ -1964,7 +2058,8 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
   const orden = (a, b) => (creadoMs(a) ?? 0) - (creadoMs(b) ?? 0);
   const pend = todos.filter((t) => t.estado !== "listo").sort(orden);
   const listos = todos.filter((t) => t.estado === "listo").sort((a, b) => orden(b, a));
-  const enProceso = pend.filter((t) => t.estado === "preparando").length;
+  const grupos = agruparComandas(pend);
+  const enProceso = grupos.filter((g) => g.tickets.some((t) => t.estado === "preparando")).length;
 
   useEffect(() => { const iv = setInterval(() => setAhora(Date.now()), 1000); return () => clearInterval(iv); }, []);
 
@@ -1977,8 +2072,7 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
     if (!recien.length) return;
     if (sonido) pitido();
     setNuevos((s) => new Set([...s, ...recien]));
-    const t = setTimeout(() => setNuevos((s) => { const n = new Set(s); recien.forEach((x) => n.delete(x)); return n; }), 8000);
-    return () => clearTimeout(t);
+    setTimeout(() => setNuevos((s) => { const n = new Set(s); recien.forEach((x) => n.delete(x)); return n; }), 8000);
   }, [data.cocina]);
 
   // Lo que aparece en el monitor pasa a «Recibido» para el mesero
@@ -1989,14 +2083,6 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
     ids.forEach((x) => confirmados.current.add(x));
     db.marcarRecibido(ids);
   }, [data.cocina]);
-
-  // Los tachados solo se guardan mientras la comanda siga pendiente
-  useEffect(() => {
-    const vivos = new Set(pend.map((t) => t.id));
-    const limpio = [...hechos].filter((k) => vivos.has(k.split("|")[0]));
-    if (limpio.length !== hechos.size) setHechos(new Set(limpio));
-  }, [data.cocina]);
-  useEffect(() => { guardarLS(HECHOS_KEY, [...hechos]); }, [hechos]);
   useEffect(() => { guardarLS(SONIDO_KEY, sonido); }, [sonido]);
 
   // La pantalla no se apaga mientras el monitor está abierto
@@ -2019,13 +2105,22 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
     try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.(); } catch {}
   };
 
-  const avanzar = (t) => db.setTicketEstado(t.id, t.estado === "pendiente" ? "preparando" : "listo");
-  // Teclado o «bump bar»: 1–9 avanza la comanda de esa posición
+  // Cambia el estado de las comandas de una tarjeta tal como se ven ahora; un segundo toque espera al primero
+  const mover = async (g, hacia) => {
+    if (ocupados.has(g.clave)) return;
+    const objetivo = hacia === "preparando" ? g.tickets.filter((t) => t.estado === "pendiente") : g.tickets;
+    if (!objetivo.length) return;
+    setOcupados((s) => new Set(s).add(g.clave));
+    try { await db.moverTickets(objetivo.map((t) => ({ id: t.id, estado: t.estado || "pendiente" })), hacia); }
+    finally { setOcupados((s) => { const n = new Set(s); n.delete(g.clave); return n; }); }
+  };
+  const avanzar = (g) => mover(g, g.tickets.some((t) => t.estado === "pendiente") ? "preparando" : "listo");
+  // Teclado o «bump bar»: 1–9 avanza la tarjeta de esa posición
   const avanzarRef = useRef(null);
-  avanzarRef.current = (n) => { const t = pend[n - 1]; if (t) avanzar(t); };
+  avanzarRef.current = (n) => { const g = grupos[n - 1]; if (g) avanzar(g); };
   useEffect(() => {
     const f = (e) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || /input|select|textarea/i.test(e.target?.tagName || "")) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || /input|select|textarea/i.test(e.target?.tagName || "")) return;
       if (document.querySelector(".modal-bg")) return;
       if (/^[1-9]$/.test(e.key)) avanzarRef.current(Number(e.key));
     };
@@ -2033,31 +2128,46 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
     return () => window.removeEventListener("keydown", f);
   }, []);
 
-  const alternarHecho = (k) => setHechos((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
-  const quitarListos = () => listos.forEach((t) => db.archivarTicket(t.id));
-  const totales = porPreparar(pend, (k) => hechos.has(k));
+  const quitarListos = () => db.archivarTickets(listos.map((t) => t.id));
+  const totales = porPreparar(pend);
   const reloj = fmtHora.format(new Date(ahora));
-  const avisoConexion = conn === "sinred" ? "Sin conexión: lo que ves puede no estar actualizado."
-    : errorCarga ? "No se pudieron actualizar los datos." : incierta ? "No se pudo confirmar que este dispositivo siga siendo la cocina activa." : null;
+  const avisoConexion = conn === "sinred" ? "Sin conexión: lo que ves puede no estar actualizado. Los cambios se enviarán al reconectar."
+    : errorCarga ? "No se pudieron actualizar los datos. Se reintenta solo."
+    : conn === "reconnecting" ? "Reconectando con el servidor… los cambios de otras pantallas pueden tardar unos segundos."
+    : incierta ? "No se pudo confirmar que este dispositivo siga siendo la cocina activa." : null;
 
   // (función y no componente: así los botones no se vuelven a montar con cada segundo del reloj)
   const linea = (t, oid, it) => {
-    const k = `${t.id}|${oid}|${it.key}`;
-    const hecho = hechos.has(k);
+    const k = lineaCocina(oid, it);
+    const hecho = (t.hechos || []).includes(k);
     return (
-      <button key={it.key} type="button" className={"mon-item" + (hecho ? " hecho" : "")} aria-pressed={hecho} onClick={() => alternarHecho(k)}
-        aria-label={`${it.cantidad} ${it.nombre}${hecho ? ", preparado" : ""}`}>
+      <button key={k} type="button" className={"mon-item" + (hecho ? " hecho" : "")} aria-pressed={hecho}
+        onClick={() => db.marcarHecho(t.id, k, !hecho)} aria-label={`${it.cantidad} ${it.nombre}${hecho ? ", preparado" : ""}`}>
         <span className="mon-q" aria-hidden="true">{it.cantidad}</span><span className="mon-n" aria-hidden="true">{it.corto || it.nombre}</span>
       </button>
     );
   };
+  const productos = (t) => (<>
+    {(t.ordenes || []).map((o) => (
+      <section key={o.id} className="mon-orden">
+        <div className="mon-oname">{o.nombre}{o.prep ? <em> · {PREP_LABEL[o.prep] || o.prep}</em> : null}</div>
+        {ordenarItems(o.items).map((it) => linea(t, o.id, it))}
+      </section>
+    ))}
+    {(t.extras || []).length > 0 && (
+      <section className="mon-orden">
+        <div className="mon-oname">Para todo el pedido</div>
+        {ordenarItems(t.extras).map((it) => linea(t, "extras", it))}
+      </section>
+    )}
+  </>);
 
   return (
     <div className="monitor">
       <header className="mon-top">
         <div className="mon-marca"><Logo className="mon-logo" /><div><b>{data.nombreNegocio}</b><span>Monitor de cocina</span></div></div>
         <div className="mon-cuentas" role="status" aria-live="polite">
-          <span className="mon-c nuevo">Por empezar <b>{pend.length - enProceso}</b></span>
+          <span className="mon-c nuevo">Por empezar <b>{grupos.length - enProceso}</b></span>
           <span className="mon-c proceso">En proceso <b>{enProceso}</b></span>
           <span className="mon-c listo">Listos <b>{listos.length}</b></span>
         </div>
@@ -2075,53 +2185,61 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
           )}
         </div>
       </header>
-      {avisoConexion && <div className="mon-aviso" role="alert">{avisoConexion}</div>}
+      {avisoConexion && <div className={"mon-aviso" + (conn === "reconnecting" && !errorCarga ? " leve" : "")} role="alert">{avisoConexion}</div>}
 
       <div className="mon-cuerpo">
         <main className="mon-grid" aria-label="Comandas por preparar">
-          {pend.length === 0 && <div className="mon-vacio"><Check size={40} aria-hidden="true" /><p>Sin comandas pendientes</p></div>}
-          {pend.map((t, i) => {
-            const tv = ticketView(t);
-            const ms = creadoMs(t) != null ? ahora - creadoMs(t) : null;
+          {grupos.length === 0 && <div className="mon-vacio"><Check size={40} aria-hidden="true" /><p>Sin comandas pendientes</p></div>}
+          {grupos.map((g, i) => {
+            const primero = g.tickets[0];
+            const tv = ticketView(primero);
+            const ms = creadoMs(primero) != null ? ahora - creadoMs(primero) : null;
             const min = ms != null ? ms / 60000 : 0;
             const nivel = min >= 20 ? " alta" : min >= 10 ? " media" : "";
+            const enCurso = g.tickets.some((t) => t.estado === "preparando");
+            const porEmpezar = g.tickets.some((t) => t.estado === "pendiente");
+            const ocupado = ocupados.has(g.clave);
+            const visibles = g.comandas.length ? g.comandas : g.reenvios.slice(-1);   // un reenvío solo se muestra si ya no hay comanda
+            const extras = g.comandas.filter((t) => t.esExtra).length;
+            const ultimoReenvio = g.reenvios[g.reenvios.length - 1];
+            const nuevo = g.tickets.some((t) => nuevos.has(t.id));
             return (
-              <article key={t.id} className={"mon-card " + t.estado + nivel + (nuevos.has(t.id) ? " nuevo" : "")}
-                aria-label={`${i + 1}. ${t.origen}${t.esExtra ? ", orden extra" : ""}, ${t.estado === "preparando" ? "en proceso" : "por empezar"}`}>
+              <article key={g.clave} className={"mon-card " + (enCurso ? "preparando" : "pendiente") + nivel + (nuevo ? " nuevo" : "")} aria-busy={ocupado}
+                aria-label={`${i + 1}. ${g.titulo}${extras ? `, ${extras} orden(es) extra` : ""}, ${enCurso ? "en proceso" : "por empezar"}`}>
                 <header className="mon-card-h" style={{ background: tv.color }}>
                   <span className="mon-pos" aria-hidden="true">{i + 1}</span>
-                  <div className="mon-orig"><b>{t.origen}</b>
-                    <small>{tv.label}{t.esExtra ? " · orden extra" : ""}{t.reenvio ? " · reimpresión" : ""}</small></div>
+                  <div className="mon-orig"><b>{g.titulo}</b>
+                    <small>{tv.label}{extras ? ` · +${extras} extra` : ""}{!g.comandas.length ? " · reimpresión" : ""}</small></div>
                   {ms != null && <span className="mon-tiempo" aria-label={`Espera ${Math.floor(min)} minutos`}>{fmtCrono(ms)}</span>}
                 </header>
                 <div className="mon-meta">
-                  <span>{t.folio ? `#${t.folio} · ` : ""}{t.hora} · {t.mesero}</span>
-                  {t.estado === "preparando" && <b className="mon-en-proceso">EN PROCESO</b>}
-                  <span className="mon-tacos" title="Tacos en total"><span aria-hidden="true">🌮 </span>{contarTacos(t)}<span className="sr-only"> tacos</span></span>
+                  <span>{visibles.map((t) => (t.folio ? `#${t.folio}` : "")).filter(Boolean).join(" ")} · {primero.hora} · {primero.mesero}</span>
+                  {enCurso && <b className="mon-en-proceso">EN PROCESO</b>}
+                  <span className="mon-tacos" title="Tacos en total"><span aria-hidden="true">🌮 </span>{visibles.reduce((a, t) => a + contarTacos(t), 0)}<span className="sr-only"> tacos</span></span>
                 </div>
-                {t.domicilio && !t.domicilio.anonimizado && t.domicilio.nombre && <div className="mon-dom">Para: {t.domicilio.nombre}</div>}
+                {ultimoReenvio && g.comandas.length > 0 && <div className="mon-reenvio">↻ Reenviada a las {ultimoReenvio.hora}</div>}
+                {primero.domicilio && !primero.domicilio.anonimizado && primero.domicilio.nombre && <div className="mon-dom">Para: {primero.domicilio.nombre}</div>}
                 <div className="mon-items">
-                  {(t.ordenes || []).map((o) => (
-                    <section key={o.id} className="mon-orden">
-                      <div className="mon-oname">{o.nombre}{o.prep ? <em> · {PREP_LABEL[o.prep] || o.prep}</em> : null}</div>
-                      {ordenarItems(o.items).map((it) => linea(t, o.id, it))}
-                    </section>
+                  {visibles.map((t, n) => (
+                    <div key={t.id} className={"mon-comanda" + (n > 0 ? " extra" : "")}>
+                      {visibles.length > 1 && (
+                        <div className="mon-comanda-h">
+                          <span>{t.esExtra ? "Orden extra" : "Comanda"}{t.folio ? ` #${t.folio}` : ""} · {t.hora}</span>
+                          {t.estado === "pendiente" && enCurso && <b className="mon-nueva">NUEVA</b>}
+                        </div>
+                      )}
+                      {productos(t)}
+                    </div>
                   ))}
-                  {(t.extras || []).length > 0 && (
-                    <section className="mon-orden">
-                      <div className="mon-oname">Para todo el pedido</div>
-                      {ordenarItems(t.extras).map((it) => linea(t, "extras", it))}
-                    </section>
-                  )}
                 </div>
                 <footer className="mon-card-f">
-                  <button type="button" className="mon-ico" onClick={() => onImprimir(t)} aria-label={`Imprimir ${t.origen}`} title="Imprimir"><Printer size={18} aria-hidden="true" /></button>
-                  {t.estado === "pendiente" && (
-                    <button type="button" className="mon-btn empezar" onClick={() => db.setTicketEstado(t.id, "preparando")}
-                      aria-label={`Empezar ${t.origen}`}><Play size={18} aria-hidden="true" /> Empezar</button>
+                  <button type="button" className="mon-ico" onClick={() => onImprimir(visibles[visibles.length - 1])} aria-label={`Imprimir ${g.titulo}`} title="Imprimir"><Printer size={18} aria-hidden="true" /></button>
+                  {porEmpezar && (
+                    <button type="button" className="mon-btn empezar" disabled={ocupado} onClick={() => mover(g, "preparando")}
+                      aria-label={`Empezar ${g.titulo}`}><Play size={18} aria-hidden="true" /> Empezar</button>
                   )}
-                  <button type="button" className="mon-btn listo" onClick={() => db.setTicketEstado(t.id, "listo")}
-                    aria-label={`Listo ${t.origen}`}><Check size={18} aria-hidden="true" /> Listo</button>
+                  <button type="button" className="mon-btn listo" disabled={ocupado} onClick={() => mover(g, "listo")}
+                    aria-label={`Listo ${g.titulo}`}>{ocupado ? <Loader2 size={18} className="girando" aria-hidden="true" /> : <Check size={18} aria-hidden="true" />} Listo</button>
                 </footer>
               </article>
             );
@@ -2133,7 +2251,7 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
             {totales.length === 0 ? <p className="mon-resumen-vacio">Nada pendiente</p> : (
               <ul>{totales.map((x) => <li key={x.key}><b>{x.cantidad}</b><span>{x.nombre}</span></li>)}</ul>
             )}
-            <p className="mon-ayuda">Toca un producto para tacharlo. Teclas 1–9: avanzar esa comanda.</p>
+            <p className="mon-ayuda">Toca un producto para tacharlo; todas las pantallas de cocina lo ven. Teclas 1–9: avanzar esa comanda.</p>
           </aside>
         )}
       </div>
@@ -2145,8 +2263,8 @@ function MonitorCocina({ data, db, user, conn, incierta, errorCarga, onImprimir,
             {listos.slice(0, 12).map((t) => (
               <span key={t.id} className="mon-listo">
                 {t.folio ? `#${t.folio} ` : ""}{t.origen}
-                <button type="button" onClick={() => db.setTicketEstado(t.id, "preparando")} aria-label={`Regresar ${t.origen} a preparación`} title="Regresar"><Undo2 size={16} aria-hidden="true" /></button>
-                <button type="button" onClick={() => db.archivarTicket(t.id)} aria-label={`Quitar ${t.origen} de listos`} title="Quitar"><X size={16} aria-hidden="true" /></button>
+                <button type="button" onClick={() => db.moverTickets([{ id: t.id, estado: "listo" }], "preparando")} aria-label={`Regresar ${t.origen} a preparación`} title="Regresar"><Undo2 size={16} aria-hidden="true" /></button>
+                <button type="button" onClick={() => db.archivarTickets([t.id])} aria-label={`Quitar ${t.origen} de listos`} title="Quitar"><X size={16} aria-hidden="true" /></button>
               </span>
             ))}
           </div>
@@ -2232,7 +2350,7 @@ function EstadoPedido({ ts }) {
   );
 }
 
-function Cocina({ data, db, user, errorCarga, abrirMonitor }) {
+function Cocina({ data, db, user, errorCarga, desactualizado, abrirMonitor }) {
   const edita = puedeEditar(user, "cocina");
   const [tab, setTab] = useState("pendientes");
   const [ticket, setTicket] = useState(null);
@@ -2274,6 +2392,7 @@ function Cocina({ data, db, user, errorCarga, abrirMonitor }) {
   const cob = res.cobrado || { total: 0, efectivo: 0, tarjeta: 0, transferencia: 0, propinas: 0, count: 0 };
   const hacerCorte = async () => {
     if (errorCarga) { toast("No se puede hacer el corte con datos desactualizados. Reintenta la carga primero.", "error"); return; }
+    if (desactualizado) { toast("Actualizando las ventas… intenta en un momento.", "info"); return; }
     if (!res.count && !cob.count) { toast("No hay ventas ni cobros en este periodo.", "info"); return; }
     const pendiente = res.porCobrar > 0 ? ` Quedan ${money(res.porCobrar)} por cobrar (${res.porCobrarCount} cuenta(s)): seguirán pendientes después del corte.` : "";
     if (!(await confirmDialog({ titulo: "Corte del día", mensaje: `Ventas: ${res.count} · ${money(res.total)}. Cobrado: ${money(cob.total)}.${pendiente} Las comandas pendientes seguirán en cocina.`, confirmar: "Hacer corte" }))) return;
@@ -2329,8 +2448,8 @@ function Cocina({ data, db, user, errorCarga, abrirMonitor }) {
                   {edita && (
                     <div className="kt-actions">
                       <button type="button" className="btn btn-line btn-sm" onClick={() => verTicket(t, "cocina")}><Printer size={14} aria-hidden="true" /> Imprimir</button>
-                      {t.estado === "pendiente" && <button type="button" className="btn btn-line btn-sm" onClick={() => db.setTicketEstado(t.id, "preparando")}>Preparando</button>}
-                      <button type="button" className="btn btn-primary btn-sm" onClick={() => db.setTicketEstado(t.id, "listo")}><Check size={14} aria-hidden="true" /> Listo</button>
+                      {t.estado === "pendiente" && <button type="button" className="btn btn-line btn-sm" onClick={() => db.moverTickets([{ id: t.id, estado: "pendiente" }], "preparando")}>Preparando</button>}
+                      <button type="button" className="btn btn-primary btn-sm" onClick={() => db.moverTickets([{ id: t.id, estado: t.estado || "pendiente" }], "listo")}><Check size={14} aria-hidden="true" /> Listo</button>
                     </div>
                   )}
                 </article>
@@ -2342,8 +2461,8 @@ function Cocina({ data, db, user, errorCarga, abrirMonitor }) {
               <div className="listos-row">
                 {listos.map((t) => (
                   <div key={t.id} className="listo-chip"><span>{t.origen} · {t.hora}</span>
-                    <button type="button" className="icon-btn" aria-label={`Regresar ${t.origen} a preparación`} title="Regresar a preparación" onClick={() => db.setTicketEstado(t.id, "preparando")}><Undo2 size={16} aria-hidden="true" /></button>
-                    <button type="button" className="icon-btn" aria-label={`Quitar ${t.origen} de la lista de listos`} title="Quitar de la lista" onClick={() => db.archivarTicket(t.id)}><X size={16} aria-hidden="true" /></button>
+                    <button type="button" className="icon-btn" aria-label={`Regresar ${t.origen} a preparación`} title="Regresar a preparación" onClick={() => db.moverTickets([{ id: t.id, estado: "listo" }], "preparando")}><Undo2 size={16} aria-hidden="true" /></button>
+                    <button type="button" className="icon-btn" aria-label={`Quitar ${t.origen} de la lista de listos`} title="Quitar de la lista" onClick={() => db.archivarTickets([t.id])}><X size={16} aria-hidden="true" /></button>
                   </div>
                 ))}
               </div></>
@@ -2353,6 +2472,7 @@ function Cocina({ data, db, user, errorCarga, abrirMonitor }) {
 
       {edita && tab === "historial" && (
         <>
+          {desactualizado && <div className="aviso-barra" role="status"><span><Loader2 size={14} className="girando" aria-hidden="true" /> Actualizando ventas…</span></div>}
           <div className="corte-bar">
             <div><div className="corte-total">{money(res.total)}</div>
               <div className="muted small">{res.count} venta(s) en el periodo{res.gastos > 0 ? ` · gastos ${money(res.gastos)} · neto ${money(res.total - res.gastos)}` : ""}</div>
@@ -2573,6 +2693,10 @@ function AdminCocina({ data, db }) {
           Imprimir también la comanda en cocina
         </label>
       )}
+      <label className="check-linea">
+        <input type="checkbox" checked={aj.variasCocinas} onChange={(e) => db.fijarAjuste("variasCocinas", e.target.checked)} />
+        <span>Permitir varias pantallas de cocina a la vez <span className="muted small">(varios usuarios Cocinero en distintos dispositivos; lo tachado y los cambios se ven en todas)</span></span>
+      </label>
       <h3 className="sub-h">Cómo se usa</h3>
       <ol className="pasos-cocina">
         <li>En cada dispositivo toca el botón de impresora (arriba) y elige su estación: <b>Barra</b> para el que imprime los tickets de los clientes, <b>Cocina</b> para el de la cocina.</li>

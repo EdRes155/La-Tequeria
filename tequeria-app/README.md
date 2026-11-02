@@ -77,6 +77,36 @@ Los productos se pueden tachar al prepararlos (se guarda solo en esa pantalla). 
 1–9 avanzan la comanda de esa posición, para usar un teclado o una «bump bar». El monitor
 evita que la pantalla se apague y tiene pantalla completa.
 
+### Varias pantallas de cocina
+
+- Con «Permitir varias pantallas de cocina a la vez» (Administración → Cocina) pueden entrar
+  varios usuarios Cocinero en distintos dispositivos. Sin esa opción sigue habiendo una sola
+  cocina activa.
+- Lo tachado se guarda en el servidor (tabla `cocina_hechos`) y todas las pantallas lo ven al
+  instante.
+- Cada mesa es **una sola tarjeta**: la comanda original, sus órdenes extra (marcadas como
+  «NUEVA» si llegan cuando ya se empezó) y los reenvíos («Reenviada a las…», sin repetir
+  productos).
+- «Empezar», «Listo», «Regresar» y «Quitar» mandan el estado que la pantalla tenía a la vista
+  (`mover_tickets`). Si otra pantalla ya cambió esa comanda, no se pisa: se avisa y se actualiza
+  la vista. Repetir un toque no hace nada dos veces, y el botón queda bloqueado mientras se
+  confirma.
+
+### Fallos de red y errores
+
+- Cada petición tiene un tiempo límite de 15 s. Las que no duplican nada al repetirse (cargar,
+  enviar comanda, cobrar, tachar, cambiar estado, quitar listos…) se reintentan solas ante un
+  fallo pasajero. Las demás muestran el error y se pueden repetir a mano.
+- Los mensajes distinguen sin conexión, servidor ocupado o caído, tiempo agotado, reglas del
+  negocio y errores desconocidos (con su código para soporte). El mismo aviso no se repite.
+- Si una carga falla se vuelve a intentar sola a los 5 s, y el monitor avisa si está
+  reconectando.
+- Si una pantalla falla al dibujarse se muestra «Algo falló en esta pantalla» con «Intentar de
+  nuevo», en lugar de una página en blanco.
+- Optimización: historial, cortes y gastos (lo más pesado) solo se recargan con la sección que
+  los muestra abierta. Si cambian mientras tanto, se recargan al abrirla, y el corte espera a que
+  las ventas estén al día.
+
 ### Estaciones de impresión
 
 Cada dispositivo elige su estación con el botón de impresora de la barra superior (se guarda

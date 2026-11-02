@@ -444,6 +444,55 @@ d("operación", () => {
     expect(await api.rpc("latido_cocina", { p_token: t2 })).toBe(true);
   });
 
+  it("varias pantallas de cocina comparten lo tachado y un cambio atrasado no pisa uno nuevo", async () => {
+    const { rows } = await sql.query("select id from usuarios where rol = 'cocinero'");
+    await api.rpc("fijar_ajuste", { p_token: admin, p_clave: "variasCocinas", p_valor: "true" });
+    expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);   // libera la exclusividad
+    const pantalla2 = await entrar(api, rows[0].id, "6284", "tablet-3");
+    expect(await api.rpc("latido_cocina", { p_token: pantalla2 })).toBe(true);
+    expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);
+
+    const orden = [{ id: "o1", items: [item("taco-pastor", 2), item("gringa-pastor", 1)] }];
+    await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: ticket("monitores-1", { ordenes: orden }) });
+    await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: ticket("monitores-2", { ordenes: orden }) });
+    const ver = async (tk, id = "monitores-1") => (await api.rpc("estado", { p_token: tk, p_partes: ["cocina"] })).cocina.find((t) => t.id === id);
+    const hecho = (tk, linea, h, id = "monitores-1") => api.rpc("marcar_hecho", { p_token: tk, p_ticket: id, p_linea: linea, p_hecho: h });
+    expect((await falla(hecho(mesero, "o1|taco-pastor", true))).message).toBe("PERMISO");
+    expect((await falla(hecho(cocina, "sin-separador", true))).message).toBe("DATOS");
+    await hecho(cocina, "o1|taco-pastor", true);
+    await hecho(cocina, "o1|taco-pastor", true);   // repetir no cambia nada
+    expect((await ver(pantalla2)).hechos).toEqual(["o1|taco-pastor"]);
+    await hecho(pantalla2, "o1|taco-pastor", false);
+    expect((await ver(cocina)).hechos).toEqual([]);
+
+    // se mueve solo lo que sigue como lo vio la pantalla
+    const vista = (id) => JSON.stringify([{ id, estado: "pendiente" }]);
+    const mover = (tk, id, hacia) => api.rpc("mover_tickets", { p_token: tk, p_tickets: vista(id), p_hacia: hacia });
+    expect(await mover(cocina, "monitores-1", "listo")).toEqual({ movidos: 1, conflictos: [] });
+    expect(await mover(pantalla2, "monitores-1", "preparando")).toEqual({ movidos: 0, conflictos: ["monitores-1"] });
+    expect(await mover(pantalla2, "monitores-1", "listo")).toEqual({ movidos: 0, conflictos: [] });   // ya estaba así
+    expect((await ver(cocina)).estado).toBe("listo");
+    expect((await falla(mover(mesero, "monitores-1", "listo"))).message).toBe("PERMISO");
+
+    // dos pantallas a la vez sobre la misma comanda: la segunda espera y ve el cambio de la primera
+    const a = await conectar(base), b = await conectar(base);
+    await a.query("begin");
+    await a.rpc("mover_tickets", { p_token: cocina, p_tickets: vista("monitores-2"), p_hacia: "listo" });
+    const otra = b.rpc("mover_tickets", { p_token: pantalla2, p_tickets: vista("monitores-2"), p_hacia: "preparando" });
+    await a.query("commit");
+    expect(await otra).toEqual({ movidos: 0, conflictos: ["monitores-2"] });
+
+    expect(await api.rpc("archivar_tickets", { p_token: pantalla2, p_ids: ["monitores-1", "monitores-2", "no-existe"] })).toBe(2);
+    expect(await api.rpc("archivar_tickets", { p_token: cocina, p_ids: ["monitores-1"] })).toBe(0);
+    expect(await ver(cocina)).toBeUndefined();
+    expect((await falla(hecho(cocina, "o1|taco-pastor", true))).message).toBe("TICKET");
+
+    // de vuelta a una sola cocina: la primera pantalla que late se queda y las demás salen
+    await api.rpc("fijar_ajuste", { p_token: admin, p_clave: "variasCocinas", p_valor: "false" });
+    expect(await api.rpc("latido_cocina", { p_token: pantalla2 })).toBe(true);
+    expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(false);
+  });
+
   it("protege al último administrador y a uno mismo", async () => {
     const { rows } = await sql.query("select id from usuarios where rol = 'admin'");
     expect((await api.rpc("eliminar_usuario", { p_token: admin, p_admin_pin: "8642", p_id: rows[0].id })).error).toBe("propio");

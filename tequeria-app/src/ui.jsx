@@ -63,7 +63,8 @@ export function Toaster() {
   const [items, setItems] = useState([]);
   useEffect(() => {
     const add = (t) => {
-      setItems((xs) => [...xs.slice(-3), t]);
+      // el mismo aviso ya visible no se repite (por ejemplo, varios fallos de red seguidos)
+      setItems((xs) => (xs.some((x) => x.mensaje === t.mensaje && x.tipo === t.tipo) ? xs : [...xs.slice(-3), t]));
       // los errores permanecen más tiempo y siempre se pueden cerrar
       setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== t.id)), t.tipo === "error" ? 9000 : 3500);
     };

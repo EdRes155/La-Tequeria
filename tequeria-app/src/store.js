@@ -22,7 +22,7 @@ export const TODAS = ["config", "carnes", "bebidas", "usuarios", "mesas", "cocin
 export const TABLA_PARTES = {
   config: ["config"], carnes: ["carnes"], bebidas: ["bebidas"], usuarios: ["usuarios"], mesas: ["mesas"],
   tickets: ["cocina", "historial", "porCobrar"], cortes: ["cortes", "historial"], gastos: ["gastos", "historial"],
-  cobros: ["porCobrar", "historial", "cortes", "cocina"],
+  cobros: ["porCobrar", "historial", "cortes", "cocina"], cocina_hechos: ["cocina"],
 };
 
 const SESION_KEY = "tequeria_sesion";
@@ -43,31 +43,59 @@ export const guardarSesion = (s) => {
   try { if (s) sessionStorage.setItem(SESION_KEY, JSON.stringify(s)); else sessionStorage.removeItem(SESION_KEY); } catch {}
 };
 
-function traducir(error, status) {
+// Errores pasajeros (red, tiempo agotado, servidor ocupado): se pueden reintentar sin riesgo
+// en las operaciones que no duplican nada. Se marcan con codigo "RED".
+const TRANSITORIOS = new Set(["40001", "40P01", "57014", "53300", "55P03"]);
+function traducir(error, status, vencido = false) {
   if (!error) return null;
+  if (vencido || /AbortError/i.test(error.message || "")) {
+    return new ErrorApi("RED", "El servidor tardó demasiado en responder. Revisa la conexión e inténtalo de nuevo.", { incierto: true });
+  }
   if (status === 0 || /fetch|network|Load failed/i.test(error.message || "")) {
     return new ErrorApi("RED", "Sin conexión con el servidor. Revisa el internet e inténtalo de nuevo.", { incierto: true });
   }
+  if (status === 429) return new ErrorApi("RED", "Demasiadas solicitudes seguidas. Espera unos segundos e inténtalo de nuevo.", { incierto: true });
+  if (status >= 502 && status <= 504) {
+    return new ErrorApi("RED", "El servidor no está disponible en este momento. Inténtalo de nuevo en unos segundos.", { incierto: true });
+  }
+  if (TRANSITORIOS.has(error.code)) return new ErrorApi("RED", "El servidor estaba ocupado. Inténtalo de nuevo.", { incierto: true });
   if (error.code === "PGRST202" || error.code === "42883") {
     return new ErrorApi("ESQUEMA", "La base de datos no está actualizada. Ejecuta supabase-schema.sql (v3) en Supabase.");
   }
   if (error.code === "P0001" && error.hint) return new ErrorApi(error.message, error.hint);
   console.error("Supabase:", error);
-  return new ErrorApi("SERVIDOR", "El servidor rechazó la operación. Inténtalo de nuevo.");
+  const ref = error.code || (status ? `HTTP ${status}` : "");
+  return new ErrorApi("SERVIDOR", `El servidor rechazó la operación${ref ? ` (${ref})` : ""}. Inténtalo de nuevo; si se repite, avisa al administrador.`);
 }
+
+const LIMITE_MS = 15000;
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function crearRemoto() {
   let sesion = leerSesion();
   const token = () => sesion?.token || null;
 
-  async function rpc(fn, args = {}) {
-    let res;
-    try { res = await supabase.rpc(fn, args); }
-    catch (e) { throw traducir(e, 0); }
-    if (res.error) throw traducir(res.error, res.status);
-    return res.data;
+  // Cada llamada tiene tiempo límite. Las que no duplican nada al repetirse (reintentos > 0)
+  // se reintentan solas ante fallos pasajeros: 0.6 s, 1.2 s…
+  async function rpc(fn, args = {}, { reintentos = 0, limite = LIMITE_MS } = {}) {
+    for (let intento = 0; ; intento++) {
+      const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+      let vencido = false, res;
+      const reloj = ctrl ? setTimeout(() => { vencido = true; ctrl.abort(); }, limite) : null;
+      try {
+        let q = supabase.rpc(fn, args);
+        if (ctrl && typeof q.abortSignal === "function") q = q.abortSignal(ctrl.signal);
+        res = await q;
+      } catch (e) { res = { error: e, status: 0 }; }
+      finally { clearTimeout(reloj); }
+      if (!res.error) return res.data;
+      const err = traducir(res.error, res.status, vencido);
+      if (err.codigo === "RED" && intento < reintentos) { await esperar(600 * 2 ** intento); continue; }
+      throw err;
+    }
   }
-  const conToken = (fn, args = {}) => rpc(fn, { p_token: token(), ...args });
+  const conToken = (fn, args = {}, opciones) => rpc(fn, { p_token: token(), ...args }, opciones);
+  const seguro = { reintentos: 2 };   // operaciones idempotentes
   // Las acciones con PIN de administrador devuelven {ok:false,error} en vez de fallar
   const conPin = async (fn, args) => {
     const r = await conToken(fn, args);
@@ -77,7 +105,7 @@ function crearRemoto() {
 
   return {
     modo: "remoto",
-    pantallaLogin: () => rpc("usuarios_login"),
+    pantallaLogin: () => rpc("usuarios_login", {}, seguro),
     async entrar(id, pin) {
       const r = await rpc("login", { p_id: id, p_pin: pin, p_dispositivo: dispositivo() });
       if (r.ok) {
@@ -97,8 +125,8 @@ function crearRemoto() {
       if (r.ok && sesion) { sesion = { ...sesion, debeCambiarPin: false }; guardarSesion(sesion); }
       return r;
     },
-    cargar: (partes = null) => conToken("estado", { p_partes: partes }),
-    latido: () => conToken("latido_cocina"),
+    cargar: (partes = null) => conToken("estado", { p_partes: partes }, seguro),
+    latido: () => conToken("latido_cocina", {}, { reintentos: 1 }),
     liberarCocina: () => conToken("liberar_cocina").catch(() => {}),
 
     suscribir(onCambio, onConexion) {
@@ -118,7 +146,7 @@ function crearRemoto() {
       // Respaldo si el tiempo real no llega: más frecuente mientras no hay suscripción
       const iv = setInterval(() => {
         if (document.visibilityState !== "visible") return;
-        if (Date.now() - ultimo > (suscrito ? 45000 : 10000)) disparar(TODAS);
+        if (Date.now() - ultimo > (suscrito ? 30000 : 10000)) disparar(TODAS);   // las partes pesadas que no se ven se difieren
       }, 5000);
       const recuperar = () => { if (document.visibilityState === "visible") disparar(TODAS); };
       window.addEventListener("online", recuperar);
@@ -134,7 +162,7 @@ function crearRemoto() {
     acciones: {
       guardarBorrador: (mesaId, pedido, version) => conToken("guardar_borrador_mesa", { p_mesa_id: mesaId, p_pedido: pedido, p_version: version ?? null }),
       liberarMesa: (mesaId) => conToken("liberar_mesa", { p_mesa_id: mesaId }),
-      enviar: (t) => conToken("enviar_comanda", { p_ticket: t }),
+      enviar: (t) => conToken("enviar_comanda", { p_ticket: t }, { reintentos: 1 }),   // idempotente por id
       reenviar: (id, mesaId) => conToken("reenviar_cocina", { p_id: id, p_mesa_id: mesaId }),
       estadoTicket: (id, estado) => conToken("cambiar_estado_ticket", { p_id: id, p_estado: estado }),
       archivar: (id) => conToken("archivar_ticket", { p_id: id }),
@@ -158,9 +186,12 @@ function crearRemoto() {
       restablecerPin: (adminPin, id, pin) => conPin("restablecer_pin", { p_admin_pin: adminPin, p_id: id, p_pin_nuevo: pin }),
       cobrar: (id, tickets, metodo, recibido, propina, liberarMesa) => conToken("cobrar", {
         p_id: id, p_tickets: tickets, p_metodo: metodo, p_recibido: recibido ?? null, p_propina: propina || 0, p_liberar_mesa: !!liberarMesa,
-      }),
+      }, { reintentos: 1 }),   // idempotente por id
       anularCobro: (id, motivo) => conToken("anular_cobro", { p_id: id, p_motivo: motivo }),
-      marcarRecibido: (ids) => conToken("marcar_recibido", { p_ids: ids }),
+      marcarRecibido: (ids) => conToken("marcar_recibido", { p_ids: ids }, seguro),
+      moverTickets: (tickets, hacia) => conToken("mover_tickets", { p_tickets: tickets, p_hacia: hacia }, seguro),
+      archivarTickets: (ids) => conToken("archivar_tickets", { p_ids: ids }, seguro),
+      marcarHecho: (ticketId, linea, hecho) => conToken("marcar_hecho", { p_ticket: ticketId, p_linea: linea, p_hecho: !!hecho }, seguro),
       fijarAjuste: (clave, valor) => conToken("fijar_ajuste", { p_clave: clave, p_valor: valor }),
       noCobrar: (adminPin, tickets, motivo, liberarMesa) => conPin("no_cobrar", {
         p_admin_pin: adminPin, p_tickets: tickets, p_motivo: motivo, p_liberar_mesa: !!liberarMesa,
@@ -176,7 +207,7 @@ export function mensajePin(r) {
     case "pin": return r.restantes > 0 && r.restantes <= 3
       ? `PIN incorrecto. Te quedan ${r.restantes} intento(s) antes de un bloqueo temporal.` : "PIN incorrecto.";
     case "bloqueado": return `Demasiados intentos. Espera ${min} min e inténtalo de nuevo.`;
-    case "cocina_ocupada": return "Ya hay una cocina abierta en otro dispositivo.";
+    case "cocina_ocupada": return "Ya hay una cocina abierta en otro dispositivo. Para usar varias pantallas, actívalo en Administración → Cocina.";
     case "formato": return "El PIN debe tener de 4 a 8 dígitos.";
     case "debil": return "Ese PIN es muy fácil de adivinar (por ejemplo 1234 o 1111). Elige otro.";
     case "rol": return "Rol no válido.";

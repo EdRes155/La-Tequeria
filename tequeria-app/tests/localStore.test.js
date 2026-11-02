@@ -120,6 +120,26 @@ describe("modo local", () => {
     expect((await api.cargar(["config"])).ajustes).toEqual({ modoCocina: "monitor", imprimirCocinaMonitor: true });
   });
 
+  it("cocina: cambios con el estado visto, lotes y tachados como el servidor", async () => {
+    await api.crearAdminInicial("Ana", "8642");
+    const { usuarios } = await api.pantallaLogin();
+    await api.entrar(usuarios[0].id, "8642");
+    await api.acciones.enviar(t("k1"));
+    await api.acciones.enviar(t("k2"));
+    const visto = (id, estado = "pendiente") => [{ id, estado }];
+    expect(await api.acciones.moverTickets(visto("k1"), "listo")).toEqual({ movidos: 1, conflictos: [] });
+    expect(await api.acciones.moverTickets(visto("k1"), "preparando")).toEqual({ movidos: 0, conflictos: ["k1"] });
+    expect(await api.acciones.moverTickets(visto("k1"), "listo")).toEqual({ movidos: 0, conflictos: [] });
+    await api.acciones.marcarHecho("k2", "o1|taco-pastor", true);
+    expect((await api.cargar(["cocina"])).cocina.find((x) => x.id === "k2").hechos).toEqual(["o1|taco-pastor"]);
+    await api.acciones.marcarHecho("k2", "o1|taco-pastor", false);
+    expect((await api.cargar(["cocina"])).cocina.find((x) => x.id === "k2").hechos).toEqual([]);
+    expect((await falla(api.acciones.marcarHecho("k2", "malo", true))).codigo).toBe("DATOS");
+    expect(await api.acciones.archivarTickets(["k1", "k2"])).toBe(1);   // k2 no está lista
+    expect((await api.cargar(["cocina"])).cocina.map((x) => x.id)).toEqual(["k2"]);
+    expect((await api.cargar(["porCobrar"])).porCobrar).toHaveLength(2);   // archivar no borra lo que falta cobrar
+  });
+
   it("aplica permisos por rol y obliga a cambiar un PIN débil", async () => {
     await api.crearAdminInicial("Ana", "8642");
     let { usuarios } = await api.pantallaLogin();

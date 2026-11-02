@@ -257,7 +257,43 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       exigir(["cocinero", "admin"]);
       const t = db.tickets.find((x) => x.id === id && x.estado === "listo") || fallar("TICKET", "Solo se pueden quitar comandas marcadas como listas.");
       t.archivado = true;
-      if (t.corteId) db.tickets = db.tickets.filter((x) => x !== t); // ya contabilizado: no se conserva
+      if (t.corteId && (t.cobroId || t.reenvio)) db.tickets = db.tickets.filter((x) => x !== t); // ya contabilizado y cerrado
+      guardar(["cocina"]);
+    },
+    // Igual que public.mover_tickets: solo cambia lo que sigue como lo vio la pantalla
+    async moverTickets(lista, hacia) {
+      exigir(["cocinero", "admin"]);
+      if (!["pendiente", "preparando", "listo"].includes(hacia)) fallar("DATOS", "Estado no válido.");
+      if (!Array.isArray(lista) || !lista.length || lista.length > 100) fallar("DATOS", "Elige al menos una comanda.");
+      let movidos = 0;
+      const conflictos = [];
+      lista.forEach(({ id, estado }) => {
+        const t = db.tickets.find((x) => x.id === id);
+        if (!t || t.archivado) { conflictos.push(id); return; }
+        if (t.estado === hacia) return;
+        if (t.estado !== estado) { conflictos.push(id); return; }
+        t.estado = hacia;
+        t.recibido = t.recibido || new Date().toISOString();
+        movidos++;
+      });
+      if (movidos) guardar(["cocina", "historial", "porCobrar"]);
+      return { movidos, conflictos };
+    },
+    async archivarTickets(ids) {
+      exigir(["cocinero", "admin"]);
+      const ts = db.tickets.filter((t) => (ids || []).includes(t.id) && t.estado === "listo" && !t.archivado);
+      ts.forEach((t) => { t.archivado = true; });
+      db.tickets = db.tickets.filter((t) => !(t.archivado && t.corteId && (t.cobroId || t.reenvio)));
+      if (ts.length) guardar(["cocina"]);
+      return ts.length;
+    },
+    async marcarHecho(ticketId, linea, hecho) {
+      exigir(["cocinero", "admin"]);
+      if (typeof linea !== "string" || !/^[^|]{1,64}[|][A-Za-z0-9_-]{1,80}$/.test(linea) || typeof hecho !== "boolean") fallar("DATOS", "Producto no válido.");
+      const t = db.tickets.find((x) => x.id === ticketId && !x.archivado) || fallar("TICKET", "La comanda ya no está en cocina.");
+      const s = new Set(t.hechos || []);
+      if (hecho) s.add(linea); else s.delete(linea);
+      t.hechos = [...s].sort();
       guardar(["cocina"]);
     },
     async corte(adminPin) {

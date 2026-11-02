@@ -496,6 +496,12 @@ body:has(.modal-bg) .toaster{top:12px;bottom:auto;}
 .ticket-opciones{display:flex;gap:8px;flex-wrap:wrap;margin:10px 14px 0;}
 .ticket-opciones .ticket-modos{margin:0;flex:1;min-width:140px;}
 
+/* Falla al dibujar una pantalla */
+.falla{max-width:560px;margin:40px auto;background:var(--papel);border:1px solid var(--linea);border-radius:16px;padding:24px;box-shadow:var(--sombra);}
+.falla h2{margin:0 0 6px;}
+.falla-acciones{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0;}
+.falla pre{white-space:pre-wrap;font-size:12px;color:var(--tinta2);}
+
 /* IMPRESIÓN POR ESTACIÓN */
 .impresion-oculta{position:absolute;left:-10000px;top:0;}
 .estacion-tag{font-size:11px;font-weight:800;margin-left:4px;}
@@ -531,6 +537,12 @@ body:has(.modal-bg) .toaster{top:12px;bottom:auto;}
 .mon-tool{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:44px;min-width:44px;padding:6px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:#F4EFE6;font-weight:700;font-size:14px;}
 .mon-tool[aria-pressed="true"]{background:#F2C14E;color:#1F1A17;border-color:#F2C14E;}
 .mon-aviso{background:#B42318;color:#fff;padding:8px 16px;font-weight:700;}
+.mon-aviso.leve{background:#A15C07;}
+.mon-comanda + .mon-comanda{border-top:2px dashed var(--linea);padding-top:6px;margin-top:2px;}
+.mon-comanda-h{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:2px 6px;font-size:13px;font-weight:800;color:var(--tinta);}
+.mon-nueva{background:#F2C14E;color:#1F1A17;font-size:12px;padding:2px 8px;border-radius:999px;letter-spacing:.04em;}
+.mon-reenvio{padding:4px 12px 0;font-size:13px;font-weight:800;color:var(--agua);}
+.mon-btn:disabled{opacity:.6;cursor:progress;}
 .mon-cuerpo{flex:1;display:flex;align-items:flex-start;}
 .mon-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;padding:16px;align-content:start;}
 .mon-vacio{grid-column:1/-1;display:flex;flex-direction:column;align-items:center;gap:8px;padding:80px 0;color:#86EFAC;font-size:22px;font-weight:700;}

@@ -319,3 +319,42 @@ test("modo monitor: el cocinero entra a la pantalla de cocina y procesa las coma
   await page.getByRole("button", { name: "Cocina clásica" }).click();
   await expect(page.getByRole("navigation", { name: "Secciones" })).toBeVisible();
 });
+
+test("dos monitores: una tarjeta por mesa, lo tachado y los cambios se ven en ambos", async ({ page, context }) => {
+  await entrarComoAdmin(page);
+  await mesa(page, 4).click();
+  await producto(page, "Taco Pastor").click();
+  await producto(page, "Taco Pastor").click();
+  await page.getByRole("button", { name: "Enviar a cocina" }).click();
+  await mesa(page, 4).click();
+  await page.getByRole("button", { name: "Agregar orden extra" }).click();
+  await producto(page, "Gringa Pastor").click();
+  await page.getByRole("button", { name: "Enviar orden extra" }).click();
+  await expect(page.getByRole("heading", { name: "Mesas" })).toBeVisible();
+  await page.getByRole("button", { name: /^Cocina/ }).click();
+  await page.getByRole("button", { name: "Abrir monitor" }).click();
+
+  // segunda pantalla en el mismo navegador (otra pestaña con su propia sesión)
+  const otra = await context.newPage();
+  await otra.goto("/");
+  await otra.getByLabel("PIN", { exact: true }).fill("8642");
+  await otra.getByRole("button", { name: "Entrar" }).click();
+  await otra.getByRole("button", { name: /^Cocina/ }).click();
+  await otra.getByRole("button", { name: "Abrir monitor" }).click();
+
+  for (const p of [page, otra]) {
+    const tablero = p.getByRole("main", { name: "Comandas por preparar" });
+    await expect(tablero.getByRole("article")).toHaveCount(1);   // la orden extra va en la misma tarjeta de la mesa
+    await expect(tablero.getByRole("article", { name: /^1\. Mesa 4, 1 orden\(es\) extra, por empezar/ })).toBeVisible();
+  }
+  await page.getByRole("button", { name: "2 Taco Pastor" }).click();
+  await expect(otra.getByRole("button", { name: "2 Taco Pastor, preparado" })).toHaveAttribute("aria-pressed", "true");
+  await expect(otra.getByRole("complementary", { name: "Por preparar" })).not.toContainText("Taco Pastor");
+
+  await otra.getByRole("button", { name: "Empezar Mesa 4" }).click();
+  await expect(page.getByRole("article", { name: /^1\. Mesa 4.*en proceso/ })).toBeVisible();
+  await page.getByRole("button", { name: "Listo Mesa 4" }).click();
+  for (const p of [page, otra]) await expect(p.getByText("Sin comandas pendientes")).toBeVisible();
+  await otra.getByRole("button", { name: "Quitar todos" }).click();
+  await expect(page.getByRole("contentinfo", { name: "Listos" })).toHaveCount(0);
+});
