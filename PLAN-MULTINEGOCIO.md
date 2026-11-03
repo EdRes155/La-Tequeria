@@ -1,7 +1,8 @@
 # Plan: La Tequería para varias taquerías
 
-Versión 2.1, 3 de noviembre de 2026. Primera versión: 31 de octubre de 2026.
-Estado: **plan aprobado, sin ejecutar.** Nada de esto está implementado todavía.
+Versión 2.2, 3 de noviembre de 2026. Primera versión: 31 de octubre de 2026.
+Estado: **plan aprobado y listo para comenzar desarrollo y pruebas.** La implementación y el
+piloto operativo siguen pendientes; esta actualización solo modifica documentación.
 
 Esta versión incorpora la [revisión de factibilidad](REVISION-PLAN-MULTINEGOCIO.md) y puntos
 adicionales encontrados al contrastarla con el código.
@@ -75,6 +76,15 @@ En la versión 2.1:
 - Se tomaron tres decisiones: cuenta con sucursales, varios dueños por cuenta con roles, y
   vinculación de dispositivos con un código de un solo uso.
 
+En la versión 2.2:
+
+- Se fijan los mínimos de PIN, intentos, bloqueo y sesión, obligatorios en el servidor.
+- El desarrollo comienza con una segunda taquería ficticia e independiente. Elegir el negocio
+  real queda como requisito para iniciar el piloto operativo, no para programar.
+- Se distingue la sesión del operador de la vinculación del dispositivo y del permiso de
+  lectura del monitor de cocina.
+- Se define el primer entregable y las comprobaciones de seguridad para avanzar.
+
 ## Decisiones
 
 ### Tomadas (3 de noviembre de 2026)
@@ -96,11 +106,101 @@ En la versión 2.1:
      PIN en la sucursal (precios, usuarios, corte).
 3. **Vinculación de dispositivos con un código de un solo uso** (detalle en el paso 3).
 
-### Pendientes
+4. **Segunda taquería de desarrollo y pruebas: «Taquería Piloto B», ficticia.**
+   - Tiene una cuenta independiente de La Tequería, con una sucursal y sus propios dueños,
+     operadores, dispositivos, menú, mesas, folios y datos sintéticos.
+   - Se usa únicamente en desarrollo, pruebas automáticas y staging. No representa un cliente
+     real ni habilita ventas, suscripciones o envíos externos reales.
+   - Comparte claves locales deliberadamente («Mesa 1», «Pastor») con la primera cuenta para
+     comprobar aislamiento. Los PIN y credenciales de prueba no se siembran en producción.
+5. **Mínimos de seguridad:** se adopta la política de la sección siguiente. Su cumplimiento es
+   parte de la aceptación de cada fase, no una personalización opcional.
 
-4. **Segunda taquería del piloto:** cuál será y si su menú cabe en la plantilla actual.
-5. **Mínimos de seguridad que ningún cliente puede bajar:** largo del PIN, límites de intentos y
-   duración de la sesión.
+### Pendiente solo para el piloto operativo
+
+**Elegir la segunda taquería real y confirmar que su menú cabe en la plantilla actual.** No
+bloquea el comienzo del desarrollo ni las pruebas con «Taquería Piloto B».
+
+El negocio elegido deberá tener un propietario o encargado disponible para validar el uso,
+al menos dos dispositivos (mesero y cocina) y disposición para registrar incidencias. Primero
+se comprueban sus flujos con datos de prueba; el inicio operativo requiere que pasen los
+criterios de aislamiento, migración y seguridad de este plan.
+
+### Mínimos de seguridad de la plataforma
+
+Esta política aplica al PIN y a la sesión del personal de cada sucursal. El acceso con Google
+o correo de propietarios y encargados sigue siendo una identidad separada de Supabase Auth.
+
+| Control | Valor obligatorio por defecto |
+|---|---|
+| PIN del personal, incluido administrador | De **6 a 8 dígitos**, personal y sin compartir; se rechazan secuencias, repeticiones y PIN de demostración. |
+| Intentos por operador | Máximo **5 fallos consecutivos por usuario y sucursal**, acumulados entre todos sus dispositivos. |
+| Bloqueo del operador | **15 minutos** al primer bloqueo; si vuelve a alcanzar el umbral después de esperar, **30 minutos** y luego **60 minutos** en bloqueos siguientes. |
+| Intentos por dispositivo | Máximo **30 fallos en una ventana móvil de 15 minutos**, sumando los usuarios de ese dispositivo; al alcanzar el umbral se bloquean nuevos accesos por PIN durante **15 minutos**. |
+| Sesión del operador | Máximo absoluto de **12 horas** desde el inicio de sesión mediante PIN; ni las peticiones ni el refresco de tokens prolongan ese máximo. |
+| Inactividad del operador | Tras **15 minutos sin interacción operativa explícita**, se bloquean las operaciones y se pide PIN para continuar. |
+| Cocina dedicada | Puede mantener la lectura de cocina mientras el operador está bloqueado por inactividad; las mutaciones requieren desbloqueo por PIN y se conserva el máximo absoluto de 12 horas. |
+
+**Reglas de aplicación:**
+
+- El servidor aplica los límites y conserva el estado de bloqueo. Deshabilitar un botón o
+  reiniciar un contador en el navegador no sustituye esa validación.
+- Las lecturas automáticas, el polling, los latidos de cocina, Realtime y el refresco de tokens
+  no cuentan como interacción del operador ni renuevan su plazo de inactividad. Se distingue
+  esa actividad de las acciones explícitas del operador; no se deduce de que haya tráfico.
+- Una petición periódica no puede desbloquear la sesión. El desbloqueo requiere verificar el
+  PIN vigente y no reinicia las 12 horas; al vencer el máximo absoluto hace falta un nuevo
+  inicio de sesión.
+- Los intentos se acumulan y bloquean de forma atómica en servidor. Cambiar de pestaña, sesión
+  o dispositivo no reinicia el contador del operador. Un PIN correcto durante un bloqueo no lo
+  evita. Los intentos rechazados mientras un bloqueo siga vigente no prolongan su plazo ni
+  elevan su escalada.
+- Al iniciar sesión o desbloquear con éxito una vez terminado el bloqueo, se reinicia la
+  cuenta de fallos y la escalada de ese operador. Un administrador autorizado de la misma
+  sucursal puede restablecer el acceso; la acción queda en bitácora.
+- El límite del dispositivo conserva su ventana móvil aunque otro usuario entre correctamente.
+  Se aplica al acceso por PIN y a su reautenticación; no debe cortar la lectura del monitor ni
+  una transacción ya iniciada. Se mantiene protección adicional por IP, sin usarla como única
+  barrera ni bloquear innecesariamente toda una sucursal que comparta conexión.
+- Para reautenticaciones administrativas se conserva además un contador por sesión y sucursal:
+  cinco fallos bloquean nuevas verificaciones sensibles con la misma escalada 15/30/60. Estos
+  fallos también cuentan para el dispositivo; no se reinicia el límite reabriendo el diálogo.
+- Cambiar PIN, invalidar al operador o revocar el dispositivo debe surtir efecto en servidor,
+  incluso si el navegador conserva un token. Un dispositivo revocado no mantiene la excepción
+  de lectura de cocina.
+- La vinculación del dispositivo y su sesión de Supabase son distintas de la sesión del
+  operador: cambiar de turno o vencer las 12 horas no obliga a vincular el equipo otra vez.
+  Una sesión técnica renovada tampoco devuelve permisos al operador bloqueado o vencido.
+- Los clientes pueden endurecer las reglas: exigir hasta 8 dígitos, permitir menos fallos,
+  alargar los bloqueos o acortar las sesiones. El servidor rechaza configuraciones que permitan
+  PIN de menos de 6 dígitos, más intentos, bloqueos más cortos o sesiones más largas.
+
+**Excepción de cocina delimitada:**
+
+- Solo se habilita en un dispositivo vinculado y autorizado como monitor dedicado de la misma
+  sucursal. No se aplica a pantallas de mesero, administración, cobros o cuenta del dueño.
+- Mientras haya bloqueo por inactividad, el servidor concede exclusivamente las lecturas
+  necesarias para mostrar cocina. Cambiar estados, tachar productos, archivar o ejecutar
+  cualquier otra escritura requiere desbloquear al operador con su PIN.
+- Las acciones que ya requieren PIN administrativo (por ejemplo, autorizar un corte) lo siguen
+  exigiendo aunque el operador acabe de desbloquearse. El máximo absoluto de 12 horas también
+  vence el acceso del monitor hasta un nuevo inicio de sesión.
+- La excepción se implementa como permiso de lectura acotado, no dejando una sesión con todos
+  sus permisos activa por recibir latidos.
+
+**Transición desde la política actual:**
+
+- El código actual acepta PIN de 4 a 8 dígitos y puede conservar una sesión hasta 3 días.
+  Adoptar esta política requiere cambios en SQL, cliente, adaptador local y pruebas.
+- Antes de habilitar la operación multinegocio, se renuevan las credenciales heredadas que no
+  acrediten la política nueva y se invalidan las sesiones operativas antiguas. Los PIN de
+  menos de 6 dígitos deben cambiarse mediante un procedimiento individual autorizado.
+- La versión de la política cumplida se registra por credencial; no se intenta deducir la
+  longitud del PIN a partir de su hash. No se reparten PIN comunes o de demostración.
+- El bloqueo conserva los borradores ligados a su sucursal y autor para recuperarlos al
+  reautenticar al operador correspondiente; no los expone al siguiente usuario. No debe
+  descartar trabajo ni interrumpir una escritura que ya fue autorizada y comenzó; antes de la
+  siguiente acción se exige la autorización vigente.
 
 ## Seguridad y aislamiento
 
@@ -246,10 +346,9 @@ Según lo que pidan los clientes:
   - Quién puede hacerlo (hoy cocinero o administrador, siempre con PIN de administrador).
   - Compartir el resumen por WhatsApp (hoy disponible).
 - **Domicilio:** días para anonimizar direcciones y teléfonos (hoy 90).
-- **Seguridad**, sin bajar de los mínimos acordados:
-  - largo del PIN (hoy de 4 a 8 dígitos);
-  - intentos antes del bloqueo (hoy 5 por usuario y 30 por conexión);
-  - duración de la sesión (hoy 14 horas sin uso y 3 días como máximo).
+- **Seguridad:** ajustes que solo pueden endurecer la política de «Mínimos de seguridad de la
+  plataforma» (PIN de 6 a 8 dígitos, límites de intentos, bloqueos y sesión). Los mínimos se
+  implementan desde el piloto; no se aplazan hasta esta personalización.
 - **Permisos por rol:** qué secciones ve y edita cada rol (hoy fijos para mesero, cocinero y
   administrador).
 
@@ -369,17 +468,42 @@ Según lo que pidan los clientes:
 
 ## Orden de trabajo
 
-1. **Cerrar las decisiones pendientes** (quedan la segunda taquería y los mínimos de seguridad).
-2. **Preparar pruebas y migración:** ambiente de pruebas, copia desechable de los datos e
-   inventario de funciones, claves y canales (pasos 5 y 6).
-3. **Implementar el núcleo de aislamiento y acceso:** pasos 1, 3 y 4, y la parte de piloto del
-   paso 2.
-4. **Probar La Tequería y una segunda taquería** con el menú actual. Deben funcionar venta, cobro,
-   corte, inventario y dos cocinas sin interferirse.
-5. **Preparar la operación comercial:** paso 7, con precios y costos medidos.
-6. **Ampliar la personalización** según lo aprendido: la parte «después del piloto» del paso 2.
+1. **Comenzar en desarrollo y pruebas:** crear una rama de implementación desde la base vigente,
+   preparar el entorno y conservar como referencia la suite actual. La segunda taquería real
+   no bloquea este paso y los mínimos de seguridad ya están acordados.
+2. **Preparar aislamiento y migración:** inventario de funciones, claves y canales; fixtures de
+   dos cuentas independientes; copia desechable y recuperable de los datos (pasos 5 y 6).
+3. **Implementar el núcleo de aislamiento y acceso:** pasos 1, 3 y 4, la configuración del piloto
+   del paso 2 y los mínimos de seguridad. Primero se verifica todo en el entorno de pruebas.
+4. **Validar La Tequería y «Taquería Piloto B»** con datos sintéticos y el menú actual. Deben
+   funcionar venta, cobro, corte, inventario y varias pantallas de cocina sin interferirse.
+5. **Elegir y preparar la segunda taquería real:** comprobar menú, responsables y dispositivos,
+   y aplicar los criterios para iniciar y cerrar el piloto operativo. Ensayar la migración y
+   la recuperación antes del cambio real; la limpieza de datos antiguos sigue siendo al final.
+6. **Preparar la operación comercial:** paso 7, con precios y costos medidos.
+7. **Ampliar la personalización** según lo aprendido: la parte «después del piloto» del paso 2.
+
+### Primer entregable para comenzar
+
+- Inventario del estado actual y entorno de pruebas reproducible, separado de producción.
+- Modelo de cuenta, sucursal, membresía, dispositivo y sesión operativa, con el contexto
+  autorizado que deberá recibir cada función.
+- Fixtures de La Tequería y «Taquería Piloto B» en cuentas separadas y matriz de aislamiento
+  incorporada a la CI conforme se implemente el núcleo.
+- Migración diseñada y ensayable sobre copia desechable: pertenencia de todos los registros,
+  conservación de totales, referencias y folios, y recuperación de cambios.
+- Pruebas de la política de seguridad con reloj controlado; no esperar minutos u horas reales
+  para comprobar vencimientos. Los tests actuales que usan PIN de cuatro dígitos se adaptan a
+  la política nueva y se añaden casos de rechazo y transición.
+
+Este entregable habilita el desarrollo del piloto técnico. La selección del segundo negocio
+real se exige antes de su uso operativo, y no debe darse por resuelta con la fixture ficticia.
 
 ## Criterio para cerrar el piloto
+
+El piloto técnico usa La Tequería y «Taquería Piloto B» con datos sintéticos. Para cerrar el
+piloto operativo, las mismas garantías deben verificarse con La Tequería y la segunda taquería
+real ya seleccionada.
 
 - Dos taquerías usan «Mesa 1», «Pastor» y sus propios folios sin mezclarse.
 - Ninguna función deja leer ni cambiar datos de otra taquería. Se prueba con:
@@ -395,6 +519,21 @@ Según lo que pidan los clientes:
   - límites de las consultas.
 - Cobros, cortes, retención de domicilios y exportación quedan aislados también con operaciones
   al mismo tiempo en las dos taquerías.
+- Seguridad obligatoria:
+  - PIN de 6 y 8 dígitos válidos; de 5 o 9 y PIN triviales rechazados, tanto en API como en UI;
+  - cinco fallos del mismo operador repartidos entre dispositivos activan el bloqueo; se
+    comprueban la escalada 15/30/60 y el restablecimiento autorizado con bitácora;
+  - treinta fallos repartidos entre usuarios del mismo dispositivo dentro de quince minutos
+    bloquean nuevos accesos por PIN, sin cortar operaciones ya iniciadas ni afectar otros
+    dispositivos;
+  - a las 12 horas la sesión operativa deja de servir, aunque haya polling, tokens técnicos
+    renovados o actividad constante;
+  - a los 15 minutos sin interacción operativa se exige PIN; los refrescos y latidos no lo
+    evitan, y desbloquear no reinicia el máximo absoluto;
+  - el monitor dedicado solo conserva lectura tras el bloqueo por inactividad: las mutaciones
+    fallan hasta el desbloqueo, y al vencer la sesión o revocar el equipo también pierde lectura;
+  - los clientes no pueden debilitar estos valores ni eludirlos llamando directamente a las
+    funciones; las credenciales heredadas y sesiones antiguas cumplen la transición definida.
 
 ## Antes de cobrar
 
