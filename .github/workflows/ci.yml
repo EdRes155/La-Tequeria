@@ -51,6 +51,8 @@ jobs:
           cache-dependency-path: tequeria-app/package-lock.json
       - run: npm ci
       - run: npm run test:sql
+      # el inventario del plan multinegocio debe reflejar el esquema y el código actuales
+      - run: npm run inventario -- --check
 
   e2e:
     name: Recorridos en navegador (modo local)

@@ -270,9 +270,14 @@ begin
   raise exception using message = p_codigo, hint = p_mensaje;
 end $$;
 
+-- Hora de referencia para vencimientos de sesión, bloqueos e intentos. En producción es now();
+-- las pruebas la reemplazan por un reloj controlado (tests/sql/util.js) para no esperar minutos u horas.
+create or replace function public._ahora()
+returns timestamptz language sql stable set search_path = public as $$ select now() $$;
+
 create or replace function public._ahora_local()
 returns timestamp language sql stable set search_path = public as $$
-  select now() at time zone coalesce((select zona_horaria from public.config where id = 1), 'America/Mexico_City');
+  select public._ahora() at time zone coalesce((select zona_horaria from public.config where id = 1), 'America/Mexico_City');
 $$;
 create or replace function public._fecha() returns text language sql stable set search_path = public as $$
   select to_char(public._ahora_local(), 'DD/MM/YYYY');
@@ -322,7 +327,7 @@ $$;
 
 create or replace function public._espera(p_clave text)
 returns int language sql stable set search_path = public as $$
-  select coalesce(greatest(0, ceil(extract(epoch from (bloqueado_hasta - now()))))::int, 0)
+  select coalesce(greatest(0, ceil(extract(epoch from (bloqueado_hasta - public._ahora()))))::int, 0)
   from (select max(bloqueado_hasta) bloqueado_hasta from public.intentos where clave = p_clave) x;
 $$;
 
@@ -331,16 +336,16 @@ create or replace function public._fallo(p_clave text, p_umbral int)
 returns int language plpgsql set search_path = public as $$
 declare n int;
 begin
-  insert into public.intentos as i (clave, fallos, ultimo) values (p_clave, 1, now())
+  insert into public.intentos as i (clave, fallos, ultimo) values (p_clave, 1, public._ahora())
   on conflict (clave) do update set
-    fallos = case when i.ultimo < now() - interval '30 minutes'
-                   and coalesce(i.bloqueado_hasta, '-infinity'::timestamptz) < now()
+    fallos = case when i.ultimo < public._ahora() - interval '30 minutes'
+                   and coalesce(i.bloqueado_hasta, '-infinity'::timestamptz) < public._ahora()
                   then 1 else i.fallos + 1 end,
-    ultimo = now()
+    ultimo = public._ahora()
   returning fallos into n;
   if n >= p_umbral then
     update public.intentos
-       set bloqueado_hasta = now() + make_interval(mins => least(60, 5 * (n - p_umbral + 1)))
+       set bloqueado_hasta = public._ahora() + make_interval(mins => least(60, 5 * (n - p_umbral + 1)))
      where clave = p_clave;
   end if;
   return greatest(0, p_umbral - n);
@@ -368,13 +373,13 @@ begin
   select s.id, s.ultimo_uso, s.creada, u.id as uid, u.nombre, u.rol, u.debe_cambiar_pin into r
     from public.sesiones s join public.usuarios u on u.id = s.usuario_id
    where s.token_hash = encode(digest(p_token, 'sha256'), 'hex')
-     and not s.revocada and s.expira > now();
+     and not s.revocada and s.expira > public._ahora();
   if not found then
     perform public._error('SESION', 'Tu sesión expiró. Vuelve a entrar.');
   end if;
-  if r.ultimo_uso < now() - interval '1 minute' then
+  if r.ultimo_uso < public._ahora() - interval '1 minute' then
     update public.sesiones
-       set ultimo_uso = now(), expira = least(r.creada + interval '3 days', now() + interval '14 hours')
+       set ultimo_uso = public._ahora(), expira = least(r.creada + interval '3 days', public._ahora() + interval '14 hours')
      where id = r.id;
   end if;
   sid := r.id; uid := r.uid; nombre := r.nombre; rol := r.rol; cambiar_pin := coalesce(r.debe_cambiar_pin, false);
@@ -650,25 +655,26 @@ begin
   if u.rol = 'cocinero' then
     insert into public.cocina_sesion (id) values (1) on conflict (id) do nothing;
     select * into cs from public.cocina_sesion where id = 1 for update;
-    if cs.session_id is not null and cs.actualizado > now() - interval '45 seconds'
+    if cs.session_id is not null and cs.actualizado > public._ahora() - interval '45 seconds'
        and coalesce(cs.dispositivo, '') <> coalesce(left(p_dispositivo, 64), '-')
-       and exists (select 1 from public.sesiones s where s.id::text = cs.session_id and not s.revocada and s.expira > now()) then
+       and exists (select 1 from public.sesiones s where s.id::text = cs.session_id and not s.revocada and s.expira > public._ahora()) then
       return json_build_object('ok', false, 'error', 'cocina_ocupada');
     end if;
   end if;
 
   v_token := encode(gen_random_bytes(32), 'hex');
-  insert into public.sesiones (token_hash, usuario_id, dispositivo, expira)
-  values (encode(digest(v_token, 'sha256'), 'hex'), u.id, left(p_dispositivo, 64), now() + interval '14 hours')
+  insert into public.sesiones (token_hash, usuario_id, dispositivo, creada, ultimo_uso, expira)
+  values (encode(digest(v_token, 'sha256'), 'hex'), u.id, left(p_dispositivo, 64), public._ahora(), public._ahora(),
+          public._ahora() + interval '14 hours')
   returning id into v_sid;
 
   if u.rol = 'cocinero' then
-    update public.cocina_sesion set session_id = v_sid::text, dispositivo = left(p_dispositivo, 64), actualizado = now()
+    update public.cocina_sesion set session_id = v_sid::text, dispositivo = left(p_dispositivo, 64), actualizado = public._ahora()
      where id = 1;
   end if;
 
-  delete from public.sesiones where expira < now() - interval '1 day';
-  delete from public.intentos where ultimo < now() - interval '1 day' and coalesce(bloqueado_hasta, '-infinity'::timestamptz) < now();
+  delete from public.sesiones where expira < public._ahora() - interval '1 day';
+  delete from public.intentos where ultimo < public._ahora() - interval '1 day' and coalesce(bloqueado_hasta, '-infinity'::timestamptz) < public._ahora();
 
   return json_build_object('ok', true, 'token', v_token, 'debeCambiarPin', u.debe_cambiar_pin,
     'usuario', json_build_object('id', u.id, 'nombre', u.nombre, 'rol', u.rol));
@@ -1094,7 +1100,7 @@ begin
     return true;
   end if;
   -- si nadie la tiene (por ejemplo al volver a una sola cocina), la toma esta pantalla
-  update public.cocina_sesion set session_id = s.sid::text, actualizado = now()
+  update public.cocina_sesion set session_id = s.sid::text, actualizado = public._ahora()
    where id = 1 and (session_id = s.sid::text or session_id is null);
   return found;
 end $$;
@@ -1616,7 +1622,7 @@ begin
   -- Ninguna función del esquema es ejecutable por defecto…
   for f in select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.proname in (
-             '_error','_ahora_local','_fecha','_hora','_ip','_hash_pin','_pin_ok','_pin_formato_ok','_pin_debil',
+             '_error','_ahora','_ahora_local','_fecha','_hora','_ip','_hash_pin','_pin_ok','_pin_formato_ok','_pin_debil',
              '_espera','_fallo','_limpiar_intentos','_log','_sesion','_exigir','_verificar_admin','_ticket_json',
              '_mesa_json','_resumen','_resolver_item','_valorar_items','_total_items','_avisar_cambio','_precio_ok',
              'crear_admin_inicial','usuarios_login','login','logout','cambiar_pin','estado','guardar_borrador_mesa',

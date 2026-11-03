@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:sql": "vitest run tests/sql",
+    "inventario": "node scripts/inventario.mjs",
     "test:e2e": "playwright test",
     "check:secrets": "node scripts/check-secrets.mjs"
   },
