@@ -1,0 +1,82 @@
+// Análisis de las funciones del catálogo para el inventario (scripts/inventario.mjs).
+// Separado para poder probarlo sin base de datos (tests/inventario.test.js).
+export const sinComentarios = (s) => s.replace(/--[^\n]*/g, "");
+export const unicos = (xs) => [...new Set(xs)].sort();
+export const lista = (xs) => (xs.length ? xs.map((x) => `\`${x}\``).join(", ") : "—");
+
+// Lo que una función hace por sí misma: tablas que lee o escribe, funciones que llama y puntos a cuidar
+export function directo(f, tablas, funciones) {
+  const cuerpo = sinComentarios(f.def.slice(f.def.indexOf("AS $function$")));
+  const toca = (re) => unicos([...cuerpo.matchAll(re)].map((m) => m[1]).filter((t) => tablas.has(t)));
+  const escribe = unicos([
+    ...toca(/insert\s+into\s+public\.(\w+)/gi), ...toca(/update\s+public\.(\w+)/gi), ...toca(/delete\s+from\s+public\.(\w+)/gi),
+  ]);
+  const lee = toca(/(?:from|join)\s+public\.(\w+)/gi).filter((t) => !escribe.includes(t) || /select[\s\S]*from\s+public\./i.test(cuerpo));
+  const llama = unicos([...funciones].filter((n) => n !== f.nombre && new RegExp(`(?:^|[^\\w.])(?:public\\.)?${n}\\s*\\(`).test(cuerpo)));
+  const roles = (cuerpo.match(/_exigir\(\s*p_token\s*,\s*array\[([^\]]*)\]/) || [])[1];
+  const acceso = !f.api ? (f.nombre === "crear_admin_inicial" ? "Solo SQL Editor" : "Interna")
+    : roles ? `Sesión: ${roles.replace(/'/g, "").replace(/\s+/g, " ")}`
+    : /_sesion\(\s*p_token/.test(cuerpo) ? "Sesión: cualquier rol"
+    : /\bp_token\b/.test(f.args) ? "Token propio (sin revisar rol)"
+    : "Sin sesión";
+  const marcas = [];
+  if (/\bid\s*=\s*1\b/.test(cuerpo)) marcas.push("fila única `id = 1`");
+  for (const m of cuerpo.matchAll(/pg_advisory_xact_lock(_shared)?\(hashtextextended\('([^']+)'/g)) marcas.push(`candado \`${m[2]}\`${m[1] ? " (compartido)" : ""}`);
+  if (/'duplicado',\s*true/.test(cuerpo)) marcas.push("devuelve lo ya guardado si se repite el id");
+  if (/_verificar_admin\(/.test(cuerpo)) marcas.push("PIN de administrador");
+  if (/_pin_ok\(|_hash_pin\(/.test(cuerpo)) marcas.push("verifica o guarda PIN");
+  if (/realtime\.send/.test(cuerpo)) marcas.push("aviso en tiempo real (canal `tequeria`, público)");
+  const prefijos = unicos([...cuerpo.matchAll(/_(?:fallo|espera|limpiar_intentos)\('(\w+):'/g)].map((m) => m[1] + ":"));
+  if (prefijos.length) marcas.push(`contadores de intentos ${prefijos.map((x) => `\`${x}\``).join(", ")}`);
+  if (/\bnow\(\)/.test(cuerpo)) marcas.push("usa `now()`");
+  const ids = (f.args.match(/\bp_(?:id|ids|ticket|tickets|mesa_id)\b/g) || []);
+  if (f.api && ids.length) marcas.push(`recibe ids del cliente (${unicos(ids).join(", ")})`);
+  return { lee, escribe, llama, acceso, marcas, sesion: /\b_sesion\(/.test(cuerpo) };
+}
+
+// Agrega lo que hacen las funciones que llama, de forma transitiva: un ayudante que no toca tablas
+// pero llama a otro que lee la configuración también depende de la sucursal.
+export function conDependencias(lista) {
+  const porNombre = new Map();
+  for (const f of lista) porNombre.set(f.nombre, [...(porNombre.get(f.nombre) || []), f]);
+  const memo = new Map();
+  const cerrar = (nombre, camino = new Set()) => {
+    if (memo.has(nombre)) return memo.get(nombre);
+    const vacio = { lee: [], escribe: [], marcas: [], sesion: false, via: new Map() };
+    if (camino.has(nombre)) return vacio;
+    camino.add(nombre);
+    const r = { lee: new Set(), escribe: new Set(), marcas: new Map(), sesion: false };
+    for (const f of porNombre.get(nombre) || []) {
+      f.lee.forEach((t) => r.lee.add(t)); f.escribe.forEach((t) => r.escribe.add(t));
+      if (f.sesion) r.sesion = true;
+      for (const g of f.llama) {
+        const c = cerrar(g, camino);
+        c.lee.forEach((t) => r.lee.add(t)); c.escribe.forEach((t) => r.escribe.add(t));
+        if (c.sesion) r.sesion = true;
+        for (const [m, via] of c.marcas) if (!r.marcas.has(m)) r.marcas.set(m, via);
+        for (const m of (porNombre.get(g) || []).flatMap((x) => x.marcas)) if (!r.marcas.has(m)) r.marcas.set(m, g);
+      }
+    }
+    camino.delete(nombre);
+    const res = { lee: [...r.lee].sort(), escribe: [...r.escribe].sort(), marcas: r.marcas, sesion: r.sesion };
+    memo.set(nombre, res);
+    return res;
+  };
+  return lista.map((f) => {
+    const c = cerrar(f.nombre);
+    const leeIndirecto = c.lee.filter((t) => !f.lee.includes(t));
+    const escribeIndirecto = c.escribe.filter((t) => !f.escribe.includes(t));
+    const indirectas = [...c.marcas].filter(([m]) => !f.marcas.includes(m) && !m.startsWith("recibe ids"))
+      .map(([m, via]) => `${m} (vía \`${via}\`)`);
+    const tocaDatos = c.lee.length || c.escribe.length;
+    const contexto = f.acceso.startsWith("Sesión") || f.acceso.startsWith("Token") ? "Sucursal de la sesión operativa"
+      : f.acceso === "Sin sesión" ? "Sucursal del dispositivo vinculado"
+      : f.acceso === "Solo SQL Editor" ? "Se reemplaza por el registro del dueño"
+      : f.resultado === "trigger" ? "Sucursal de la fila (canal privado por sucursal)"
+      : c.sesion ? "Sucursal de la sesión (resuelve la sesión)"
+      : tocaDatos ? `Recibe la sucursal de quien la llama${f.lee.length || f.escribe.length ? "" : " (indirecto)"}`
+      : "Ninguno (no toca datos, ni directa ni indirectamente)";
+    return { ...f, leeIndirecto, escribeIndirecto, indirectas, contexto };
+  });
+}
+

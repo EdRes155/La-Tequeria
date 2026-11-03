@@ -20,9 +20,13 @@ está implementado. La lista de tablas, funciones, candados y claves que hay que
 
 Columnas principales:
 
+- `cuentas`: `nombre`, `estado` (`pendiente_activacion`, `activa`, `suspendida`; §3.0), `creada`,
+  `activada_en`.
 - `sucursales`: `nombre`, `zona_horaria`, `retencion_domicilio_dias`, `creada`, `activa`.
-- `membresias`: `rol`, `creada`, `creada_por`. Una persona puede estar en varias cuentas; cada cuenta
-  conserva siempre al menos un `propietario`.
+- `membresias`: `rol`, `creada`, `creada_por`. Una persona puede estar en varias cuentas; una cuenta
+  activa conserva siempre al menos un `propietario` (§3.0).
+- `invitaciones`: `correo`, `rol`, `token_hash`, `vence`, `creada_por` (nulo si la crea el proveedor),
+  `usada_en`, `usada_por`.
 - `dispositivos`:
   - `nombre`, `auth_user_id` (su identidad de Supabase, ver §4), `aprobado_por`, `creado`,
     `ultimo_uso`;
@@ -83,23 +87,53 @@ un corte de una sucursal frenaría los cobros de todas. Pasan a incluir la sucur
 `tequeria:corte:<sucursal_id>`. El orden de bloqueo no cambia: primero el candado, después las filas
 ordenadas por id.
 
-## 3. Contexto autorizado en cada función
+## 3. Contexto autorizado: un validador por tipo de llamada
 
-La sucursal **nunca** se recibe como parámetro de la app. Sale de las credenciales:
+La app de operación **nunca** envía la sucursal: sale de las credenciales. Pero no todas las llamadas
+tienen las mismas credenciales: vincular un equipo ocurre antes de que exista el dispositivo, el
+inicio de sesión antes de que exista el operador, y crear una cuenta o aceptar una invitación antes de
+que exista la membresía. Por eso no hay un solo validador sino cinco, cada uno con lo que se puede
+exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` ni `authenticated`).
 
-1. **Dispositivo:** `auth.uid()` (identidad de Supabase del equipo) debe corresponder a una fila de
-   `dispositivos` sin revocar. De ahí salen `sucursal_id` y `cuenta_id`.
-2. **Sesión del operador:** el token de PIN (`p_token`) debe pertenecer a una sesión de **la misma
-   sucursal y el mismo dispositivo**, no vencida ni revocada. Robar solo el token no sirve sin el
-   dispositivo, y viceversa.
-3. **Rol y estado:** el rol del operador y el estado de la sesión (activa o bloqueada por inactividad,
-   §5) deciden qué puede hacer.
+| Validador | Lo usan | Exige | Devuelve |
+|---|---|---|---|
+| `_vinculacion(p_codigo)` | `vincular_dispositivo` | Identidad anónima de Supabase (`auth.uid()`) **sin** dispositivo vigente; código vigente y sin usar; su sucursal activa y su cuenta `activa` | `codigo_id`, `sucursal_id`, `cuenta_id`, `monitor_cocina` |
+| `_dispositivo()` | `usuarios_login`, `login` | `auth.uid()` de un dispositivo sin revocar; su sucursal activa y su cuenta `activa` | `dispositivo_id`, `sucursal_id`, `cuenta_id`, `monitor_cocina` |
+| `_contexto(p_token, p_roles, p_tipo)` | Toda operación de sucursal (§3.2) | Lo de `_dispositivo()` y además una sesión de operador de **esa sucursal y ese dispositivo**, no vencida ni revocada; rol y estado (§5) | Lo de `_dispositivo()` más `sid`, `uid`, `nombre`, `rol` y si solo puede leer cocina (§5.4) |
+| `_identidad()` | `crear_cuenta`, `aceptar_invitacion` | Sesión de Supabase de una persona: **no anónima** y con correo verificado. No exige membresía: estas llamadas la crean | `auth_user_id`, `correo` |
+| `_dueno(p_cuenta, p_roles)` | Operaciones de dueños (§3.2) | Lo de `_identidad()` y además membresía en `p_cuenta` con uno de los roles; cuenta `activa` | `cuenta_id`, `rol` |
 
-Una función auxiliar nueva, `_contexto(p_token, p_roles, p_tipo)`, sustituye a `_sesion` y `_exigir`.
-Hace las tres comprobaciones y devuelve `sucursal_id`, `cuenta_id`, `dispositivo_id`, `sid`, `uid`,
-`nombre`, `rol` y si la sesión solo puede leer cocina. **Toda función de la API empieza por ella**, y
-todas sus consultas filtran por ese `sucursal_id`. Las auxiliares internas lo reciben como parámetro
-explícito.
+- **Por qué el token solo no basta:** `_contexto` exige el dispositivo y la sesión del operador a la
+  vez. Robar solo el token no sirve sin el equipo, y viceversa.
+- **Identidades que no se mezclan:** una identidad anónima (de un equipo) nunca pasa `_identidad`, y
+  la de una persona nunca pasa `_dispositivo`. Un dueño que quiere operar la caja vincula el equipo
+  como cualquier otro.
+- **El panel de dueños sí elige cuenta y sucursal**, porque una persona puede estar en varias. Las
+  recibe como parámetro y `_dueno` comprueba la membresía; una sucursal se busca siempre con
+  `cuenta_id = p_cuenta`, y una de otra cuenta se trata como inexistente.
+- **Auxiliares internas** (`_fecha`, `_valorar_items`, `_ticket_json`…): reciben `sucursal_id` como
+  parámetro explícito de quien las llama. El [inventario](INVENTARIO.md) marca cuáles dependen de la
+  sucursal directamente y cuáles a través de otras.
+- **Transición:** mientras dure la expansión (§9, paso 1) las funciones actuales siguen con `_sesion`
+  y `_exigir` y la sucursal única. Pasan a `_contexto` en el paso 2, una por una.
+
+### 3.0 Estado de la cuenta
+
+| Estado | Cómo se llega | Qué permite |
+|---|---|---|
+| `pendiente_activacion` | La crea la migración (la cuenta actual de La Tequería) o el proveedor al dar de alta a un cliente. No tiene ningún propietario | Solo `aceptar_invitacion` de una invitación con rol `propietario`. Nada más: ni códigos, ni vincular equipos, ni invitar, ni crear sucursales |
+| `activa` | Al aceptar la primera invitación de propietario (en la misma transacción que crea la membresía), o directamente con `crear_cuenta`, que crea la cuenta y la membresía de quien la crea a la vez | Todo, según el rol |
+| `suspendida` | Fuera del alcance del piloto (suscripción) | Se define con la facturación |
+
+- **Invariante:** una cuenta `activa` tiene siempre al menos un `propietario`. Quitar o degradar al
+  último propietario se rechaza; se comprueba con la fila de la cuenta bloqueada (`for update`) para
+  que dos bajas simultáneas no dejen la cuenta vacía.
+- **Invitación inicial:** la del propietario de una cuenta pendiente la crea el proveedor desde el
+  servidor (SQL Editor o un script de alta), nunca la app. Es de un solo uso, vence y, como toda
+  invitación, solo la acepta una identidad con el mismo correo verificado.
+- **Para la migración:** como los equipos se vinculan con códigos y los códigos exigen cuenta
+  activa, el dueño debe aceptar su invitación **antes** de publicar la app que exige dispositivo
+  ([MIGRACION.md](MIGRACION.md) §5).
 
 ### 3.1 Comprobaciones que no se pueden olvidar
 
@@ -119,16 +153,19 @@ explícito.
 
 ### 3.2 Funciones de la API por tipo
 
-| Tipo | Funciones | Credenciales | ¿Cuenta como interacción del operador? | Con bloqueo por inactividad |
+| Tipo | Funciones | Validador | ¿Cuenta como interacción del operador? | Con bloqueo por inactividad |
 |---|---|---|---|---|
-| Del dispositivo, sin operador | `usuarios_login`, `login`, `vincular_dispositivo` (nueva) | Dispositivo (la vinculación, con código) | — | — |
-| Sesión | `logout`, `cambiar_pin`, `desbloquear` (nueva) | Dispositivo + token | Desbloquear sí; no reinicia las 12 h | Solo `desbloquear` y `logout` |
-| Lectura | `estado` | Dispositivo + token | No | Solo el monitor dedicado lee cocina y lo necesario para mostrarla |
-| Automáticas | `latido_cocina`, `marcar_recibido` | Dispositivo + token | No | El latido sí; `marcar_recibido` no (es escritura) |
-| Mesero | `guardar_borrador_mesa`, `liberar_mesa`, `enviar_comanda`, `reenviar_cocina`, `cobrar`, `no_cobrar` | Dispositivo + token | Sí | No (se pide PIN) |
-| Cocina | `mover_tickets`, `archivar_tickets`, `marcar_hecho`, `liberar_cocina`, `hacer_corte` | Dispositivo + token | Sí | No (se pide PIN) |
-| Administración | Catálogo, precios, ajustes, gastos, usuarios, `anular_cobro`, `restablecer_acceso` (nueva) | Dispositivo + token; algunas con PIN de administrador | Sí | No (se pide PIN) |
-| Dueños | `crear_cuenta`, `crear_sucursal`, `invitar_miembro`, `aceptar_invitacion`, `quitar_miembro`, `generar_codigo`, `listar_dispositivos`, `revocar_dispositivo` (nuevas) | Sesión de Supabase de una persona con membresía | — | — |
+| Vinculación | `vincular_dispositivo` (nueva) | `_vinculacion` | — | — |
+| Del dispositivo, sin operador | `usuarios_login`, `login` | `_dispositivo` | — | — |
+| Sesión | `logout`, `cambiar_pin`, `desbloquear` (nueva) | `_contexto` | Desbloquear sí; no reinicia las 12 h | Solo `desbloquear` y `logout` |
+| Lectura | `estado` | `_contexto` | No | Solo el monitor dedicado lee cocina y lo necesario para mostrarla |
+| Automáticas | `latido_cocina`, `marcar_recibido` | `_contexto` | No | El latido sí; `marcar_recibido` no (es escritura) |
+| Mesero | `guardar_borrador_mesa`, `liberar_mesa`, `enviar_comanda`, `reenviar_cocina`, `cobrar`, `no_cobrar` | `_contexto` | Sí | No (se pide PIN) |
+| Cocina | `mover_tickets`, `archivar_tickets`, `marcar_hecho`, `liberar_cocina`, `hacer_corte` | `_contexto` | Sí | No (se pide PIN) |
+| Administración | Catálogo, precios, ajustes, gastos, usuarios, `anular_cobro`, `restablecer_acceso` (nueva) | `_contexto`; algunas también PIN de administrador | Sí | No (se pide PIN) |
+| Alta de personas | `crear_cuenta`, `aceptar_invitacion` (nuevas) | `_identidad` | — | — |
+| Dueños: propietario | `crear_sucursal`, `invitar_miembro`, `quitar_miembro` (nuevas) | `_dueno(cuenta, {propietario})` | — | — |
+| Dueños: propietario o encargado | `generar_codigo`, `listar_dispositivos`, `revocar_dispositivo` (nuevas) | `_dueno(cuenta, {propietario, encargado})` | — | — |
 
 Consecuencia que conviene confirmar: con la cocina bloqueada por inactividad, `marcar_recibido` no se
 registra. El mesero verá «Enviado» hasta que alguien desbloquee la cocina con su PIN.
@@ -137,8 +174,8 @@ registra. El mesero verá «Enviado» hasta que alguien desbloquee la cocina con
 
 - **Primera vez:** el equipo abre la app, inicia una sesión anónima de Supabase
   (`signInAnonymously`), y con ella llama a `vincular_dispositivo(codigo, nombre)`.
-- **Vincular:** el servidor:
-  - busca el código por su hash y rechaza los vencidos o usados;
+- **Vincular:** el servidor, con `_vinculacion`:
+  - busca el código por su hash y rechaza los vencidos o usados, y los de una cuenta pendiente;
   - lo marca como usado en la misma transacción;
   - crea el `dispositivo` ligado a `auth.uid()`, a su sucursal y, si el código lo indica, como
     monitor dedicado.
@@ -147,7 +184,8 @@ registra. El mesero verá «Enviado» hasta que alguien desbloquee la cocina con
 - **Requisitos en Supabase:** activar el inicio de sesión anónimo y protegerlo con CAPTCHA o límite
   de solicitudes.
 - **Revocar:**
-  - marca `revocado_en`; desde ese momento `_contexto` rechaza al equipo en todas las funciones;
+  - marca `revocado_en`; desde ese momento `_dispositivo` (y con él `_contexto`) rechaza al equipo en
+    todas las funciones;
   - la sesión de Supabase dura poco (se configura la expiración del JWT; valor a medir, por ejemplo
     10 minutos);
   - al renovarse, las políticas del tiempo real vuelven a evaluar al equipo (§7).
@@ -257,7 +295,7 @@ Reglas de aplicación (del plan):
    - agregar las tablas nuevas y `sucursal_id` como columna con valor nulo permitido;
    - llenarla con la sucursal inicial (ensayo en [MIGRACION.md](MIGRACION.md));
    - después, `not null`, únicos y referencias compuestas.
-2. **`_contexto` y `_ahora()`:** pasar las funciones una por una, cada una con sus casos en la matriz
+2. **Validadores (§3) y `_ahora()`:** pasar las funciones una por una, cada una con sus casos en la matriz
    de aislamiento (`tests/sql/aislamiento.test.js`).
 3. **Política de seguridad:** PIN de 6 a 8 dígitos, contadores, sesión de 12 h e inactividad, con
    reloj controlado.

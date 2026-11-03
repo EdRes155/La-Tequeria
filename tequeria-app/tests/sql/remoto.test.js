@@ -4,8 +4,10 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import pg from "pg";
+import { exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
 
 const URL_ADMIN = process.env.TEST_DATABASE_URL;
+if (URL_ADMIN) exigirServidorDesechable(URL_ADMIN);
 const d = URL_ADMIN ? describe : describe.skip;
 const raiz = path.resolve(import.meta.dirname, "../..");
 const BASE = "tq_remoto";
@@ -38,7 +40,7 @@ d("adaptador remoto contra el esquema real", () => {
   beforeAll(async () => {
     const admin = new pg.Client({ connectionString: URL_ADMIN });
     await admin.connect();
-    await admin.query(`drop database if exists ${BASE} with (force)`);
+    await admin.query(`drop database if exists ${nombreDesechable(BASE)} with (force)`);
     await admin.query(`create database ${BASE}`);
     await admin.end();
     const u = new URL(URL_ADMIN); u.pathname = "/" + BASE;
@@ -57,7 +59,7 @@ d("adaptador remoto contra el esquema real", () => {
     await conexion?.end();
     const admin = new pg.Client({ connectionString: URL_ADMIN });
     await admin.connect();
-    await admin.query(`drop database if exists ${BASE} with (force)`);
+    await admin.query(`drop database if exists ${nombreDesechable(BASE)} with (force)`);
     await admin.end();
   });
 

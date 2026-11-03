@@ -3,16 +3,21 @@
 // («Mesa 1», «pastor», «coca») para comprobar el aislamiento. Solo para desarrollo, pruebas
 // automáticas y staging: nunca se siembran en producción. Nombres y correos son ficticios (dominio
 // reservado .invalid) y los PIN cumplen la política de 6 a 8 dígitos, distintos entre sí.
-// Se usarán para sembrar la base de prueba cuando exista el modelo de docs/multinegocio/MODELO.md.
+//
+// El origen está congelado. Cada prueba pide su propia copia profunda con crearCuentas() o
+// sucursales(): cambiar algo de una sucursal nunca afecta a la otra, a otra prueba ni al origen.
 
-const catalogoComun = {
-  bebidas: [
-    { id: "coca", nombre: "Coca-Cola", precio: 25, cantidad: 24 },
-    { id: "agua-horchata", nombre: "Agua de horchata", precio: 30, cantidad: 12 },
-  ],
+const congelar = (o) => {
+  if (o && typeof o === "object" && !Object.isFrozen(o)) Object.values(Object.freeze(o)).forEach(congelar);
+  return o;
 };
+// Cada sucursal arma su propio catálogo: aunque las claves coincidan, los objetos no se comparten
+const bebidasBase = () => [
+  { id: "coca", nombre: "Coca-Cola", precio: 25, cantidad: 24 },
+  { id: "agua-horchata", nombre: "Agua de horchata", precio: 30, cantidad: 12 },
+];
 
-export const CUENTAS = [
+const ORIGEN = congelar([
   {
     clave: "tequeria",
     nombre: "La Tequería (datos de prueba)",
@@ -24,7 +29,7 @@ export const CUENTAS = [
         zonaHoraria: "America/Mexico_City",
         mesas: 8,
         carnes: ["pastor", "bistec", "suadero"],
-        ...catalogoComun,
+        bebidas: bebidasBase(),
         precios: { "taco-pastor": 20, "taco-bistec": 20, "gringa-pastor": 45 },
         personal: [
           { clave: "ana", nombre: "Ana Prueba", rol: "admin", pin: "804219" },
@@ -52,7 +57,7 @@ export const CUENTAS = [
         zonaHoraria: "America/Monterrey",
         mesas: 5,
         carnes: ["pastor", "tripa"],
-        ...catalogoComun,
+        bebidas: bebidasBase(),
         precios: { "taco-pastor": 18, "taco-tripa": 22, "gringa-pastor": 40 },
         personal: [
           { clave: "berta", nombre: "Berta Prueba", rol: "admin", pin: "62840715" },
@@ -66,6 +71,10 @@ export const CUENTAS = [
       },
     ],
   },
-];
+]);
 
-export const sucursales = () => CUENTAS.flatMap((c) => c.sucursales.map((s) => ({ ...s, cuenta: c.clave })));
+// Copia profunda nueva en cada llamada
+export const crearCuentas = () => structuredClone(ORIGEN);
+export const sucursales = (cuentas = crearCuentas()) => cuentas.flatMap((c) => c.sucursales.map((s) => ({ ...s, cuenta: c.clave })));
+// Solo para comprobar que el origen no se puede modificar
+export const origenParaPruebas = ORIGEN;

@@ -3,8 +3,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import pg from "pg";
+import { exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
 
 export const URL_ADMIN = process.env.TEST_DATABASE_URL;
+if (URL_ADMIN) exigirServidorDesechable(URL_ADMIN);
 const raiz = path.resolve(import.meta.dirname, "../..");
 export const leer = (f) => fs.readFileSync(path.join(raiz, f), "utf8");
 export const ESQUEMA = leer("supabase-schema.sql");
@@ -16,7 +18,7 @@ const urlDe = (nombre) => { const u = new URL(URL_ADMIN); u.pathname = "/" + nom
 export async function crearBase(nombre, scripts) {
   const admin = new pg.Client({ connectionString: URL_ADMIN });
   await admin.connect();
-  await admin.query(`drop database if exists ${nombre} with (force)`);
+  await admin.query(`drop database if exists ${nombreDesechable(nombre)} with (force)`);
   await admin.query(`create database ${nombre}`);
   await admin.end();
   bases.push(nombre);
@@ -46,7 +48,7 @@ export async function cerrarTodo() {
   if (!URL_ADMIN) return;
   const admin = new pg.Client({ connectionString: URL_ADMIN });
   await admin.connect();
-  for (const b of bases.splice(0)) await admin.query(`drop database if exists ${b} with (force)`).catch(() => {});
+  for (const b of bases.splice(0)) await admin.query(`drop database if exists ${nombreDesechable(b)} with (force)`).catch(() => {});
   await admin.end();
 }
 

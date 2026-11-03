@@ -8,23 +8,22 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { exigirServidorDesechable, nombreDesechable } from "./base-desechable.mjs";
+import { directo, conDependencias, unicos, lista } from "./inventario-analisis.mjs";
 
 const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const raiz = path.resolve(app, "..");
 const SALIDA = path.join(raiz, "docs/multinegocio/INVENTARIO.md");
 const URL_ADMIN = process.env.TEST_DATABASE_URL;
 const BASE = "tq_inventario";
-if (!URL_ADMIN) { console.error("Falta TEST_DATABASE_URL (una base administrativa desechable, nunca producción)."); process.exit(2); }
+try { exigirServidorDesechable(URL_ADMIN); } catch (e) { console.error(e.message); process.exit(2); }
 
 const leer = (f) => fs.readFileSync(path.join(app, f), "utf8");
-const sinComentarios = (s) => s.replace(/--[^\n]*/g, "");
-const unicos = (xs) => [...new Set(xs)].sort();
-const lista = (xs) => (xs.length ? xs.map((x) => `\`${x}\``).join(", ") : "—");
 
 async function catalogo() {
   const admin = new pg.Client({ connectionString: URL_ADMIN });
   await admin.connect();
-  await admin.query(`drop database if exists ${BASE} with (force)`);
+  await admin.query(`drop database if exists ${nombreDesechable(BASE)} with (force)`);
   await admin.query(`create database ${BASE}`);
   const u = new URL(URL_ADMIN); u.pathname = "/" + BASE;
   const c = new pg.Client({ connectionString: u.toString() });
@@ -46,7 +45,7 @@ async function catalogo() {
         from pg_class c where c.relnamespace = 'public'::regnamespace and c.relkind = 'r' order by 1`),
       funciones: await q(`
         select p.proname nombre, pg_get_function_identity_arguments(p.oid) args, pg_get_function_result(p.oid) resultado,
-          p.prosecdef definidor, has_function_privilege('anon', p.oid, 'execute') api, pg_get_functiondef(p.oid) def
+          p.prosecdef definidor, has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute') api, pg_get_functiondef(p.oid) def
         from pg_proc p where p.pronamespace = 'public'::regnamespace order by 1, 2`),
       disparadores: await q(`
         select c.relname tabla, t.tgname nombre, pg_get_triggerdef(t.oid) def
@@ -55,42 +54,9 @@ async function catalogo() {
     };
   } finally {
     await c.end();
-    await admin.query(`drop database if exists ${BASE} with (force)`);
+    await admin.query(`drop database if exists ${nombreDesechable(BASE)} with (force)`);
     await admin.end();
   }
-}
-
-function analizar(f, tablas) {
-  const cuerpo = sinComentarios(f.def.slice(f.def.indexOf("AS $function$")));
-  const toca = (re) => unicos([...cuerpo.matchAll(re)].map((m) => m[1]).filter((t) => tablas.has(t)));
-  const escribe = unicos([
-    ...toca(/insert\s+into\s+public\.(\w+)/gi), ...toca(/update\s+public\.(\w+)/gi), ...toca(/delete\s+from\s+public\.(\w+)/gi),
-  ]);
-  const lee = toca(/(?:from|join)\s+public\.(\w+)/gi).filter((t) => !escribe.includes(t) || /select[\s\S]*from\s+public\./i.test(cuerpo));
-  const roles = (cuerpo.match(/_exigir\(\s*p_token\s*,\s*array\[([^\]]*)\]/) || [])[1];
-  const acceso = !f.api ? (f.nombre === "crear_admin_inicial" ? "Solo SQL Editor" : "Interna")
-    : roles ? `Sesión: ${roles.replace(/'/g, "").replace(/\s+/g, " ")}`
-    : /_sesion\(\s*p_token/.test(cuerpo) ? "Sesión: cualquier rol"
-    : /\bp_token\b/.test(f.args) ? "Token propio (sin revisar rol)"
-    : "Sin sesión";
-  const marcas = [];
-  if (/\bid\s*=\s*1\b/.test(cuerpo)) marcas.push("fila única `id = 1`");
-  for (const m of cuerpo.matchAll(/pg_advisory_xact_lock(_shared)?\(hashtextextended\('([^']+)'/g)) marcas.push(`candado \`${m[2]}\`${m[1] ? " (compartido)" : ""}`);
-  if (/'duplicado',\s*true/.test(cuerpo)) marcas.push("devuelve lo ya guardado si se repite el id");
-  if (/_verificar_admin\(/.test(cuerpo)) marcas.push("PIN de administrador");
-  if (/_pin_ok\(|_hash_pin\(/.test(cuerpo)) marcas.push("verifica o guarda PIN");
-  if (/realtime\.send/.test(cuerpo)) marcas.push("aviso en tiempo real (canal `tequeria`, público)");
-  const prefijos = unicos([...cuerpo.matchAll(/_(?:fallo|espera|limpiar_intentos)\('(\w+):'/g)].map((m) => m[1] + ":"));
-  if (prefijos.length) marcas.push(`contadores de intentos ${prefijos.map((x) => `\`${x}\``).join(", ")}`);
-  if (/\bnow\(\)/.test(cuerpo)) marcas.push("usa `now()`");
-  const ids = (f.args.match(/\bp_(?:id|ids|ticket|tickets|mesa_id)\b/g) || []);
-  if (f.api && ids.length) marcas.push(`recibe ids del cliente (${unicos(ids).join(", ")})`);
-  const contexto = acceso.startsWith("Sesión") || acceso.startsWith("Token") ? "Sucursal de la sesión operativa"
-    : acceso === "Sin sesión" ? "Sucursal del dispositivo vinculado"
-    : acceso === "Solo SQL Editor" ? "Se reemplaza por el registro del dueño"
-    : f.resultado === "trigger" ? "Sucursal de la fila (canal privado por sucursal)"
-    : escribe.length || lee.length ? "Recibe la sucursal de quien la llama" : "Ninguno (no toca datos)";
-  return { lee, escribe, acceso, marcas, contexto };
 }
 
 function cliente() {
@@ -120,9 +86,14 @@ function cliente() {
 
 function documento({ tablas, funciones, disparadores }, cli) {
   const nombres = new Set(tablas.map((t) => t.tabla));
-  const fs_ = funciones.map((f) => ({ ...f, ...analizar(f, nombres) }));
+  const nombresFn = new Set(funciones.map((f) => f.nombre));
+  const fs_ = conDependencias(funciones.map((f) => ({ ...f, ...directo(f, nombres, nombresFn) })));
+  const col = (directas, indirectas) => !indirectas.length ? lista(directas)
+    : directas.length ? `${lista(directas)} · por otras: ${lista(indirectas)}` : `por otras: ${lista(indirectas)}`;
+  const puntos = (f) => [...f.marcas, ...f.indirectas].join("; ") || "—";
   const api = fs_.filter((f) => f.api), internas = fs_.filter((f) => !f.api);
   const conFila1 = fs_.filter((f) => f.marcas.some((m) => m.startsWith("fila única"))).map((f) => f.nombre);
+  const conFila1Indirecta = fs_.filter((f) => !conFila1.includes(f.nombre) && f.indirectas.some((m) => m.startsWith("fila única"))).map((f) => f.nombre);
   const idempotentes = fs_.filter((f) => f.marcas.some((m) => m.startsWith("devuelve lo ya guardado"))).map((f) => f.nombre);
   const pinAdmin = fs_.filter((f) => f.marcas.includes("PIN de administrador")).map((f) => f.nombre);
   const candados = unicos(fs_.flatMap((f) => f.marcas.filter((m) => m.startsWith("candado")).map((m) => m.match(/`([^`]+)`/)[1])));
@@ -138,8 +109,8 @@ function documento({ tablas, funciones, disparadores }, cli) {
   L.push("## Resumen");
   L.push("");
   L.push(`- **${tablas.length} tablas** en \`public\`, ninguna con acceso directo para \`anon\`: ${tablas.filter((t) => t.acceso_anon).length ? "⚠️ revisar" : "correcto"}.`);
-  L.push(`- **${funciones.length} funciones**: ${api.length} de la API (ejecutables por la app) y ${internas.length} internas.`);
-  L.push(`- **Fila única \`id = 1\`** (configuración y cocina activa) en ${conFila1.length} funciones: ${lista(conFila1)}.`);
+  L.push(`- **${funciones.length} funciones**: ${api.length} de la API (ejecutables por \`anon\` o \`authenticated\`) y ${internas.length} internas.`);
+  L.push(`- **Fila única \`id = 1\`** (configuración y cocina activa) en ${conFila1.length} funciones: ${lista(conFila1)}; y a través de otras en ${conFila1Indirecta.length} más: ${lista(conFila1Indirecta)}.`);
   L.push(`- **Candados** (\`pg_advisory_xact_lock\`) globales hoy: ${lista(candados)}. Deben incluir la sucursal.`);
   L.push(`- **Devuelven lo ya guardado** si se repite el id: ${lista(idempotentes)}. Deben comprobar que sea de la misma sucursal.`);
   L.push(`- **PIN de administrador:** ${lista(pinAdmin)}. No debe servir el de otra sucursal.`);
@@ -160,15 +131,17 @@ function documento({ tablas, funciones, disparadores }, cli) {
   L.push("");
   L.push("Contexto: de dónde deberá salir la sucursal en el modelo multinegocio ([MODELO.md](MODELO.md)).");
   L.push("");
-  L.push("| Función | Acceso hoy | Lee | Escribe | Puntos a cuidar | Contexto que deberá recibir |");
-  L.push("|---|---|---|---|---|---|");
-  for (const f of api) L.push(`| \`${f.nombre}(${f.args})\` | ${f.acceso} | ${lista(f.lee)} | ${lista(f.escribe)} | ${f.marcas.join("; ") || "—"} | ${f.contexto} |`);
+  L.push("Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las funciones que llama.");
+  L.push("");
+  L.push("| Función | Acceso hoy | Lee | Escribe | Llama a | Puntos a cuidar | Contexto que deberá recibir |");
+  L.push("|---|---|---|---|---|---|---|");
+  for (const f of api) L.push(`| \`${f.nombre}(${f.args})\` | ${f.acceso} | ${col(f.lee, f.leeIndirecto)} | ${col(f.escribe, f.escribeIndirecto)} | ${lista(f.llama)} | ${puntos(f)} | ${f.contexto} |`);
   L.push("");
   L.push("## Funciones internas");
   L.push("");
-  L.push("| Función | Lee | Escribe | Puntos a cuidar | Contexto que deberá recibir |");
-  L.push("|---|---|---|---|---|");
-  for (const f of internas) L.push(`| \`${f.nombre}(${f.args})\` | ${lista(f.lee)} | ${lista(f.escribe)} | ${f.marcas.join("; ") || "—"} | ${f.contexto} |`);
+  L.push("| Función | Lee | Escribe | Llama a | Puntos a cuidar | Contexto que deberá recibir |");
+  L.push("|---|---|---|---|---|---|");
+  for (const f of internas) L.push(`| \`${f.nombre}(${f.args})\` | ${col(f.lee, f.leeIndirecto)} | ${col(f.escribe, f.escribeIndirecto)} | ${lista(f.llama)} | ${puntos(f)} | ${f.contexto} |`);
   L.push("");
   L.push("## Disparadores");
   L.push("");

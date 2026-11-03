@@ -66,8 +66,9 @@ recuperable.
 ### 4.2 Cuenta y sucursal inicial
 
 - Crear la cuenta «La Tequería» y su sucursal, con la zona horaria y la retención actuales.
-- Dejar una invitación de propietario para el correo del dueño. La cuenta queda sin propietario hasta
-  que acepte, y mientras tanto nadie puede generar códigos de vinculación.
+- La cuenta nace en `pendiente_activacion` (MODELO.md §3.0): no tiene propietario.
+- Dejar una invitación de propietario para el correo del dueño. Al aceptarla, la cuenta pasa a
+  `activa` en la misma transacción. Mientras tanto nadie puede generar códigos ni vincular equipos.
 
 ### 4.3 Rellenar
 
@@ -98,7 +99,8 @@ Antes de confirmar, un bloque de comprobación aborta la migración si algo fall
 ### 4.5 Contraer
 
 - `sucursal_id not null`; llaves y únicos por sucursal; referencias compuestas (ver MODELO.md §2).
-- Reemplazar las funciones por las versiones con `_contexto` y retirar las antiguas sin contexto.
+- Reemplazar las funciones por las versiones con sus validadores (`_dispositivo`, `_contexto`; MODELO.md
+  §3) y retirar las antiguas sin contexto.
   Desde aquí la app anterior deja de funcionar, por eso va junto con la publicación de la nueva
   (§5).
 
@@ -109,8 +111,9 @@ Antes de confirmar, un bloque de comprobación aborta la migración si algo fall
    el corte del día antes.
 3. Tomar la copia y la huella «antes», y anotar la hora del cambio (T).
 4. Aplicar la migración (una transacción con validación).
-5. Publicar la app nueva.
-6. El dueño acepta su invitación y genera los códigos para vincular la caja y la cocina.
+5. El dueño acepta su invitación (la cuenta pasa a `activa`) y genera los códigos para vincular la
+   caja y la cocina. Va antes de publicar porque sin cuenta activa no hay códigos ni equipos.
+6. Publicar la app nueva y vincular los equipos.
 7. Cada persona del personal entra con su PIN anterior desde un dispositivo vinculado y elige uno
    nuevo de 6 a 8 dígitos.
 8. Prueba de humo:
