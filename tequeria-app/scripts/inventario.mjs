@@ -70,17 +70,20 @@ function cliente() {
     for (const m of s.matchAll(/(?:rpc|conToken|conPin)\(\s*"(\w+)"/g)) rpcs.add(m[1]);
     for (const m of s.matchAll(/\.channel\(\s*"([^"]+)"/g)) canales.add(m[1]);
   }
-  // PIN de 4 o 5 dígitos en las pruebas: deberán cambiar con la política de 6 a 8 dígitos
+  // PIN de 4 o 5 dígitos en las pruebas: deberán cambiar con la política de 6 a 8 dígitos. Las copias
+  // fijas de esquemas ya publicados no se adaptan (reproducen producción tal como está).
+  const INSTANTANEAS = new Set(["tests/sql/esquema-v2.sql", "tests/sql/esquema-v3.sql", "tests/sql/produccion-extra.sql"]);
   const pruebas = [];
   const recorrer = (dir) => fs.readdirSync(dir, { withFileTypes: true }).forEach((e) => {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) recorrer(p);
-    else if (/\.(js|sql)$/.test(e.name)) {
+    else if (/\.(js|sql)$/.test(e.name) && !INSTANTANEAS.has(path.relative(app, p))) {
       const n = (fs.readFileSync(p, "utf8").match(/["'](\d{4,5})["']/g) || []).length;
       if (n) pruebas.push({ archivo: path.relative(app, p), n });
     }
   });
   recorrer(path.join(app, "tests"));
+  pruebas.sort((x, y) => (x.archivo < y.archivo ? -1 : 1));
   return { claves: claves.sort((x, y) => x.clave.localeCompare(y.clave)), rpcs: [...rpcs].sort(), canales: [...canales].sort(), pruebas };
 }
 

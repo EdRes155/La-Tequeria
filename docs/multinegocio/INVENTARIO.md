@@ -171,7 +171,6 @@ deberán adaptarse cuando se implemente, además de agregar casos de rechazo y t
 | `tests/dominio.test.js` | 8 |
 | `tests/e2e/comandas.spec.js` | 10 |
 | `tests/localStore.test.js` | 32 |
-| `tests/sql/esquema-v3.sql` | 24 |
 | `tests/sql/esquema.test.js` | 44 |
 | `tests/sql/reloj.test.js` | 8 |
 | `tests/sql/remoto.test.js` | 9 |
