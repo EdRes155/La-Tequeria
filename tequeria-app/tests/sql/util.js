@@ -2,8 +2,7 @@
 // (igual que PostgREST) y un reloj controlado para vencimientos y bloqueos.
 import fs from "node:fs";
 import path from "node:path";
-import pg from "pg";
-import { exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
+import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
 
 export const URL_ADMIN = process.env.TEST_DATABASE_URL;
 if (URL_ADMIN) exigirServidorDesechable(URL_ADMIN);
@@ -13,10 +12,9 @@ export const ESQUEMA = leer("supabase-schema.sql");
 export const STUB = leer("tests/sql/supabase-stub.sql");
 
 const bases = [], clientes = [];
-const urlDe = (nombre) => { const u = new URL(URL_ADMIN); u.pathname = "/" + nombre; return u.toString(); };
 
 export async function crearBase(nombre, scripts) {
-  const admin = new pg.Client({ connectionString: URL_ADMIN });
+  const admin = clienteDesechable(URL_ADMIN);
   await admin.connect();
   await admin.query(`drop database if exists ${nombreDesechable(nombre)} with (force)`);
   await admin.query(`create database ${nombre}`);
@@ -28,7 +26,7 @@ export async function crearBase(nombre, scripts) {
 }
 
 export async function conectar(nombre, comoAnon = true, ip = "203.0.113.10") {
-  const c = new pg.Client({ connectionString: urlDe(nombre) });
+  const c = clienteDesechable(URL_ADMIN, nombre);
   await c.connect();
   clientes.push(c);
   if (comoAnon) {
@@ -46,7 +44,7 @@ export async function conectar(nombre, comoAnon = true, ip = "203.0.113.10") {
 export async function cerrarTodo() {
   for (const c of clientes.splice(0)) await c.end().catch(() => {});
   if (!URL_ADMIN) return;
-  const admin = new pg.Client({ connectionString: URL_ADMIN });
+  const admin = clienteDesechable(URL_ADMIN);
   await admin.connect();
   for (const b of bases.splice(0)) await admin.query(`drop database if exists ${nombreDesechable(b)} with (force)`).catch(() => {});
   await admin.end();

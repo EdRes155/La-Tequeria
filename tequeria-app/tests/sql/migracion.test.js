@@ -4,28 +4,70 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomBytes } from "node:crypto";
 import { URL_ADMIN, STUB, ESQUEMA, leer, crearBase, conectar, cerrarTodo, falla, huellaDe } from "./util.js";
 import { compararHuellas } from "../../scripts/huella.mjs";
+import { huellaEsquema } from "../../scripts/huella-esquema.mjs";
 
 const V3 = leer("tests/sql/esquema-v3.sql");
 const EXTRA = leer("tests/sql/produccion-extra.sql");
 const DATOS = leer("tests/sql/datos-v3.sql");
 const CONTRAER = leer("supabase/multinegocio-contraer-estado-cobro.sql");
-const HUELLA_ESQUEMA = leer("scripts/huella-esquema.sql");
-// scripts/huella-esquema.sql sobre producción el 3 de noviembre de 2026 (solo catálogo, sin datos)
+const CATALOGO = leer("scripts/catalogo-esquema.sql");
+// Huella de scripts/catalogo-esquema.sql sobre producción el 3 de noviembre de 2026 (solo catálogo, sin datos),
+// calculada con scripts/huella-esquema.mjs
 const PRODUCCION = {
-  tablas: 15, h_tablas: "96e872e67bff61523928d810bfd4749e",
-  columnas: 122, h_columnas: "21b125552eac88cb48eb2d9853d91da1",
-  funciones: 64, h_funciones: "c6faf1c6cd313371d2125291142ef62e",
-  restricciones: 27, h_restricciones: "29883e77354d9dd8a2bde15d01a77a59",
-  indices: 26, h_indices: "71a3bb9dbdd53ac645368f43feba8bf3",
-  disparadores: 10, h_disparadores: "1ec37679e6b5ba5043d1af336790efda",
+  columnas: { n: 122, h: "b3356a7d0e1d9b092882a6e4cf0da699" },
+  disparadores: { n: 10, h: "1f57367f25560bb46b3fbe386ff21211" },
+  esquema: { n: 1, h: "4d75381beda46f7bd3a2b383fe00e06a" },
+  funciones: { n: 64, h: "c692eebfee488dc7f18424d308c985c4" },
+  indices: { n: 26, h: "5b68c6e4330b51daf4b2cdfd702a69c1" },
+  politicas: { n: 3, h: "fcb46d34a81cb80f63a49c35844d2d5a" },
+  restricciones: { n: 27, h: "bbf8a8f0d7067d50a55a818abbe854cd" },
+  secuencias: { n: 2, h: "6441c4c1faaaa1b9656b7d665b870fe0" },
+  tablas: { n: 15, h: "06e508abbb3724e584400c23e728ddd6" },
 };
 const d = URL_ADMIN ? describe : describe.skip;
 
 d("instantánea de producción", () => {
+  let sql;
+  const huella = async () => huellaEsquema((await sql.query(CATALOGO)).rows);
+  // Aplica un cambio, toma la huella y lo deshace
+  const conCambio = async (cambio) => {
+    await sql.query("begin");
+    try { await cambio(); return await huella(); } finally { await sql.query("rollback"); }
+  };
+  const redefinir = async (firma, de, a) => {
+    const def = (await sql.query("select pg_get_functiondef($1::regprocedure) d", [firma])).rows[0].d;
+    if (!def.includes(de)) throw new Error("no se encontró el texto a cambiar en " + firma);
+    await sql.query(def.replace(de, a));
+  };
+  beforeAll(async () => { sql = await crearBase("tq_instantanea", [STUB, V3, EXTRA]); });
   afterAll(cerrarTodo);
-  it("esquema-v3.sql + produccion-extra.sql tienen la misma huella de esquema que producción", async () => {
-    const sql = await crearBase("tq_instantanea", [STUB, V3, EXTRA]);
-    expect((await sql.query(HUELLA_ESQUEMA)).rows[0].huella).toEqual(PRODUCCION);
+
+  it("esquema-v3.sql + produccion-extra.sql tienen exactamente la huella de esquema de producción", async () => {
+    expect(await huella()).toEqual(PRODUCCION);
+  });
+
+  it("la huella cambia con políticas, permisos, valores por omisión y espacios dentro de un texto", async () => {
+    const base = await huella();
+    const cambia = async (que, cambio, categoria) => {
+      const h = await conCambio(cambio);
+      expect([que, h[categoria].h]).not.toEqual([que, base[categoria].h]);
+    };
+    await cambia("política", () => sql.query("alter policy app_state_select on public.app_state using (false)"), "politicas");
+    await cambia("rol de una política", () => sql.query("alter policy app_state_select on public.app_state to anon"), "politicas");
+    await cambia("permiso de escritura en una tabla", () => sql.query("grant insert on public.config to anon"), "tablas");
+    await cambia("permiso en una secuencia", () => sql.query("grant usage on sequence public.tickets_folio_seq to anon"), "secuencias");
+    await cambia("ejecutar una función interna", () => sql.query("grant execute on function public._hash_pin(text) to authenticated"), "funciones");
+    await cambia("valor por omisión de un argumento", () => redefinir("public.login(text, text, text)",
+      "p_dispositivo text DEFAULT NULL::text", "p_dispositivo text DEFAULT 'caja'::text"), "funciones");
+    await cambia("espacio dentro de un texto", () => redefinir("public.agregar_carne(text, text)",
+      "'Escribe el nombre de la carne.'", "'Escribe el  nombre de la carne.'"), "funciones");
+    await cambia("atributo de una función", () => sql.query("alter function public._ip() security definer"), "funciones");
+  });
+
+  it("no cambia si solo cambian comentarios o espacios fuera de los textos", async () => {
+    const base = await huella();
+    const h = await conCambio(() => redefinir("public.agregar_carne(text, text)", "begin\n", "begin\n  -- comentario nuevo\n\n   /* otro */ "));
+    expect(h).toEqual(base);
   });
 });
 
@@ -95,21 +137,37 @@ d("multinegocio, paso 1: expansión desde el esquema de producción", () => {
     expect((await falla(api.query("select public._sucursal_unica()"))).message).toMatch(/permission denied/);
   });
 
-  it("con dos sucursales, una función que aún no recibe la sucursal falla en vez de adivinarla", async () => {
-    const login = await api.rpc("login", { p_id: "a1b2c3d4e5f6", p_pin: "804219" });
-    await sql.query(`with c as (insert into public.cuentas (nombre) values ('Otra (prueba)') returning id)
-      insert into public.sucursales (cuenta_id, nombre) select id, 'Otra (prueba)' from c`);
+  it("con dos sucursales, toda la API antigua se niega a leer o escribir, también con una sesión previa", async () => {
+    const admin = await api.rpc("login", { p_id: "a1b2c3d4e5f6", p_pin: "804219" });
+    const antes = await huellaDe(sql, "destino", sal);
+    // la sucursal B tiene datos propios: una bebida que nadie de A debe ver
+    await sql.query(`with c as (insert into public.cuentas (nombre) values ('Otra (prueba)') returning id),
+      s as (insert into public.sucursales (cuenta_id, nombre) select id, 'Otra (prueba)' from c returning id)
+      insert into public.bebidas (id, nombre, cantidad, precio, sucursal_id) select 'solo-b', 'Solo B', 5, 10, id from s`);
     try {
-      expect((await falla(api.rpc("login", { p_id: "a1b2c3d4e5f6", p_pin: "804219" }))).message).toMatch(/Hay 2 sucursales/);
-      const e = await falla(api.rpc("agregar_gasto", { p_token: login.token, p_id: "gasto-sin-sucursal", p_concepto: "X", p_monto: 1 }));
-      expect(e.message).toMatch(/Hay 2 sucursales/);
-      expect((await uno("select count(*)::int n from public.gastos where id = 'gasto-sin-sucursal'")).n).toBe(0);
+      // todas las firmas que puede ejecutar la app, con el token previo y el resto de argumentos nulos
+      const { rows } = await sql.query(`select p.proname, coalesce(p.proargnames, '{}') nombres, p.pronargs, p.pronargdefaults
+        from pg_proc p where p.pronamespace = 'public'::regnamespace
+         and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
+       order by 1`);
+      expect(rows.length).toBeGreaterThan(30);
+      const resultados = {};
+      for (const f of rows) {
+        const nombres = f.nombres.slice(0, f.pronargs - f.pronargdefaults);
+        const args = nombres.map((n, i) => n + " => $" + (i + 1)).join(", ");
+        const valores = nombres.map((n) => (n === "p_token" ? admin.token : null));
+        resultados[f.proname] = (await falla(api.query("select public." + f.proname + "(" + args + ")", valores))).message;
+      }
+      for (const [fn, mensaje] of Object.entries(resultados)) expect([fn, mensaje]).toEqual([fn, expect.stringMatching(/Hay 2 sucursales/)]);
     } finally {
-      await sql.query("delete from public.sucursales where nombre = 'Otra (prueba)'; delete from public.cuentas where nombre = 'Otra (prueba)'");
+      await sql.query(`delete from public.bebidas where id = 'solo-b'; delete from public.sucursales where nombre = 'Otra (prueba)';
+        delete from public.cuentas where nombre = 'Otra (prueba)'`);
     }
+    // nada cambió en la sucursal A (fila por fila)
+    expect(compararHuellas(antes, await huellaDe(sql, "destino", sal)).iguales).toBe(true);
   });
 
-  it("una cuenta activa siempre tiene propietario, también con dos bajas simultáneas", async () => {
+  it("una cuenta activa siempre tiene propietario, también con dos bajas simultáneas en cualquier aislamiento", async () => {
     const c = (await uno("select id from public.cuentas")).id;
     const [a, b] = [crypto.randomUUID(), crypto.randomUUID()];
     await sql.query("insert into auth.users (id, email) values ($1, 'a@ejemplo.invalid'), ($2, 'b@ejemplo.invalid')", [a, b]);
@@ -118,16 +176,31 @@ d("multinegocio, paso 1: expansión desde el esquema de producción", () => {
       .toMatch(/al menos un propietario/);
     // con el primer propietario en la misma transacción, sí
     await sql.query("begin");
-    await sql.query("insert into public.membresias (cuenta_id, auth_user_id, rol) values ($1, $2, 'propietario'), ($1, $3, 'propietario')", [c, a, b]);
+    await sql.query("insert into public.membresias (cuenta_id, auth_user_id, rol) values ($1, $2, 'propietario')", [c, a]);
     await sql.query("update public.cuentas set estado = 'activa', activada_en = now() where id = $1", [c]);
     await sql.query("commit");
-    // dos bajas a la vez: una se confirma y la otra no
     const [x, y] = [await conectar("tq_migracion", false), await conectar("tq_migracion", false)];
-    await x.query("begin"); await x.query("delete from public.membresias where auth_user_id = $1", [a]);
-    await y.query("begin"); await y.query("delete from public.membresias where auth_user_id = $1", [b]);
-    const fin = await Promise.allSettled([x.query("commit"), y.query("commit")]);
-    expect(fin.map((f) => f.status).sort()).toEqual(["fulfilled", "rejected"]);
-    expect((await uno("select count(*)::int n from public.membresias where rol = 'propietario'")).n).toBe(1);
+    const propietarios = async () => (await uno("select count(*)::int n from public.membresias where rol = 'propietario'")).n;
+    for (const nivel of ["read committed", "repeatable read", "serializable"]) {
+      // vuelve a tener dos propietarios
+      await sql.query(`insert into public.membresias (cuenta_id, auth_user_id, rol) select $1, u, 'propietario' from unnest($2::uuid[]) u
+        on conflict do nothing`, [c, [a, b]]);
+      expect(await propietarios()).toBe(2);
+      // dos bajas a la vez: una se confirma y la otra no
+      await x.query(`begin isolation level ${nivel}`); await x.query("delete from public.membresias where auth_user_id = $1", [a]);
+      await y.query(`begin isolation level ${nivel}`); await y.query("delete from public.membresias where auth_user_id = $1", [b]);
+      const fin = await Promise.allSettled([x.query("commit"), y.query("commit")]);
+      expect([nivel, fin.map((f) => f.status).sort()]).toEqual([nivel, ["fulfilled", "rejected"]]);
+      expect([nivel, await propietarios()]).toEqual([nivel, 1]);
+      // también si una confirma antes de que la otra empiece a confirmar
+      await sql.query(`insert into public.membresias (cuenta_id, auth_user_id, rol) select $1, u, 'propietario' from unnest($2::uuid[]) u
+        on conflict do nothing`, [c, [a, b]]);
+      await x.query(`begin isolation level ${nivel}`); await x.query("delete from public.membresias where auth_user_id = $1", [a]);
+      await y.query(`begin isolation level ${nivel}`); await y.query("delete from public.membresias where auth_user_id = $1", [b]);
+      await x.query("commit");
+      expect([nivel, (await falla(y.query("commit"))).message]).toEqual([nivel, expect.stringMatching(/propietario|concurrent update|serialize/)]);
+      expect([nivel, await propietarios()]).toEqual([nivel, 1]);
+    }
     // y la última no se puede quitar
     expect((await falla(sql.query("delete from public.membresias where cuenta_id = $1", [c]))).message).toMatch(/al menos un propietario/);
   });
@@ -143,10 +216,43 @@ d("multinegocio: contracción del estado de cobro", () => {
   });
   afterAll(cerrarTodo);
 
-  it("no se aplica mientras las funciones dependan de cobro_id", async () => {
+  it("distingue el uso antiguo de cobro_id del moderno", async () => {
+    const heredado = ["where cobro_id is null", "and t.cobro_id is not null", "set cobro_id = 'no_cobrado'",
+      "cobro_id in ('previo', 'no_cobrado')", "t.cobro_id not in ('previo','no_cobrado')", "where 'previo' = t.cobro_id",
+      "x.cobro_id <> 'previo'", "case t.cobro_id when 'previo' then 1 end", "WHERE COBRO_ID IS NULL"];
+    const moderno = ["where estado_cobro = 'previo'", "estado_cobro in ('previo', 'no_cobrado')",
+      "set estado_cobro = 'no_cobrado', cobro_id = null", "join public.cobros c on c.id = t.cobro_id",
+      "set cobro_id = p_id, estado_cobro = 'cobrado'", "jsonb_build_object('estado', 'previo', 'cobro', t.cobro_id)",
+      "-- antes: cobro_id is null\n where estado_cobro = 'pendiente'", "/* cobro_id = 'previo' */ select 1",
+      "where p_cobro_id is null", "where estado_cobro <> 'pendiente' and cobro_id = any(p_ids)"];
+    const usa = async (t) => (await sql.query("select public._usa_cobro_id_heredado($1) r", [t])).rows[0].r;
+    for (const t of heredado) expect([t, await usa(t)]).toEqual([t, true]);
+    for (const t of moderno) expect([t, await usa(t)]).toEqual([t, false]);
+  });
+
+  it("no se aplica mientras alguna función o índice dependa del cobro_id antiguo, y señala solo esos", async () => {
+    await sql.query(`create function public.zz_por_cobrar_moderna() returns bigint language sql as $f$
+      select count(*) from public.tickets where estado_cobro = 'pendiente' or estado_cobro in ('previo', 'no_cobrado') $f$`);
     const e = await falla(sql.query(CONTRAER));
     await sql.query("rollback").catch(() => {});
-    expect(e.message).toMatch(/aún dependen de cobro_id: .*cobrar/);
+    expect(e.message).toMatch(/aún dependen del cobro_id antiguo: .*función cobrar.*índice tickets_por_cobrar_idx/);
+    expect(e.message).not.toMatch(/zz_por_cobrar_moderna|_usa_cobro_id_heredado/);
+  });
+
+  it("se aplica sin excepción cuando solo quedan funciones e índices modernos", async () => {
+    const otra = await crearBase("tq_contraer_moderna", [STUB, V3, EXTRA, DATOS, ESQUEMA]);
+    await otra.query(`create function public.zz_por_cobrar_moderna() returns bigint language sql as $f$
+      select count(*) from public.tickets where estado_cobro = 'pendiente' $f$`);
+    // lo que hará el paso 2: retirar las funciones antiguas y rehacer el índice con estado_cobro
+    const { rows } = await otra.query(`select p.oid::regprocedure::text f from pg_proc p
+      where p.pronamespace = 'public'::regnamespace and p.proname <> '_usa_cobro_id_heredado' and public._usa_cobro_id_heredado(p.prosrc)`);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) await otra.query("drop function " + r.f + " cascade");
+    await otra.query(`drop index public.tickets_por_cobrar_idx;
+      create index tickets_por_cobrar_idx on public.tickets (created_at desc) where estado_cobro = 'pendiente' and reenvio is not true`);
+    await otra.query(CONTRAER);
+    expect((await otra.query("select count(*)::int n from public.tickets where estado_cobro = 'previo' and cobro_id is null")).rows[0].n).toBe(3);
+    expect((await otra.query("select public.zz_por_cobrar_moderna()::int n")).rows[0].n).toBe(1);
   });
 
   it("una transformación en el orden equivocado se detecta fila por fila", async () => {

@@ -248,10 +248,11 @@ where u.pin_hash not like '$2%'
 
 -- ---------------------------------------------------------------------
 --  MULTINEGOCIO, PASO 1: EXPANSIÓN (docs/multinegocio/MODELO.md §9 y MIGRACION.md §4)
---  Compatible con la app actual: ninguna función de la API cambia. Todas las filas de operación
---  quedan en la sucursal inicial, y las nuevas la toman por omisión con _sucursal_unica(), que
---  falla en cuanto exista una segunda sucursal: para entonces cada función deberá recibirla de su
---  validador (paso 2). Se puede ejecutar varias veces.
+--  Compatible con la app actual. Todas las filas de operación quedan en la sucursal inicial, y las
+--  nuevas la toman por omisión con _sucursal_unica(). Además, toda la API antigua (_sesion, login,
+--  usuarios_login y logout) llama primero a _sucursal_unica(): si llegara a existir una segunda
+--  sucursal antes del paso 2, no lee ni escribe nada en lugar de mezclar datos. En el paso 2 cada
+--  función recibe la sucursal de su validador y la guardia se retira. Se puede ejecutar varias veces.
 -- ---------------------------------------------------------------------
 create table if not exists public.cuentas (
   id uuid primary key default gen_random_uuid(),
@@ -406,6 +407,21 @@ alter table public.tickets add column if not exists estado_cobro text generated 
        when cobro_id in ('previo', 'no_cobrado') then cobro_id
        else 'cobrado' end) stored;
 
+-- ¿Este código depende del significado antiguo de cobro_id? (valores especiales «previo» y
+-- «no_cobrado», o «cobro_id is null» como «falta cobrar»). Lo usa la guardia de la contracción
+-- (supabase/multinegocio-contraer-estado-cobro.sql). No marca el uso moderno: comparar estado_cobro
+-- con esos valores, o usar cobro_id solo para unir con cobros o guardar un cobro real.
+create or replace function public._usa_cobro_id_heredado(p_src text)
+returns boolean language sql immutable set search_path = public as $$
+  with s as (select regexp_replace(regexp_replace(coalesce(p_src, ''), '/\*.*?\*/', ' ', 'g'), '--[^\n]*', ' ', 'g') t)
+  select t ~* '\mcobro_id\s+is\s+(not\s+)?null'
+      or t ~* '\mcobro_id\s*(=|<>|!=)\s*''(previo|no_cobrado)'''
+      or t ~* '''(previo|no_cobrado)''\s*(=|<>|!=)\s*([a-z_][a-z0-9_]*\.)?cobro_id\M'
+      or t ~* '\mcobro_id\s+(not\s+)?in\s*\(\s*(''[a-z_]*''\s*,\s*)*''(previo|no_cobrado)'''
+      or t ~* '\mcase\s+([a-z_][a-z0-9_]*\.)?cobro_id\s+when\M'
+  from s
+$$;
+
 -- Folio por sucursal y periodo (MODELO.md §2.2). Mientras enviar_comanda siga usando la identidad de
 -- tickets.folio, cada ejecución de este archivo pone folios al día; el paso 2 lo cambia a folios.
 alter table public.tickets add column if not exists folio_periodo text not null default 'continuo';
@@ -448,16 +464,23 @@ create table if not exists public.intentos_dispositivo (
 create index if not exists intentos_dispositivo_idx on public.intentos_dispositivo (dispositivo_id, creado desc);
 
 -- Invariante: una cuenta activa tiene al menos un propietario (MODELO.md §3.0). Se comprueba al
--- confirmar, con la fila de la cuenta bloqueada, para que dos bajas simultáneas no la dejen vacía.
+-- confirmar. Para que dos bajas simultáneas no dejen la cuenta vacía, cada cambio de propietarios
+-- ESCRIBE la fila de la cuenta (revision_propietarios), no solo la bloquea:
+--   · en READ COMMITTED la segunda transacción espera a la primera y vuelve a leer los propietarios;
+--   · en REPEATABLE READ y SERIALIZABLE la segunda falla por actualización concurrente (40001) y se
+--     reintenta; con solo un bloqueo, las dos confirmaban con su fotografía anterior.
+alter table public.cuentas add column if not exists revision_propietarios bigint not null default 0;
 create or replace function public._cuenta_con_propietario()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare v_cuentas uuid[];
+declare v_cuentas uuid[]; v uuid;
 begin
   if tg_table_name = 'cuentas' then v_cuentas := array[new.id];
   elsif tg_op = 'DELETE' then v_cuentas := array[old.cuenta_id];
   else v_cuentas := array[old.cuenta_id, new.cuenta_id];
   end if;
-  perform 1 from public.cuentas where id = any (v_cuentas) order by id for update;
+  for v in select distinct x from unnest(v_cuentas) x where x is not null order by 1 loop
+    update public.cuentas set revision_propietarios = revision_propietarios + 1 where id = v;
+  end loop;
   if exists (select 1 from public.cuentas c where c.id = any (v_cuentas) and c.estado = 'activa'
                and not exists (select 1 from public.membresias m where m.cuenta_id = c.id and m.rol = 'propietario')) then
     raise exception 'Una cuenta activa necesita al menos un propietario.' using errcode = '23514';
@@ -606,6 +629,9 @@ create or replace function public._sesion(p_token text,
 language plpgsql set search_path = public, extensions as $$
 declare r record;
 begin
+  -- Guardia de transición (multinegocio, paso 1): la API antigua no distingue sucursales, así que no
+  -- lee ni escribe nada si hay más de una. Todas las funciones con sesión pasan por aquí.
+  perform public._sucursal_unica();
   if p_token is null or p_token !~ '^[0-9a-f]{64}$' then
     perform public._error('SESION', 'Tu sesión no es válida. Vuelve a entrar.');
   end if;
@@ -859,7 +885,8 @@ returns json language sql stable security definer set search_path = public as $$
     'negocio', coalesce((select nombre_negocio from public.config where id = 1), 'La Tequería'),
     'usuarios', coalesce((select json_agg(json_build_object('id', id, 'nombre', nombre) order by nombre)
                             from public.usuarios), '[]'::json),
-    'hayAdmin', exists (select 1 from public.usuarios where rol = 'admin'));
+    'hayAdmin', exists (select 1 from public.usuarios where rol = 'admin'))
+  where public._sucursal_unica() is not null;  -- guardia de transición (ver _sesion)
 $$;
 
 create or replace function public.login(p_id text, p_pin text, p_dispositivo text default null)
@@ -868,6 +895,7 @@ declare
   v_ip text := public._ip(); v_espera int; u public.usuarios; cs public.cocina_sesion;
   v_token text; v_sid uuid; v_rest int; v_debil boolean;
 begin
+  perform public._sucursal_unica();  -- guardia de transición (ver _sesion)
   v_espera := greatest(public._espera('u:' || coalesce(p_id, '')), coalesce(public._espera('ip:' || v_ip), 0));
   if v_espera > 0 then
     return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v_espera);
@@ -923,6 +951,7 @@ create or replace function public.logout(p_token text)
 returns void language plpgsql security definer set search_path = public, extensions as $$
 declare v_sid uuid;
 begin
+  perform public._sucursal_unica();  -- guardia de transición (ver _sesion)
   update public.sesiones set revocada = true
    where token_hash = encode(digest(coalesce(p_token, ''), 'sha256'), 'hex') and not revocada
   returning id into v_sid;
@@ -1842,7 +1871,8 @@ begin
     execute format('revoke all on public.%I from public, anon, authenticated', t);
   end loop;
 end $$;
-revoke all on sequence public.bitacora_id_seq, public.intentos_dispositivo_id_seq from public, anon, authenticated;
+-- Secuencias: ninguna para la app (el folio y los id los asignan las funciones)
+revoke all on all sequences in schema public from public, anon, authenticated;
 
 -- Tabla de la versión 1 (estado en un solo bloque): ya no se usa; se cierra sin borrarla
 do $$
@@ -1872,7 +1902,8 @@ begin
              'actualizar_carne','agregar_carne','eliminar_carne','fijar_precio','fijar_precio_extra','agregar_extra',
              'eliminar_extra','alternar_oculto','agregar_gasto','eliminar_gasto','crear_usuario','eliminar_usuario',
              'restablecer_pin','cobrar','anular_cobro','marcar_recibido','no_cobrar','fijar_ajuste',
-             'mover_tickets','archivar_tickets','marcar_hecho','_sucursal_unica','_cuenta_con_propietario')
+             'mover_tickets','archivar_tickets','marcar_hecho','_sucursal_unica','_cuenta_con_propietario',
+             '_usa_cobro_id_heredado')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;

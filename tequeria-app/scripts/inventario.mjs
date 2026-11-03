@@ -7,8 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import pg from "pg";
-import { exigirServidorDesechable, nombreDesechable } from "./base-desechable.mjs";
+import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "./base-desechable.mjs";
 import { directo, conDependencias, unicos, lista } from "./inventario-analisis.mjs";
 
 const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,12 +20,11 @@ try { exigirServidorDesechable(URL_ADMIN); } catch (e) { console.error(e.message
 const leer = (f) => fs.readFileSync(path.join(app, f), "utf8");
 
 async function catalogo() {
-  const admin = new pg.Client({ connectionString: URL_ADMIN });
+  const admin = clienteDesechable(URL_ADMIN);
   await admin.connect();
   await admin.query(`drop database if exists ${nombreDesechable(BASE)} with (force)`);
   await admin.query(`create database ${BASE}`);
-  const u = new URL(URL_ADMIN); u.pathname = "/" + BASE;
-  const c = new pg.Client({ connectionString: u.toString() });
+  const c = clienteDesechable(URL_ADMIN, BASE);
   await c.connect();
   try {
     await c.query(leer("tests/sql/supabase-stub.sql"));

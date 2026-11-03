@@ -12,16 +12,18 @@ sucursal.
 | Núcleo, paso 1: cuentas, sucursales y `sucursal_id` | Sección «MULTINEGOCIO, PASO 1» de `tequeria-app/supabase-schema.sql`; `tests/sql/migracion.test.js` | Implementado y ensayado sobre la instantánea de producción; no aplicado en producción |
 | Fixtures de La Tequería y «Taquería Piloto B» | `tequeria-app/tests/fixtures/multinegocio.js`, validadas por `tests/fixtures.test.js` | Listas; se siembran cuando exista el modelo |
 | Matriz de aislamiento en la CI | `tequeria-app/tests/sql/aislamiento.test.js`: casos por función (pendientes) y una guardia activa que exige al menos un caso para cada firma completa ejecutable por `anon` o `authenticated` | Guardia activa; casos pendientes del núcleo |
-| Migración diseñada y ensayable | [MIGRACION.md](MIGRACION.md); huella de datos por entidad con versiones de origen y destino (`scripts/huella-datos.sql`, `scripts/huella.mjs`); instantánea del esquema de producción verificada (`tests/sql/esquema-v3.sql`, `scripts/huella-esquema.sql`) | Expansión y contracción del estado de cobro ensayadas con datos sintéticos; falta la copia real para el ensayo completo |
+| Migración diseñada y ensayable | [MIGRACION.md](MIGRACION.md); huella de datos por entidad con versiones de origen y destino (`scripts/huella-datos.sql`, `scripts/huella.mjs`); instantánea del esquema de producción verificada exactamente (`tests/sql/esquema-v3.sql`, `scripts/catalogo-esquema.sql`, `scripts/huella-esquema.mjs`) | Expansión y contracción del estado de cobro ensayadas con datos sintéticos; falta la copia real para el ensayo completo |
 | Pruebas de seguridad con reloj controlado | `public._ahora()` en sesión e intentos; `relojControlado()` en `tests/sql/util.js`; casos en `tests/sql/reloj.test.js` | Reloj listo; los casos documentan la política vigente y se actualizan al implementar la nueva |
 
 ## Entorno de pruebas
 
 Base desechable de PostgreSQL 16. Las pruebas crean y borran sus propias bases. Nunca se apunta a
 producción: las herramientas que borran bases (`DROP DATABASE … WITH (FORCE)`) solo aceptan un
-servidor local o el de la CI (`localhost`, `127.0.0.1`, `::1`, `postgres`), rechazan siempre los de
-Supabase, exigen `TEQUERIA_BASE_DESECHABLE=si` para cualquier otro y solo tocan bases `tq_*`
-(`tequeria-app/scripts/base-desechable.mjs`).
+servidor local o el de la CI (`localhost`, `127.0.0.1`, `::1`, un socket Unix, `postgres`), rechazan
+siempre los de Supabase, exigen `TEQUERIA_BASE_DESECHABLE=si` para cualquier otro y solo tocan bases
+`tq_*` (`tequeria-app/scripts/base-desechable.mjs`). Se revisa el destino **efectivo** que calcula el
+propio cliente de `pg` (incluidos `?host=` y las variables `PG*`), y se usa ese mismo cliente para
+conectarse.
 
 ```bash
 # con Docker

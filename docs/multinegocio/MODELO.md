@@ -126,8 +126,10 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
 | `suspendida` | Fuera del alcance del piloto (suscripción) | Se define con la facturación |
 
 - **Invariante:** una cuenta `activa` tiene siempre al menos un `propietario`. Quitar o degradar al
-  último propietario se rechaza; se comprueba con la fila de la cuenta bloqueada (`for update`) para
-  que dos bajas simultáneas no dejen la cuenta vacía.
+  último propietario se rechaza al confirmar. Para que dos bajas simultáneas no dejen la cuenta vacía,
+  cada cambio de propietarios **escribe** la fila de la cuenta (`revision_propietarios`): en READ
+  COMMITTED la segunda transacción espera y vuelve a leer; en REPEATABLE READ y SERIALIZABLE falla por
+  actualización concurrente (código `40001`), y las funciones de dueños (paso 4) la reintentan.
 - **Invitación inicial:** la del propietario de una cuenta pendiente la crea el proveedor desde el
   servidor (SQL Editor o un script de alta), nunca la app. Es de un solo uso, vence y, como toda
   invitación, solo la acepta una identidad con el mismo correo verificado.

@@ -3,8 +3,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import pg from "pg";
-import { exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
+import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
 
 const URL_ADMIN = process.env.TEST_DATABASE_URL;
 if (URL_ADMIN) exigirServidorDesechable(URL_ADMIN);
@@ -38,26 +37,25 @@ vi.mock("../../src/supabaseClient.js", () => ({
 d("adaptador remoto contra el esquema real", () => {
   let api, ErrorApi;
   beforeAll(async () => {
-    const admin = new pg.Client({ connectionString: URL_ADMIN });
+    const admin = clienteDesechable(URL_ADMIN);
     await admin.connect();
     await admin.query(`drop database if exists ${nombreDesechable(BASE)} with (force)`);
     await admin.query(`create database ${BASE}`);
     await admin.end();
-    const u = new URL(URL_ADMIN); u.pathname = "/" + BASE;
-    const sql = new pg.Client({ connectionString: u.toString() });
+    const sql = clienteDesechable(URL_ADMIN, BASE);
     await sql.connect();
     await sql.query(fs.readFileSync(path.join(raiz, "tests/sql/supabase-stub.sql"), "utf8"));
     await sql.query(fs.readFileSync(path.join(raiz, "supabase-schema.sql"), "utf8"));
     await sql.query("select public.crear_admin_inicial('Ana', '8642')");
     await sql.end();
-    conexion = new pg.Client({ connectionString: u.toString() });
+    conexion = clienteDesechable(URL_ADMIN, BASE);
     await conexion.connect();
     await conexion.query("set role anon");
     ({ api, ErrorApi } = await import("../../src/store.js"));
   });
   afterAll(async () => {
     await conexion?.end();
-    const admin = new pg.Client({ connectionString: URL_ADMIN });
+    const admin = clienteDesechable(URL_ADMIN);
     await admin.connect();
     await admin.query(`drop database if exists ${nombreDesechable(BASE)} with (force)`);
     await admin.end();

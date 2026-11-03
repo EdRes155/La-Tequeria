@@ -5,8 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import pg from "pg";
-import { exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
+import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
 
 const URL_ADMIN = process.env.TEST_DATABASE_URL;
 if (URL_ADMIN) exigirServidorDesechable(URL_ADMIN);
@@ -21,14 +20,8 @@ const DATOS_V2 = leer("tests/sql/datos-v2.sql");
 const bases = [];
 const clientes = [];
 
-function urlDe(nombre) {
-  const u = new URL(URL_ADMIN);
-  u.pathname = "/" + nombre;
-  return u.toString();
-}
-
 async function crearBase(nombre, scripts) {
-  const admin = new pg.Client({ connectionString: URL_ADMIN });
+  const admin = clienteDesechable(URL_ADMIN);
   await admin.connect();
   await admin.query(`drop database if exists ${nombreDesechable(nombre)} with (force)`);
   await admin.query(`create database ${nombre}`);
@@ -41,7 +34,7 @@ async function crearBase(nombre, scripts) {
 
 // Cliente de la API: entra como el rol "anon", igual que el navegador vía PostgREST.
 async function conectar(nombre, comoAnon = true, ip = "203.0.113.10") {
-  const c = new pg.Client({ connectionString: urlDe(nombre) });
+  const c = clienteDesechable(URL_ADMIN, nombre);
   await c.connect();
   clientes.push(c);
   if (comoAnon) {
@@ -78,7 +71,7 @@ const ticket = (id, extra = {}) => ({
 afterAll(async () => {
   for (const c of clientes) await c.end().catch(() => {});
   if (!URL_ADMIN) return;
-  const admin = new pg.Client({ connectionString: URL_ADMIN });
+  const admin = clienteDesechable(URL_ADMIN);
   await admin.connect();
   for (const b of bases) await admin.query(`drop database if exists ${nombreDesechable(b)} with (force)`).catch(() => {});
   await admin.end();

@@ -9,22 +9,31 @@
 --  3. Reglas: cobro_id existe si y solo si la comanda está cobrada, y apunta a un cobro de su misma
 --     sucursal.
 --
---  Guardia: si alguna función todavía usa los valores especiales de cobro_id o «cobro_id is null»
---  para saber qué falta cobrar, se aborta (contaría lo «previo» como pendiente). Solo para ensayar
---  la transformación de los datos en una base desechable se puede omitir con
+--  Guardia: si alguna función o índice todavía depende del significado antiguo de cobro_id (los
+--  valores especiales, o «cobro_id is null» como «falta cobrar»), se aborta: contaría lo «previo»
+--  como pendiente. La detección es public._usa_cobro_id_heredado(); el uso moderno (estado_cobro con
+--  esos valores, cobro_id solo para el cobro real) se acepta. Solo para ensayar la transformación de
+--  los datos en una base desechable se puede omitir con
 --    set multinegocio.ensayo_solo_datos = 'si';
 -- =====================================================================
 begin;
 
 do $$
-declare v_funciones text;
+declare v_pendientes text;
 begin
-  select string_agg(p.proname, ', ' order by p.proname) into v_funciones
-    from pg_proc p
-   where p.pronamespace = 'public'::regnamespace
-     and (p.prosrc ~* 'cobro_id\s+is\s+(not\s+)?null' or p.prosrc ~* '''(previo|no_cobrado)''');
-  if v_funciones is not null and current_setting('multinegocio.ensayo_solo_datos', true) is distinct from 'si' then
-    raise exception 'No se puede contraer el estado de cobro: estas funciones aún dependen de cobro_id: %', v_funciones;
+  select string_agg(x, ', ' order by x) into v_pendientes from (
+    select 'función ' || p.proname as x
+      from pg_proc p
+     where p.pronamespace = 'public'::regnamespace and p.proname <> '_usa_cobro_id_heredado'
+       and public._usa_cobro_id_heredado(p.prosrc)
+    union all
+    select 'índice ' || c.relname
+      from pg_index i join pg_class c on c.oid = i.indexrelid
+     where i.indrelid = 'public.tickets'::regclass and i.indpred is not null
+       and public._usa_cobro_id_heredado(pg_get_expr(i.indpred, i.indrelid))
+  ) d;
+  if v_pendientes is not null and current_setting('multinegocio.ensayo_solo_datos', true) is distinct from 'si' then
+    raise exception 'No se puede contraer el estado de cobro: aún dependen del cobro_id antiguo: %', v_pendientes;
   end if;
 end $$;
 

@@ -27,10 +27,23 @@ sintéticos (`tests/sql/migracion.test.js`). Nada se ha aplicado en producción.
   - no devuelve nombres, PIN, teléfonos ni direcciones: solo aparecen dentro de firmas con sal, y las
     llaves de usuarios también se firman;
   - sus pruebas están en `tests/sql/huella.test.js` y `tests/sql/migracion.test.js`.
-- **La huella del esquema** (`tequeria-app/scripts/huella-esquema.sql`) resume el catálogo (funciones
-  sin comentarios, columnas, restricciones, índices, disparadores y permisos). Con ella se comprobó que
-  `tests/sql/esquema-v3.sql` + `tests/sql/produccion-extra.sql` reproducen exactamente el esquema de
-  producción; la prueba guarda esa huella para que la instantánea no se desvíe.
+- **La huella del esquema** (`tequeria-app/scripts/catalogo-esquema.sql` + `scripts/huella-esquema.mjs`)
+  resume el catálogo sin leer datos:
+  - funciones con sus argumentos y valores por omisión, atributos, dueño y cuerpo; el cuerpo se compara
+    sin comentarios y con los espacios reducidos **solo fuera de los literales** (analizador léxico),
+    porque Supabase puede descartar los comentarios al aplicar el SQL;
+  - permisos uno por uno para `PUBLIC`, `anon` y `authenticated` en funciones, tablas, secuencias y el
+    esquema; RLS y políticas (órdenes, roles y expresiones); columnas, restricciones, índices,
+    disparadores y tablas publicadas en tiempo real;
+  - `node scripts/huella-esquema.mjs a.json b.json` dice qué entradas difieren.
+  Con ella se comprobó que `tests/sql/esquema-v3.sql` + `tests/sql/produccion-extra.sql` reproducen
+  **exactamente** el esquema de producción; la prueba guarda esa huella y comprueba que cambia con
+  políticas, permisos, valores por omisión o espacios dentro de un texto, y no con comentarios.
+- Al hacerla más estricta aparecieron dos diferencias que la versión anterior ocultaba, ya reflejadas en
+  la instantánea: las 3 políticas antiguas de `app_state` en producción son `true` (sin efecto, porque
+  `anon` y `authenticated` no tienen permisos sobre la tabla; se eliminan en la limpieza, §7), y la
+  secuencia del folio no tiene permisos para la app. `supabase-schema.sql` ahora retira explícitamente
+  los permisos de todas las secuencias.
 - **Recuperarse sin perder ventas nuevas:** restaurar un respaldo no basta si ya entraron operaciones
   después del cambio (§6).
 
@@ -76,14 +89,19 @@ varias veces. Ninguna función de la API cambia.
   `codigos_vinculacion`, `folios`, `intentos_operador` e `intentos_dispositivo`, con RLS y sin
   permisos para `anon` ni `authenticated`.
 - `sucursal_id not null` en todas las tablas de operación, con referencia a `sucursales` y valor por
-  omisión `_sucursal_unica()`: las filas que crean las funciones actuales caen en la sucursal inicial,
-  y si llegara a existir una segunda sucursal, esas funciones fallan en lugar de adivinar.
+  omisión `_sucursal_unica()`: las filas que crean las funciones actuales caen en la sucursal inicial.
+- **Guardia central de transición:** toda la API antigua (`_sesion`, por donde pasan todas las
+  funciones con sesión, y además `login`, `usuarios_login` y `logout`) llama primero a
+  `_sucursal_unica()`. Si llegara a existir una segunda sucursal antes del paso 2, ninguna función lee ni
+  escribe nada, aunque se use una sesión creada antes; la prueba recorre todas las firmas que puede
+  ejecutar la app.
 - Únicos `(sucursal_id, id)` y referencias compuestas diferidas: `tickets → mesas`, `tickets → cortes`,
   `cobros → cortes`, `gastos → cortes`, `cocina_hechos → tickets` y `sesiones → usuarios`.
 - `tickets.estado_cobro`, calculado a partir de `cobro_id` durante la transición (las funciones
   actuales lo mantienen sin cambios); `tickets.folio_periodo` y `folios`, puestos al día en cada
   ejecución mientras `enviar_comanda` siga usando la identidad de `tickets.folio`.
-- Invariante de propietario (MODELO.md §3.0) con disparadores diferidos que bloquean la cuenta.
+- Invariante de propietario (MODELO.md §3.0) con disparadores diferidos que **escriben** la fila de la
+  cuenta, probado con bajas simultáneas en READ COMMITTED, REPEATABLE READ y SERIALIZABLE.
 - Se dejan para el paso que las usa: las columnas de seguridad de `sesiones` y `usuarios` (paso 3),
   `bitacora.cuenta_id` (paso 4, acciones de cuenta) y la llave `(sucursal_id, id)` de mesas, carnes y
   bebidas (paso 2, junto con los `on conflict` de sus funciones).
@@ -129,7 +147,10 @@ está al final de su sección en `supabase-schema.sql`):
 - Reemplazar las funciones por las versiones con sus validadores (`_dispositivo`, `_contexto`; MODELO.md
   §3) y retirar las antiguas sin contexto.
 - Estado de cobro: `supabase/multinegocio-contraer-estado-cobro.sql`. Se niega a correr mientras
-  alguna función use `cobro_id is null` o los valores especiales.
+  alguna función o índice dependa del significado antiguo de `cobro_id` (detectado con
+  `_usa_cobro_id_heredado`: valores especiales comparados con `cobro_id`, o `cobro_id is null` como
+  «falta cobrar»). Acepta el uso moderno: `estado_cobro` con esos valores y `cobro_id` solo para el
+  cobro real.
   Desde aquí la app anterior deja de funcionar, por eso va junto con la publicación de la nueva
   (§5).
 
@@ -169,7 +190,8 @@ Según el plan 2.1:
 2. Verificar la copia.
 3. Ensayar y hacer la migración.
 4. Tras el periodo de observación, eliminarlos de forma controlada, junto con las 3 políticas
-   antiguas de `app_state`, dejando registro.
+   antiguas de `app_state` (en producción son `true`; hoy no dan acceso porque la tabla no tiene
+   permisos para la app), dejando registro.
 
 ## 8. Decisiones pendientes para el ensayo
 
