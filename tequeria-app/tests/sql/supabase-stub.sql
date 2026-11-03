@@ -29,3 +29,16 @@ begin
     create publication supabase_realtime;
   end if;
 end $$;
+
+-- Identidades de Supabase Auth: lo mínimo para las referencias y para auth.uid()
+create schema if not exists auth;
+create table if not exists auth.users (
+  id uuid primary key default gen_random_uuid(),
+  email text,
+  is_anonymous boolean not null default false,
+  email_confirmed_at timestamptz
+);
+create or replace function auth.uid() returns uuid language sql stable as $$
+  select nullif(coalesce(current_setting('request.jwt.claim.sub', true),
+                         nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'), '')::uuid
+$$;

@@ -1,7 +1,7 @@
 # Modelo multinegocio: cuenta, sucursal, membresía, dispositivo y sesión
 
-Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. Es diseño: nada de esto
-está implementado. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
+Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. El paso 1 del §9
+(tablas y `sucursal_id`) está implementado en `supabase-schema.sql`; lo demás es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
 [inventario](INVENTARIO.md), generado del código.
 
 ## 1. Entidades nuevas
@@ -291,10 +291,10 @@ Reglas de aplicación (del plan):
 
 ## 9. Orden sugerido para implementar (paso 3 del plan)
 
-1. **Tablas nuevas y `sucursal_id`:**
-   - agregar las tablas nuevas y `sucursal_id` como columna con valor nulo permitido;
-   - llenarla con la sucursal inicial (ensayo en [MIGRACION.md](MIGRACION.md));
-   - después, `not null`, únicos y referencias compuestas.
+1. **Tablas nuevas y `sucursal_id`** (hecho; detalle en [MIGRACION.md §4.1](MIGRACION.md)):
+   - tablas nuevas, cuenta y sucursal inicial (pendiente de activación);
+   - `sucursal_id not null` con `_sucursal_unica()` por omisión, únicos y referencias compuestas;
+   - `estado_cobro` calculado, `folios` e invariante de propietario.
 2. **Validadores (§3) y `_ahora()`:** pasar las funciones una por una, cada una con sus casos en la matriz
    de aislamiento (`tests/sql/aislamiento.test.js`).
 3. **Política de seguridad:** PIN de 6 a 8 dígitos, contadores, sesión de 12 h e inactividad, con

@@ -7,8 +7,8 @@ canal y clave del navegador de esta lista debe quedar ligada a una sucursal o ju
 
 ## Resumen
 
-- **14 tablas** en `public`, ninguna con acceso directo para `anon`: correcto.
-- **65 funciones**: 39 de la API (ejecutables por `anon` o `authenticated`) y 26 internas.
+- **23 tablas** en `public`, ninguna con acceso directo para `anon`: correcto.
+- **67 funciones**: 39 de la API (ejecutables por `anon` o `authenticated`) y 28 internas.
 - **Fila única `id = 1`** (configuración y cocina activa) en 17 funciones: `_ahora_local`, `_resolver_item`, `agregar_carne`, `agregar_extra`, `alternar_oculto`, `eliminar_extra`, `eliminar_usuario`, `estado`, `fijar_ajuste`, `fijar_precio`, `fijar_precio_extra`, `hacer_corte`, `latido_cocina`, `liberar_cocina`, `login`, `logout`, `usuarios_login`; y a través de otras en 8 más: `_fecha`, `_hora`, `_valorar_items`, `agregar_gasto`, `cobrar`, `enviar_comanda`, `guardar_borrador_mesa`, `reenviar_cocina`.
 - **Candados** (`pg_advisory_xact_lock`) globales hoy: `tequeria:cobro:`, `tequeria:corte`, `tequeria:ticket:`. Deben incluir la sucursal.
 - **Devuelven lo ya guardado** si se repite el id: `cobrar`, `enviar_comanda`, `reenviar_cocina`. Deben comprobar que sea de la misma sucursal.
@@ -20,20 +20,29 @@ canal y clave del navegador de esta lista debe quedar ligada a una sucursal o ju
 
 | Tabla | Columnas | Llaves y referencias | RLS |
 |---|---|---|---|
-| `bebidas` | id, nombre, cantidad, activo, precio | PK (id) | sí |
-| `bitacora` | id, usuario_id, usuario_nombre, accion, detalle, creado | PK (id) | sí |
-| `carnes` | id, nombre, activo, orden | PK (id) | sí |
-| `cobros` | id, metodo, total, propina, recibido, tickets, origen, cobrado_por, cobrado_nombre, fecha, hora, corte_id, anulado, anulado_por, anulado_motivo, created_at | PK (id) | sí |
-| `cocina_hechos` | ticket_id, linea, hecho, por, actualizado | PK (ticket_id, linea) | sí |
-| `cocina_sesion` | id, session_id, actualizado, dispositivo | PK (id) | sí |
-| `config` | id, nombre_negocio, precios, extras, ocultos, zona_horaria, retencion_domicilio_dias, ajustes | PK (id) | sí |
-| `cortes` | id, fecha, hora, tickets, total, created_at, detalle, gastos, hecho_por, autorizado_por, cobrado, por_cobrar | PK (id) | sí |
-| `gastos` | id, concepto, monto, fecha, hora, usuario, created_at, corte_id, creado_por | PK (id) | sí |
+| `bebidas` | id, nombre, cantidad, activo, precio, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `bitacora` | id, usuario_id, usuario_nombre, accion, detalle, creado, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id) | sí |
+| `carnes` | id, nombre, activo, orden, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `cobros` | id, metodo, total, propina, recibido, tickets, origen, cobrado_por, cobrado_nombre, fecha, hora, corte_id, anulado, anulado_por, anulado_motivo, created_at, sucursal_id | FK (sucursal_id, corte_id) REFERENCES cortes(sucursal_id, id) DEFERRABLE INITIALLY DEFERRED; PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `cocina_hechos` | ticket_id, linea, hecho, por, actualizado, sucursal_id | PK (ticket_id, linea); FK (sucursal_id) REFERENCES sucursales(id); FK (sucursal_id, ticket_id) REFERENCES tickets(sucursal_id, id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED | sí |
+| `cocina_sesion` | id, session_id, actualizado, dispositivo, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id) | sí |
+| `codigos_vinculacion` | id, sucursal_id, codigo_hash, monitor_cocina, creado_por, creado, vence, usado_en, dispositivo_id | FK (sucursal_id, dispositivo_id) REFERENCES dispositivos(sucursal_id, id); único (codigo_hash); PK (id); FK (sucursal_id) REFERENCES sucursales(id) | sí |
+| `config` | id, nombre_negocio, precios, extras, ocultos, zona_horaria, retencion_domicilio_dias, ajustes, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id) | sí |
+| `cortes` | id, fecha, hora, tickets, total, created_at, detalle, gastos, hecho_por, autorizado_por, cobrado, por_cobrar, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `cuentas` | id, nombre, estado, creada, activada_en | PK (id) | sí |
+| `dispositivos` | id, sucursal_id, auth_user_id, nombre, monitor_cocina, aprobado_por, creado, ultimo_uso, revocado_en, revocado_por | FK (auth_user_id) REFERENCES auth.users(id) ON DELETE CASCADE; único (auth_user_id); PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `folios` | sucursal_id, periodo, ultimo | PK (sucursal_id, periodo); FK (sucursal_id) REFERENCES sucursales(id) | sí |
+| `gastos` | id, concepto, monto, fecha, hora, usuario, created_at, corte_id, creado_por, sucursal_id | FK (sucursal_id, corte_id) REFERENCES cortes(sucursal_id, id) DEFERRABLE INITIALLY DEFERRED; PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
 | `intentos` | clave, fallos, bloqueado_hasta, ultimo | PK (clave) | sí |
-| `mesas` | id, estado, mesero, hora, pedido, extras, version | PK (id) | sí |
-| `sesiones` | id, token_hash, usuario_id, dispositivo, creada, ultimo_uso, expira, revocada | PK (id); único (token_hash); FK (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE | sí |
-| `tickets` | id, tipo, es_extra, origen, mesa_id, ordenes, extras, mesero, hora, fecha, estado, archivado_cocina, total, domicilio, corte_id, created_at, reenvio, cuenta, para_llevar, referencia, creado_por, folio (identidad), recibido_at, cobro_id | PK (id) | sí |
-| `usuarios` | id, nombre, rol, pin_hash, debe_cambiar_pin, creado | PK (id) | sí |
+| `intentos_dispositivo` | id (identidad), sucursal_id, dispositivo_id, creado | FK (sucursal_id, dispositivo_id) REFERENCES dispositivos(sucursal_id, id) ON DELETE CASCADE; PK (id) | sí |
+| `intentos_operador` | sucursal_id, usuario_id, fallos, nivel, bloqueado_hasta, ultimo | PK (sucursal_id, usuario_id); FK (sucursal_id, usuario_id) REFERENCES usuarios(sucursal_id, id) ON DELETE CASCADE | sí |
+| `invitaciones` | id, cuenta_id, correo, rol, token_hash, vence, creada, creada_por, usada_en, usada_por | FK (cuenta_id) REFERENCES cuentas(id); PK (id); único (token_hash) | sí |
+| `membresias` | cuenta_id, auth_user_id, rol, creada, creada_por | FK (auth_user_id) REFERENCES auth.users(id) ON DELETE CASCADE; FK (cuenta_id) REFERENCES cuentas(id); PK (cuenta_id, auth_user_id) | sí |
+| `mesas` | id, estado, mesero, hora, pedido, extras, version, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `sesiones` | id, token_hash, usuario_id, dispositivo, creada, ultimo_uso, expira, revocada, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id); único (token_hash); FK (sucursal_id, usuario_id) REFERENCES usuarios(sucursal_id, id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED; FK (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE | sí |
+| `sucursales` | id, cuenta_id, nombre, zona_horaria, retencion_domicilio_dias, activa, creada | FK (cuenta_id) REFERENCES cuentas(id); único (cuenta_id, id); PK (id) | sí |
+| `tickets` | id, tipo, es_extra, origen, mesa_id, ordenes, extras, mesero, hora, fecha, estado, archivado_cocina, total, domicilio, corte_id, created_at, reenvio, cuenta, para_llevar, referencia, creado_por, folio (identidad), recibido_at, cobro_id, sucursal_id, estado_cobro, folio_periodo | FK (sucursal_id, corte_id) REFERENCES cortes(sucursal_id, id) DEFERRABLE INITIALLY DEFERRED; único (sucursal_id, folio_periodo, folio); FK (sucursal_id, mesa_id) REFERENCES mesas(sucursal_id, id) DEFERRABLE INITIALLY DEFERRED; PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `usuarios` | id, nombre, rol, pin_hash, debe_cambiar_pin, creado, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
 
 ## Funciones de la API
 
@@ -90,6 +99,7 @@ Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las
 | `_ahora()` | — | — | — | usa `now()` | Ninguno (no toca datos, ni directa ni indirectamente) |
 | `_ahora_local()` | `config` | — | `_ahora` | fila única `id = 1`; usa `now()` (vía `_ahora`) | Recibe la sucursal de quien la llama |
 | `_avisar_cambio()` | — | — | — | aviso en tiempo real (canal `tequeria`, público) | Sucursal de la fila (canal privado por sucursal) |
+| `_cuenta_con_propietario()` | `cuentas`, `membresias` | — | — | — | Cuenta de la fila: invariante de propietario (MODELO.md §3.0) (revisado) |
 | `_error(p_codigo text, p_mensaje text)` | — | — | — | — | Ninguno (no toca datos, ni directa ni indirectamente) |
 | `_espera(p_clave text)` | `intentos` | — | `_ahora` | usa `now()` (vía `_ahora`) | Recibe la sucursal de quien la llama |
 | `_exigir(p_token text, p_roles text[], OUT sid uuid, OUT uid text, OUT nombre text, OUT rol text)` | por otras: `sesiones`, `usuarios` | por otras: `sesiones` | `_error`, `_sesion` | usa `now()` (vía `_ahora`) | Sucursal de la sesión (resuelve la sesión) |
@@ -108,6 +118,7 @@ Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las
 | `_resolver_item(p_key text, p_empaque boolean)` | `bebidas`, `carnes`, `config` | — | — | fila única `id = 1` | Recibe la sucursal de quien la llama |
 | `_resumen(p_corte text)` | `cobros`, `gastos`, `tickets` | — | — | — | Recibe la sucursal de quien la llama |
 | `_sesion(p_token text, OUT sid uuid, OUT uid text, OUT nombre text, OUT rol text, OUT cambiar_pin boolean)` | `sesiones`, `usuarios` | `sesiones` | `_ahora`, `_error` | usa `now()` (vía `_ahora`) | Recibe la sucursal de quien la llama |
+| `_sucursal_unica()` | `sucursales` | — | — | — | Transitoria (paso 1): toma la única sucursal y falla si hay más; se retira en el paso 2 (revisado) |
 | `_ticket_json(t tickets, p_domicilio boolean)` | `cobros`, `cocina_hechos` | — | — | — | Recibe la sucursal de quien la llama |
 | `_total_items(p_items jsonb)` | — | — | — | — | Ninguno (no toca datos, ni directa ni indirectamente) |
 | `_valorar_items(p_items jsonb, p_empaque boolean)` | por otras: `bebidas`, `carnes`, `config` | — | `_error`, `_resolver_item` | fila única `id = 1` (vía `_resolver_item`) | Recibe la sucursal de quien la llama (indirecto) |
@@ -124,7 +135,9 @@ Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las
 | `cocina_hechos` | `avisar_cambio` | `AFTER INSERT OR UPDATE ON public.cocina_hechos FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
 | `config` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.config FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
 | `cortes` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.cortes FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
+| `cuentas` | `cuenta_con_propietario` | `CREATE CONSTRAINT TRIGGER cuenta_con_propietario AFTER INSERT OR UPDATE OF estado ON public.cuentas DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION _cuenta_con_propietario()` |
 | `gastos` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.gastos FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
+| `membresias` | `cuenta_con_propietario` | `CREATE CONSTRAINT TRIGGER cuenta_con_propietario AFTER DELETE OR UPDATE ON public.membresias DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION _cuenta_con_propietario()` |
 | `mesas` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.mesas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
 | `tickets` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.tickets FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
 | `usuarios` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.usuarios FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
@@ -158,6 +171,7 @@ deberán adaptarse cuando se implemente, además de agregar casos de rechazo y t
 | `tests/dominio.test.js` | 8 |
 | `tests/e2e/comandas.spec.js` | 10 |
 | `tests/localStore.test.js` | 32 |
+| `tests/sql/esquema-v3.sql` | 24 |
 | `tests/sql/esquema.test.js` | 44 |
 | `tests/sql/reloj.test.js` | 8 |
 | `tests/sql/remoto.test.js` | 9 |

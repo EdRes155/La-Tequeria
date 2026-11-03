@@ -1,8 +1,9 @@
 # Migración de La Tequería al modelo multinegocio
 
 Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), paso 6: la migración se diseña
-al principio y se ejecuta al final. Es diseño y herramientas de ensayo; la migración en sí se escribe
-junto con el núcleo ([MODELO.md](MODELO.md)).
+al principio y se ejecuta al final. La expansión (§4.1 a §4.4) ya está escrita en
+`tequeria-app/supabase-schema.sql` y ensayada sobre una copia exacta del esquema de producción con datos
+sintéticos (`tests/sql/migracion.test.js`). Nada se ha aplicado en producción.
 
 ## 1. Principios
 
@@ -14,9 +15,22 @@ junto con el núcleo ([MODELO.md](MODELO.md)).
   y la base queda como estaba.
 - **Se ensaya completa sobre una copia desechable** antes de tocar producción.
 - **La huella de datos** (`tequeria-app/scripts/huella-datos.sql`) compara antes y después:
-  - es solo lectura y solo agregados (conteos, sumas, máximos y referencias rotas);
-  - no devuelve nombres, PIN, teléfonos ni direcciones;
-  - sus pruebas están en `tests/sql/huella.test.js`.
+  - es solo lectura (se puede correr en una transacción `read only`);
+  - tiene dos versiones equivalentes, `origen` (esquema de hoy) y `destino` (ya migrado), que se
+    eligen con `set huella.version`; el estado de cobro se compara por su significado (en origen se
+    deduce de `cobro_id`; en destino se lee de `estado_cobro`);
+  - el **resumen** (conteos, sumas, máximos y referencias rotas) sirve para leer de un vistazo, pero no
+    basta: intercambiar existencias entre dos bebidas conserva la suma;
+  - por eso además firma **cada fila de cada tabla** (md5 con una sal elegida para el ensayo,
+    `set huella.sal`) y `node scripts/huella.mjs comparar antes.json despues.json` dice qué filas
+    faltan, sobran o cambiaron;
+  - no devuelve nombres, PIN, teléfonos ni direcciones: solo aparecen dentro de firmas con sal, y las
+    llaves de usuarios también se firman;
+  - sus pruebas están en `tests/sql/huella.test.js` y `tests/sql/migracion.test.js`.
+- **La huella del esquema** (`tequeria-app/scripts/huella-esquema.sql`) resume el catálogo (funciones
+  sin comentarios, columnas, restricciones, índices, disparadores y permisos). Con ella se comprobó que
+  `tests/sql/esquema-v3.sql` + `tests/sql/produccion-extra.sql` reproducen exactamente el esquema de
+  producción; la prueba guarda esa huella para que la instantánea no se desvíe.
 - **Recuperarse sin perder ventas nuevas:** restaurar un respaldo no basta si ya entraron operaciones
   después del cambio (§6).
 
@@ -55,13 +69,24 @@ recuperable.
 
 ### 4.1 Expandir (compatible con la app actual)
 
-- Crear `cuentas`, `sucursales`, `membresias`, `invitaciones`, `dispositivos`, `codigos_vinculacion`,
-  `folios`, `intentos_operador` e `intentos_dispositivo`.
-- Agregar `sucursal_id` (todavía nulo permitido) a todas las tablas de operación.
-- Agregar las columnas nuevas:
-  - `tickets.estado_cobro` y `tickets.folio_periodo`;
-  - en `sesiones`: `dispositivo_id`, `vence_absoluta` y `ultima_interaccion`;
-  - en `usuarios`: `politica_pin` y `pin_cambiado_en`.
+Implementado en la sección «MULTINEGOCIO, PASO 1» de `supabase-schema.sql`, que se puede ejecutar
+varias veces. Ninguna función de la API cambia.
+
+- Tablas nuevas: `cuentas`, `sucursales`, `membresias`, `invitaciones`, `dispositivos`,
+  `codigos_vinculacion`, `folios`, `intentos_operador` e `intentos_dispositivo`, con RLS y sin
+  permisos para `anon` ni `authenticated`.
+- `sucursal_id not null` en todas las tablas de operación, con referencia a `sucursales` y valor por
+  omisión `_sucursal_unica()`: las filas que crean las funciones actuales caen en la sucursal inicial,
+  y si llegara a existir una segunda sucursal, esas funciones fallan en lugar de adivinar.
+- Únicos `(sucursal_id, id)` y referencias compuestas diferidas: `tickets → mesas`, `tickets → cortes`,
+  `cobros → cortes`, `gastos → cortes`, `cocina_hechos → tickets` y `sesiones → usuarios`.
+- `tickets.estado_cobro`, calculado a partir de `cobro_id` durante la transición (las funciones
+  actuales lo mantienen sin cambios); `tickets.folio_periodo` y `folios`, puestos al día en cada
+  ejecución mientras `enviar_comanda` siga usando la identidad de `tickets.folio`.
+- Invariante de propietario (MODELO.md §3.0) con disparadores diferidos que bloquean la cuenta.
+- Se dejan para el paso que las usa: las columnas de seguridad de `sesiones` y `usuarios` (paso 3),
+  `bitacora.cuenta_id` (paso 4, acciones de cuenta) y la llave `(sucursal_id, id)` de mesas, carnes y
+  bebidas (paso 2, junto con los `on conflict` de sus funciones).
 
 ### 4.2 Cuenta y sucursal inicial
 
@@ -75,7 +100,7 @@ recuperable.
 | Dato | Regla |
 |---|---|
 | `sucursal_id` | La sucursal inicial en todas las filas de operación |
-| `tickets.estado_cobro` | `cobro_id` nulo → `pendiente`; `previo` → `previo` (con `cobro_id` nulo); `no_cobrado` → `no_cobrado` (con `cobro_id` nulo); otro valor → `cobrado` |
+| `tickets.estado_cobro` | `cobro_id` nulo → `pendiente`; `previo` → `previo`; `no_cobrado` → `no_cobrado`; otro valor → `cobrado`. En la expansión es una columna calculada. En la contracción (`supabase/multinegocio-contraer-estado-cobro.sql`) deja de calcularse conservando sus valores y **después** `cobro_id` pasa a nulo en `previo` y `no_cobrado`. El orden importa: al revés, esas comandas quedarían como `pendiente` (la prueba lo comprueba) |
 | `folios` | Periodo `continuo` con `ultimo = max(folio)`; `tickets.folio_periodo = 'continuo'` |
 | `config`, `cocina_sesion` | La fila `id = 1` pasa a ser la de la sucursal inicial |
 | `intentos` | No se migran contadores: se registra en la bitácora cualquier bloqueo vigente y se empieza de cero con las tablas nuevas |
@@ -85,13 +110,15 @@ recuperable.
 
 ### 4.4 Validar dentro de la transacción
 
-Antes de confirmar, un bloque de comprobación aborta la migración si algo falla:
+Antes de confirmar, un bloque de comprobación aborta la migración si algo falla (el de la expansión
+está al final de su sección en `supabase-schema.sql`):
 
 - **Pertenencia:** ninguna fila de operación tiene `sucursal_id` nulo.
-- **Huella:** la de después es igual a la de antes, salvo las diferencias esperadas:
-  - `sesiones_vigentes` pasa a 0;
-  - los contadores de intentos se reinician;
-  - `por_estado_cobro` se lee de `estado_cobro`, con los mismos números.
+- **Huella:** la de destino es igual a la de origen, **fila por fila**, salvo las diferencias que se
+  permiten explícitamente al comparar (`DIFERENCIAS_DEL_CAMBIO` en `scripts/huella.mjs`):
+  - `abierto.sesiones_vigentes` pasa a 0 al cambiar (las sesiones no se comparan por fila);
+  - los contadores de intentos se reinician (tampoco se comparan por fila).
+  La expansión sola no tiene ninguna diferencia permitida.
 - **Referencias:** las compuestas se crean sin errores, y por lo tanto no hay filas de una sucursal
   que apunten a otra.
 - **Folios:** son únicos por sucursal y periodo, y el siguiente folio es `max + 1`.
@@ -101,6 +128,8 @@ Antes de confirmar, un bloque de comprobación aborta la migración si algo fall
 - `sucursal_id not null`; llaves y únicos por sucursal; referencias compuestas (ver MODELO.md §2).
 - Reemplazar las funciones por las versiones con sus validadores (`_dispositivo`, `_contexto`; MODELO.md
   §3) y retirar las antiguas sin contexto.
+- Estado de cobro: `supabase/multinegocio-contraer-estado-cobro.sql`. Se niega a correr mientras
+  alguna función use `cobro_id is null` o los valores especiales.
   Desde aquí la app anterior deja de funcionar, por eso va junto con la publicación de la nueva
   (§5).
 

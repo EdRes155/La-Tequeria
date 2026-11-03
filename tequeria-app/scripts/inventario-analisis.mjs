@@ -34,6 +34,12 @@ export function directo(f, tablas, funciones) {
   return { lee, escribe, llama, acceso, marcas, sesion: /\b_sesion\(/.test(cuerpo) };
 }
 
+// Contexto decidido a mano para funciones cuyo papel no se deduce de lo que leen o escriben
+export const CONTEXTO_REVISADO = {
+  _sucursal_unica: "Transitoria (paso 1): toma la única sucursal y falla si hay más; se retira en el paso 2",
+  _cuenta_con_propietario: "Cuenta de la fila: invariante de propietario (MODELO.md §3.0)",
+};
+
 // Agrega lo que hacen las funciones que llama, de forma transitiva: un ayudante que no toca tablas
 // pero llama a otro que lee la configuración también depende de la sucursal.
 export function conDependencias(lista) {
@@ -69,10 +75,12 @@ export function conDependencias(lista) {
     const indirectas = [...c.marcas].filter(([m]) => !f.marcas.includes(m) && !m.startsWith("recibe ids"))
       .map(([m, via]) => `${m} (vía \`${via}\`)`);
     const tocaDatos = c.lee.length || c.escribe.length;
-    const contexto = f.acceso.startsWith("Sesión") || f.acceso.startsWith("Token") ? "Sucursal de la sesión operativa"
+    const contexto = CONTEXTO_REVISADO[f.nombre] ? `${CONTEXTO_REVISADO[f.nombre]} (revisado)`
+      : f.acceso.startsWith("Sesión") || f.acceso.startsWith("Token") ? "Sucursal de la sesión operativa"
       : f.acceso === "Sin sesión" ? "Sucursal del dispositivo vinculado"
       : f.acceso === "Solo SQL Editor" ? "Se reemplaza por el registro del dueño"
-      : f.resultado === "trigger" ? "Sucursal de la fila (canal privado por sucursal)"
+      : f.resultado === "trigger" && f.marcas.some((m) => m.startsWith("aviso en tiempo real")) ? "Sucursal de la fila (canal privado por sucursal)"
+      : f.resultado === "trigger" ? "La fila que lo dispara"
       : c.sesion ? "Sucursal de la sesión (resuelve la sesión)"
       : tocaDatos ? `Recibe la sucursal de quien la llama${f.lee.length || f.escribe.length ? "" : " (indirecto)"}`
       : "Ninguno (no toca datos, ni directa ni indirectamente)";

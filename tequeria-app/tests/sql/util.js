@@ -74,3 +74,10 @@ export async function relojControlado(sql, inicio = new Date()) {
     },
   };
 }
+
+// Huella de datos (scripts/huella-datos.sql) con su versión y sal
+export const HUELLA = leer("scripts/huella-datos.sql");
+export async function huellaDe(sql, version, sal) {
+  await sql.query("select set_config('huella.version', $1, false), set_config('huella.sal', $2, false)", [version, sal]);
+  return (await sql.query(HUELLA)).rows[0].huella;
+}

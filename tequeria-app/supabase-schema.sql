@@ -247,6 +247,245 @@ where u.pin_hash not like '$2%'
               where u.pin_hash = encode(extensions.digest(p || '|' || u.id, 'sha256'), 'hex'));
 
 -- ---------------------------------------------------------------------
+--  MULTINEGOCIO, PASO 1: EXPANSIÓN (docs/multinegocio/MODELO.md §9 y MIGRACION.md §4)
+--  Compatible con la app actual: ninguna función de la API cambia. Todas las filas de operación
+--  quedan en la sucursal inicial, y las nuevas la toman por omisión con _sucursal_unica(), que
+--  falla en cuanto exista una segunda sucursal: para entonces cada función deberá recibirla de su
+--  validador (paso 2). Se puede ejecutar varias veces.
+-- ---------------------------------------------------------------------
+create table if not exists public.cuentas (
+  id uuid primary key default gen_random_uuid(),
+  nombre text not null,
+  estado text not null default 'pendiente_activacion'
+    constraint cuentas_estado_ck check (estado in ('pendiente_activacion', 'activa', 'suspendida')),
+  creada timestamptz not null default now(),
+  activada_en timestamptz,
+  constraint cuentas_activacion_ck check ((estado = 'pendiente_activacion') = (activada_en is null))
+);
+
+create table if not exists public.sucursales (
+  id uuid primary key default gen_random_uuid(),
+  cuenta_id uuid not null references public.cuentas (id),
+  nombre text not null,
+  zona_horaria text not null default 'America/Mexico_City',
+  retencion_domicilio_dias int not null default 90,
+  activa boolean not null default true,
+  creada timestamptz not null default now(),
+  constraint sucursales_cuenta_id_uk unique (cuenta_id, id)
+);
+
+create table if not exists public.membresias (
+  cuenta_id uuid not null references public.cuentas (id),
+  auth_user_id uuid not null references auth.users (id) on delete cascade,
+  rol text not null constraint membresias_rol_ck check (rol in ('propietario', 'encargado')),
+  creada timestamptz not null default now(),
+  creada_por uuid,
+  primary key (cuenta_id, auth_user_id)
+);
+
+create table if not exists public.invitaciones (
+  id uuid primary key default gen_random_uuid(),
+  cuenta_id uuid not null references public.cuentas (id),
+  correo text not null,
+  rol text not null constraint invitaciones_rol_ck check (rol in ('propietario', 'encargado')),
+  token_hash text not null unique,
+  vence timestamptz not null,
+  creada timestamptz not null default now(),
+  creada_por uuid,           -- nulo: la creó el proveedor (cuenta pendiente de activación)
+  usada_en timestamptz,
+  usada_por uuid
+);
+
+create table if not exists public.dispositivos (
+  id uuid primary key default gen_random_uuid(),
+  sucursal_id uuid not null references public.sucursales (id),
+  auth_user_id uuid not null unique references auth.users (id) on delete cascade,
+  nombre text not null,
+  monitor_cocina boolean not null default false,
+  aprobado_por uuid,
+  creado timestamptz not null default now(),
+  ultimo_uso timestamptz,
+  revocado_en timestamptz,
+  revocado_por uuid,
+  constraint dispositivos_sucursal_id_uk unique (sucursal_id, id)
+);
+
+create table if not exists public.codigos_vinculacion (
+  id uuid primary key default gen_random_uuid(),
+  sucursal_id uuid not null references public.sucursales (id),
+  codigo_hash text not null unique,
+  monitor_cocina boolean not null default false,
+  creado_por uuid not null,
+  creado timestamptz not null default now(),
+  vence timestamptz not null,
+  usado_en timestamptz,
+  dispositivo_id uuid,
+  constraint codigos_dispositivo_fk foreign key (sucursal_id, dispositivo_id) references public.dispositivos (sucursal_id, id)
+);
+
+-- Sucursal por omisión mientras solo exista una (ver el encabezado de esta sección)
+create or replace function public._sucursal_unica()
+returns uuid language plpgsql stable set search_path = public as $$
+declare v uuid; n int;
+begin
+  select count(*), min(id::text)::uuid into n, v from public.sucursales;
+  if n <> 1 then
+    raise exception 'Hay % sucursales y esta operación todavía no recibe la sucursal de su validador (multinegocio, paso 2).', n;
+  end if;
+  return v;
+end $$;
+
+-- Cuenta y sucursal inicial: la cuenta nace pendiente de activación, sin propietario (MODELO.md §3.0)
+do $$
+declare v_cuenta uuid; c record;
+begin
+  if not exists (select 1 from public.sucursales) then
+    select coalesce(nullif(btrim(nombre_negocio), ''), 'La Tequería') nombre,
+           coalesce(zona_horaria, 'America/Mexico_City') zona, coalesce(retencion_domicilio_dias, 90) retencion
+      into c from public.config where id = 1;
+    insert into public.cuentas (nombre) values (coalesce(c.nombre, 'La Tequería')) returning id into v_cuenta;
+    insert into public.sucursales (cuenta_id, nombre, zona_horaria, retencion_domicilio_dias)
+    values (v_cuenta, coalesce(c.nombre, 'La Tequería'), coalesce(c.zona, 'America/Mexico_City'), coalesce(c.retencion, 90));
+  end if;
+end $$;
+
+-- Toda fila de operación pertenece a una sucursal
+do $$
+declare t text;
+begin
+  foreach t in array array['config','cocina_sesion','carnes','bebidas','usuarios','mesas','tickets','cobros',
+                           'cortes','gastos','cocina_hechos','sesiones','bitacora'] loop
+    execute format('alter table public.%I add column if not exists sucursal_id uuid default public._sucursal_unica()', t);
+    execute format('update public.%I set sucursal_id = public._sucursal_unica() where sucursal_id is null', t);
+    execute format('alter table public.%I alter column sucursal_id set not null', t);
+    if not exists (select 1 from pg_constraint where conname = t || '_sucursal_fk') then
+      execute format('alter table public.%I add constraint %I foreign key (sucursal_id) references public.sucursales (id)',
+                     t, t || '_sucursal_fk');
+    end if;
+  end loop;
+  -- Una configuración y una cocina activa por sucursal
+  foreach t in array array['config','cocina_sesion'] loop
+    if not exists (select 1 from pg_constraint where conname = t || '_sucursal_uk') then
+      execute format('alter table public.%I add constraint %I unique (sucursal_id)', t, t || '_sucursal_uk');
+    end if;
+  end loop;
+  -- (sucursal_id, id) único: base de las referencias compuestas, que impiden mezclar sucursales
+  foreach t in array array['carnes','bebidas','usuarios','mesas','tickets','cobros','cortes','gastos','sesiones'] loop
+    if not exists (select 1 from pg_constraint where conname = t || '_sucursal_id_uk') then
+      execute format('alter table public.%I add constraint %I unique (sucursal_id, id)', t, t || '_sucursal_id_uk');
+    end if;
+  end loop;
+end $$;
+
+-- Referencias compuestas que ya se pueden exigir. Diferidas: se comprueban al confirmar, así que no
+-- importa el orden de las sentencias dentro de una función. La de tickets → cobros espera a que
+-- cobro_id deje de guardar «previo» y «no_cobrado» (contracción, MIGRACION.md §4.5).
+do $$
+declare r record;
+begin
+  for r in select * from (values
+    ('tickets',       'tickets_mesa_fk',      '(sucursal_id, mesa_id) references public.mesas (sucursal_id, id)'),
+    ('tickets',       'tickets_corte_fk',     '(sucursal_id, corte_id) references public.cortes (sucursal_id, id)'),
+    ('cobros',        'cobros_corte_fk',      '(sucursal_id, corte_id) references public.cortes (sucursal_id, id)'),
+    ('gastos',        'gastos_corte_fk',      '(sucursal_id, corte_id) references public.cortes (sucursal_id, id)'),
+    ('cocina_hechos', 'cocina_hechos_ticket_fk', '(sucursal_id, ticket_id) references public.tickets (sucursal_id, id) on delete cascade'),
+    ('sesiones',      'sesiones_usuario_fk',  '(sucursal_id, usuario_id) references public.usuarios (sucursal_id, id) on delete cascade')
+  ) as v(tabla, nombre, regla)
+  loop
+    if not exists (select 1 from pg_constraint where conname = r.nombre) then
+      execute format('alter table public.%I add constraint %I foreign key %s deferrable initially deferred', r.tabla, r.nombre, r.regla);
+    end if;
+  end loop;
+end $$;
+
+-- Estado de cobro separado del id del cobro (MODELO.md §2.1). Durante la transición se calcula de
+-- cobro_id, así que las funciones actuales lo mantienen sin cambios; en la contracción deja de ser
+-- calculado (conserva sus valores) y cobro_id queda solo con ids reales.
+alter table public.tickets add column if not exists estado_cobro text generated always as (
+  case when cobro_id is null then 'pendiente'
+       when cobro_id in ('previo', 'no_cobrado') then cobro_id
+       else 'cobrado' end) stored;
+
+-- Folio por sucursal y periodo (MODELO.md §2.2). Mientras enviar_comanda siga usando la identidad de
+-- tickets.folio, cada ejecución de este archivo pone folios al día; el paso 2 lo cambia a folios.
+alter table public.tickets add column if not exists folio_periodo text not null default 'continuo';
+create table if not exists public.folios (
+  sucursal_id uuid not null references public.sucursales (id),
+  periodo text not null,
+  ultimo bigint not null default 0 constraint folios_ultimo_ck check (ultimo >= 0),
+  primary key (sucursal_id, periodo)
+);
+insert into public.folios (sucursal_id, periodo, ultimo)
+select sucursal_id, folio_periodo, max(folio) from public.tickets where folio is not null group by 1, 2
+on conflict (sucursal_id, periodo) do update set ultimo = greatest(public.folios.ultimo, excluded.ultimo);
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'tickets_folio_uk') then
+    alter table public.tickets add constraint tickets_folio_uk unique (sucursal_id, folio_periodo, folio);
+  end if;
+end $$;
+
+-- Contadores de intentos nuevos (MODELO.md §6); los usa el paso 3
+create table if not exists public.intentos_operador (
+  sucursal_id uuid not null,
+  usuario_id text not null,
+  fallos int not null default 0,
+  nivel int not null default 0,
+  bloqueado_hasta timestamptz,
+  ultimo timestamptz not null default now(),
+  primary key (sucursal_id, usuario_id),
+  constraint intentos_operador_usuario_fk foreign key (sucursal_id, usuario_id)
+    references public.usuarios (sucursal_id, id) on delete cascade
+);
+create table if not exists public.intentos_dispositivo (
+  id bigint generated always as identity primary key,
+  sucursal_id uuid not null,
+  dispositivo_id uuid not null,
+  creado timestamptz not null default now(),
+  constraint intentos_dispositivo_fk foreign key (sucursal_id, dispositivo_id)
+    references public.dispositivos (sucursal_id, id) on delete cascade
+);
+create index if not exists intentos_dispositivo_idx on public.intentos_dispositivo (dispositivo_id, creado desc);
+
+-- Invariante: una cuenta activa tiene al menos un propietario (MODELO.md §3.0). Se comprueba al
+-- confirmar, con la fila de la cuenta bloqueada, para que dos bajas simultáneas no la dejen vacía.
+create or replace function public._cuenta_con_propietario()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare v_cuentas uuid[];
+begin
+  if tg_table_name = 'cuentas' then v_cuentas := array[new.id];
+  elsif tg_op = 'DELETE' then v_cuentas := array[old.cuenta_id];
+  else v_cuentas := array[old.cuenta_id, new.cuenta_id];
+  end if;
+  perform 1 from public.cuentas where id = any (v_cuentas) order by id for update;
+  if exists (select 1 from public.cuentas c where c.id = any (v_cuentas) and c.estado = 'activa'
+               and not exists (select 1 from public.membresias m where m.cuenta_id = c.id and m.rol = 'propietario')) then
+    raise exception 'Una cuenta activa necesita al menos un propietario.' using errcode = '23514';
+  end if;
+  return null;
+end $$;
+drop trigger if exists cuenta_con_propietario on public.cuentas;
+create constraint trigger cuenta_con_propietario after insert or update of estado on public.cuentas
+  deferrable initially deferred for each row execute function public._cuenta_con_propietario();
+drop trigger if exists cuenta_con_propietario on public.membresias;
+create constraint trigger cuenta_con_propietario after update or delete on public.membresias
+  deferrable initially deferred for each row execute function public._cuenta_con_propietario();
+
+-- Comprobación final de la expansión: si algo no cuadra, se aborta todo el archivo
+do $$
+begin
+  if exists (select 1 from public.tickets t
+              where t.estado_cobro = 'cobrado' and not exists (select 1 from public.cobros c where c.id = t.cobro_id)) then
+    raise exception 'Multinegocio: hay comandas cobradas cuyo cobro no existe.';
+  end if;
+  if exists (select 1 from public.tickets t
+              where t.folio > coalesce((select f.ultimo from public.folios f
+                                         where f.sucursal_id = t.sucursal_id and f.periodo = t.folio_periodo), 0)) then
+    raise exception 'Multinegocio: el folio de alguna sucursal quedó detrás de sus comandas.';
+  end if;
+end $$;
+
+-- ---------------------------------------------------------------------
 --  RETIRAR LA API ANTERIOR (verificador de PIN público, firmas viejas)
 -- ---------------------------------------------------------------------
 drop function if exists public.login(text, text);
@@ -1594,14 +1833,16 @@ do $$
 declare t text;
 begin
   foreach t in array array['config','carnes','bebidas','usuarios','mesas','tickets','cortes','gastos',
-                           'cocina_sesion','sesiones','intentos','bitacora','cobros','cocina_hechos'] loop
+                           'cocina_sesion','sesiones','intentos','bitacora','cobros','cocina_hechos',
+                           'cuentas','sucursales','membresias','invitaciones','dispositivos','codigos_vinculacion',
+                           'folios','intentos_operador','intentos_dispositivo'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists rw_all on public.%I', t);
     execute format('drop policy if exists usuarios_sel on public.%I', t);
     execute format('revoke all on public.%I from public, anon, authenticated', t);
   end loop;
 end $$;
-revoke all on sequence public.bitacora_id_seq from public, anon, authenticated;
+revoke all on sequence public.bitacora_id_seq, public.intentos_dispositivo_id_seq from public, anon, authenticated;
 
 -- Tabla de la versión 1 (estado en un solo bloque): ya no se usa; se cierra sin borrarla
 do $$
@@ -1631,7 +1872,7 @@ begin
              'actualizar_carne','agregar_carne','eliminar_carne','fijar_precio','fijar_precio_extra','agregar_extra',
              'eliminar_extra','alternar_oculto','agregar_gasto','eliminar_gasto','crear_usuario','eliminar_usuario',
              'restablecer_pin','cobrar','anular_cobro','marcar_recibido','no_cobrar','fijar_ajuste',
-             'mover_tickets','archivar_tickets','marcar_hecho')
+             'mover_tickets','archivar_tickets','marcar_hecho','_sucursal_unica','_cuenta_con_propietario')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;
