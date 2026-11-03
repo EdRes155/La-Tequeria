@@ -164,8 +164,6 @@ function crearRemoto() {
       liberarMesa: (mesaId) => conToken("liberar_mesa", { p_mesa_id: mesaId }),
       enviar: (t) => conToken("enviar_comanda", { p_ticket: t }, { reintentos: 1 }),   // idempotente por id
       reenviar: (id, mesaId) => conToken("reenviar_cocina", { p_id: id, p_mesa_id: mesaId }),
-      estadoTicket: (id, estado) => conToken("cambiar_estado_ticket", { p_id: id, p_estado: estado }),
-      archivar: (id) => conToken("archivar_ticket", { p_id: id }),
       corte: (adminPin) => conPin("hacer_corte", { p_admin_pin: adminPin }),
       ajustarBebida: (id, delta) => conToken("ajustar_bebida", { p_id: id, p_delta: delta }),
       actualizarBebida: (id, cambios) => conToken("actualizar_bebida", { p_id: id, p_cambios: cambios }),

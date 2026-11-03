@@ -95,9 +95,13 @@ function documento({ tablas, funciones, disparadores }, cli) {
   const api = fs_.filter((f) => f.api), internas = fs_.filter((f) => !f.api);
   const conFila1 = fs_.filter((f) => f.marcas.some((m) => m.startsWith("fila única"))).map((f) => f.nombre);
   const conFila1Indirecta = fs_.filter((f) => !conFila1.includes(f.nombre) && f.indirectas.some((m) => m.startsWith("fila única"))).map((f) => f.nombre);
-  const idempotentes = fs_.filter((f) => f.marcas.some((m) => m.startsWith("devuelve lo ya guardado"))).map((f) => f.nombre);
-  const pinAdmin = fs_.filter((f) => f.marcas.includes("PIN de administrador")).map((f) => f.nombre);
-  const candados = unicos(fs_.flatMap((f) => f.marcas.filter((m) => m.startsWith("candado")).map((m) => m.match(/`([^`]+)`/)[1])));
+  const conMarca = (re) => fs_.filter((f) => f.marcas.some((m) => re.test(m))).map((f) => f.nombre);
+  const idempotentes = conMarca(/^devuelve lo ya guardado/);
+  const idemSinSucursal = conMarca(/^devuelve lo ya guardado.*sin comprobar/);
+  const pinAdmin = conMarca(/^PIN de administrador/);
+  const pinCualquiera = conMarca(/^PIN de administrador \(de cualquier/);
+  const candados = unicos(fs_.flatMap((f) => f.marcas.filter((m) => m.startsWith("candado")).map((m) => m.replace(/^candado /, "").replace(/ \(compartido\)/, ""))));
+  const candadosGlobales = candados.filter((c) => /global$/.test(c));
   const sinUso = api.map((f) => f.nombre).filter((n) => !cli.rpcs.includes(n));
   const L = [];
   L.push("# Inventario del estado actual");
@@ -112,10 +116,13 @@ function documento({ tablas, funciones, disparadores }, cli) {
   L.push(`- **${tablas.length} tablas** en \`public\`, ninguna con acceso directo para \`anon\`: ${tablas.filter((t) => t.acceso_anon).length ? "⚠️ revisar" : "correcto"}.`);
   L.push(`- **${funciones.length} funciones**: ${api.length} de la API (ejecutables por \`anon\` o \`authenticated\`) y ${internas.length} internas.`);
   L.push(`- **Fila única \`id = 1\`** (configuración y cocina activa) en ${conFila1.length} funciones: ${lista(conFila1)}; y a través de otras en ${conFila1Indirecta.length} más: ${lista(conFila1Indirecta)}.`);
-  L.push(`- **Candados** (\`pg_advisory_xact_lock\`) globales hoy: ${lista(candados)}. Deben incluir la sucursal.`);
-  L.push(`- **Devuelven lo ya guardado** si se repite el id: ${lista(idempotentes)}. Deben comprobar que sea de la misma sucursal.`);
-  L.push(`- **PIN de administrador:** ${lista(pinAdmin)}. No debe servir el de otra sucursal.`);
-  L.push(`- **Tiempo real:** el servidor avisa en el canal ${lista(unicos(cli.canales))} (público y único para todos); el navegador escucha ${lista(cli.canales)}.`);
+  L.push(`- **Candados** (\`pg_advisory_xact_lock\`): ${candados.join("; ") || "—"}. ${candadosGlobales.length
+    ? `⚠️ Globales: ${candadosGlobales.join(", ")}.` : "Ninguno global: el del corte es por sucursal y los de comanda y cobro son por su id, que es global."}`);
+  L.push(`- **Devuelven lo ya guardado** si se repite el id: ${lista(idempotentes)}. ${idemSinSucursal.length
+    ? `⚠️ Sin comprobar la sucursal: ${lista(idemSinSucursal)}.` : "Todas comprueban que sea de la misma sucursal."}`);
+  L.push(`- **PIN de administrador:** ${lista(pinAdmin)}. ${pinCualquiera.length
+    ? `⚠️ Aceptan el de cualquier sucursal: ${lista(pinCualquiera)}.` : "Todas lo buscan solo en la sucursal de la sesión."}`);
+  L.push(`- **Tiempo real:** el servidor avisa en el canal ${lista(unicos(cli.canales))} (público y único para todos; el canal privado por sucursal es el paso 5); el navegador escucha ${lista(cli.canales)}.`);
   L.push(`- **Funciones de la API que el navegador no usa:** ${lista(sinUso)} (compatibilidad; decidir si se retiran).`);
   L.push("");
   L.push("## Tablas");

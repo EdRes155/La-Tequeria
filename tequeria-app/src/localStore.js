@@ -237,13 +237,6 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       guardar(["cocina"]);
       return { ok: true, ticket: clone(t) };
     },
-    async estadoTicket(id, estado) {
-      exigir(["cocinero", "admin"]);
-      const t = db.tickets.find((x) => x.id === id && !x.archivado) || fallar("TICKET", "La comanda ya no está en cocina.");
-      t.estado = estado;
-      t.recibido = t.recibido || new Date().toISOString();
-      guardar(["cocina", "historial", "porCobrar"]);
-    },
     async marcarRecibido(ids) {
       exigir(["cocinero", "admin"]);
       const ts = db.tickets.filter((t) => (ids || []).includes(t.id) && !t.recibido && !t.archivado);
@@ -252,13 +245,6 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       ts.forEach((t) => { t.recibido = ahora; });
       guardar(["cocina", "porCobrar"]);
       return ts.length;
-    },
-    async archivar(id) {
-      exigir(["cocinero", "admin"]);
-      const t = db.tickets.find((x) => x.id === id && x.estado === "listo") || fallar("TICKET", "Solo se pueden quitar comandas marcadas como listas.");
-      t.archivado = true;
-      if (t.corteId && (t.cobroId || t.reenvio)) db.tickets = db.tickets.filter((x) => x !== t); // ya contabilizado y cerrado
-      guardar(["cocina"]);
     },
     // Igual que public.mover_tickets: solo cambia lo que sigue como lo vio la pantalla
     async moverTickets(lista, hacia) {

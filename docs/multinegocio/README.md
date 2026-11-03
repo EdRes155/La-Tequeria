@@ -9,9 +9,10 @@ sucursal.
 | Inventario del estado actual | [INVENTARIO.md](INVENTARIO.md), generado por `tequeria-app/scripts/inventario.mjs`; la CI comprueba que esté al día | Listo |
 | Entorno de pruebas reproducible, separado de producción | PostgreSQL 16 desechable, local o en la CI (sección siguiente) | Listo |
 | Modelo de cuenta, sucursal, membresía, dispositivo y sesión, con el contexto de cada función | [MODELO.md](MODELO.md): un validador por tipo de llamada y estado de cuenta pendiente de activación | Diseño listo; paso 1 del núcleo implementado (abajo) |
-| Núcleo, paso 1: cuentas, sucursales y `sucursal_id` | Sección «MULTINEGOCIO, PASO 1» de `tequeria-app/supabase-schema.sql`; `tests/sql/migracion.test.js` | Implementado y ensayado sobre la instantánea de producción; no aplicado en producción |
+| Núcleo, paso 1: cuentas, sucursales y `sucursal_id` | Sección «MULTINEGOCIO» de `tequeria-app/supabase-schema.sql`; `tests/sql/migracion.test.js` | Implementado y ensayado sobre la instantánea de producción; no aplicado en producción |
+| Núcleo, paso 2: validadores y funciones por sucursal | `_dispositivo` y `_contexto` en `supabase-schema.sql`; matriz en `tests/sql/aislamiento.test.js` | Implementado: las 37 funciones de la API prueban sus casos de aislamiento con las dos cuentas; quedan pendientes solo los de funciones de los pasos 3 y 4. Desde aquí el esquema exige equipos vinculados y ya no sirve con la app publicada (ver MIGRACION.md) |
 | Fixtures de La Tequería y «Taquería Piloto B» | `tequeria-app/tests/fixtures/multinegocio.js`, validadas por `tests/fixtures.test.js` | Listas; se siembran cuando exista el modelo |
-| Matriz de aislamiento en la CI | `tequeria-app/tests/sql/aislamiento.test.js`: casos por función (pendientes) y una guardia activa que exige al menos un caso para cada firma completa ejecutable por `anon` o `authenticated` | Guardia activa; casos pendientes del núcleo |
+| Matriz de aislamiento en la CI | `tequeria-app/tests/sql/aislamiento.test.js`: una receta por función y casos genéricos (token de otra sucursal, otro equipo, equipo revocado, id ajeno igual que inexistente, listas mezcladas, id repetido, PIN ajeno) más los propios; la guardia exige caso y receta para cada firma ejecutable desde fuera | Activa: 198 casos probados; 40 pendientes de los pasos 3 y 4 |
 | Migración diseñada y ensayable | [MIGRACION.md](MIGRACION.md); huella de datos por entidad con versiones de origen y destino (`scripts/huella-datos.sql`, `scripts/huella.mjs`); instantánea del esquema de producción verificada exactamente (`tests/sql/esquema-v3.sql`, `scripts/catalogo-esquema.sql`, `scripts/huella-esquema.mjs`) | Expansión y contracción del estado de cobro ensayadas con datos sintéticos; falta la copia real para el ensayo completo |
 | Pruebas de seguridad con reloj controlado | `public._ahora()` en sesión e intentos; `relojControlado()` en `tests/sql/util.js`; casos en `tests/sql/reloj.test.js` | Reloj listo; los casos documentan la política vigente y se actualizan al implementar la nueva |
 
@@ -55,6 +56,6 @@ llegar a esos pasos.
    - cómo obtener la copia de producción;
    - la ventana del cambio;
    - el correo del dueño para la invitación inicial.
-2. **Núcleo, paso 2** ([MODELO.md §9](MODELO.md#9-orden-sugerido-para-implementar-paso-3-del-plan)): los
-   validadores y las funciones una por una, cada una con sus casos de la matriz pasados de pendientes a
-   pruebas reales; con eso se retira `_sucursal_unica()`.
+2. **Núcleo, paso 3** ([MODELO.md §9](MODELO.md#9-orden-sugerido-para-implementar-paso-3-del-plan)):
+   política de seguridad (PIN de 6 a 8 dígitos, contadores por operador y por equipo, sesión de 12 h e
+   inactividad con el monitor como excepción), con el reloj controlado.

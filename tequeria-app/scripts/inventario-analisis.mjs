@@ -13,17 +13,28 @@ export function directo(f, tablas, funciones) {
   ]);
   const lee = toca(/(?:from|join)\s+public\.(\w+)/gi).filter((t) => !escribe.includes(t) || /select[\s\S]*from\s+public\./i.test(cuerpo));
   const llama = unicos([...funciones].filter((n) => n !== f.nombre && new RegExp(`(?:^|[^\\w.])(?:public\\.)?${n}\\s*\\(`).test(cuerpo)));
-  const roles = (cuerpo.match(/_exigir\(\s*p_token\s*,\s*array\[([^\]]*)\]/) || [])[1];
+  const roles = (cuerpo.match(/_(?:exigir|contexto)\(\s*p_token\s*,\s*array\[([^\]]*)\]/) || [])[1];
   const acceso = !f.api ? (f.nombre === "crear_admin_inicial" ? "Solo SQL Editor" : "Interna")
     : roles ? `Sesión: ${roles.replace(/'/g, "").replace(/\s+/g, " ")}`
-    : /_sesion\(\s*p_token/.test(cuerpo) ? "Sesión: cualquier rol"
+    : /_(?:sesion|contexto)\(\s*p_token\s*\)/.test(cuerpo) ? "Sesión: cualquier rol"
+    : /\b_dispositivo\(\)/.test(cuerpo) ? "Equipo vinculado, sin operador"
     : /\bp_token\b/.test(f.args) ? "Token propio (sin revisar rol)"
     : "Sin sesión";
   const marcas = [];
   if (/\bid\s*=\s*1\b/.test(cuerpo)) marcas.push("fila única `id = 1`");
-  for (const m of cuerpo.matchAll(/pg_advisory_xact_lock(_shared)?\(hashtextextended\('([^']+)'/g)) marcas.push(`candado \`${m[2]}\`${m[1] ? " (compartido)" : ""}`);
-  if (/'duplicado',\s*true/.test(cuerpo)) marcas.push("devuelve lo ya guardado si se repite el id");
-  if (/_verificar_admin\(/.test(cuerpo)) marcas.push("PIN de administrador");
+  for (const m of cuerpo.matchAll(/pg_advisory_xact_lock(_shared)?\(hashtextextended\('([^']+)'\s*\|\|\s*([a-z_.]+)/g)) {
+    const porSucursal = /sucursal_id$/.test(m[3]);
+    marcas.push(`candado \`${m[2]}\`${m[1] ? " (compartido)" : ""}${porSucursal ? " por sucursal" : ` por ${m[3].replace(/^[a-z]+\./, "").replace(/^[pv]_/, "")}`}`);
+  }
+  for (const m of cuerpo.matchAll(/pg_advisory_xact_lock(_shared)?\(hashtextextended\('([^']+)',/g)) marcas.push(`candado \`${m[2]}\`${m[1] ? " (compartido)" : ""} global`);
+  if (/'duplicado',\s*true/.test(cuerpo)) {
+    marcas.push(/\.sucursal_id\s*<>\s*s\.sucursal_id/.test(cuerpo)
+      ? "devuelve lo ya guardado si se repite el id (solo de su sucursal)"
+      : "devuelve lo ya guardado si se repite el id (sin comprobar la sucursal)");
+  }
+  if (/_verificar_admin\(/.test(cuerpo)) {
+    marcas.push(/_verificar_admin\(\s*s\.sucursal_id/.test(cuerpo) ? "PIN de administrador de su sucursal" : "PIN de administrador (de cualquier sucursal)");
+  }
   if (/_pin_ok\(|_hash_pin\(/.test(cuerpo)) marcas.push("verifica o guarda PIN");
   if (/realtime\.send/.test(cuerpo)) marcas.push("aviso en tiempo real (canal `tequeria`, público)");
   const prefijos = unicos([...cuerpo.matchAll(/_(?:fallo|espera|limpiar_intentos)\('(\w+):'/g)].map((m) => m[1] + ":"));
@@ -31,12 +42,13 @@ export function directo(f, tablas, funciones) {
   if (/\bnow\(\)/.test(cuerpo)) marcas.push("usa `now()`");
   const ids = (f.args.match(/\bp_(?:id|ids|ticket|tickets|mesa_id)\b/g) || []);
   if (f.api && ids.length) marcas.push(`recibe ids del cliente (${unicos(ids).join(", ")})`);
-  return { lee, escribe, llama, acceso, marcas, sesion: /\b_sesion\(/.test(cuerpo) };
+  return { lee, escribe, llama, acceso, marcas, sesion: /\b_(?:sesion|contexto|dispositivo)\(/.test(cuerpo) };
 }
 
 // Contexto decidido a mano para funciones cuyo papel no se deduce de lo que leen o escriben
 export const CONTEXTO_REVISADO = {
-  _sucursal_unica: "Transitoria (paso 1): toma la única sucursal y falla si hay más; se retira en el paso 2",
+  _dispositivo: "Es el validador del equipo: de aquí sale la sucursal (auth.uid() → dispositivo sin revocar)",
+  _contexto: "Es el validador de la operación: equipo y sesión del operador de esa sucursal y ese equipo",
   _cuenta_con_propietario: "Cuenta de la fila: invariante de propietario (MODELO.md §3.0)",
 };
 
@@ -77,7 +89,7 @@ export function conDependencias(lista) {
     const tocaDatos = c.lee.length || c.escribe.length;
     const contexto = CONTEXTO_REVISADO[f.nombre] ? `${CONTEXTO_REVISADO[f.nombre]} (revisado)`
       : f.acceso.startsWith("Sesión") || f.acceso.startsWith("Token") ? "Sucursal de la sesión operativa"
-      : f.acceso === "Sin sesión" ? "Sucursal del dispositivo vinculado"
+      : f.acceso.startsWith("Equipo") || f.acceso === "Sin sesión" ? "Sucursal del dispositivo vinculado"
       : f.acceso === "Solo SQL Editor" ? "Se reemplaza por el registro del dueño"
       : f.resultado === "trigger" && f.marcas.some((m) => m.startsWith("aviso en tiempo real")) ? "Sucursal de la fila (canal privado por sucursal)"
       : f.resultado === "trigger" ? "La fila que lo dispara"

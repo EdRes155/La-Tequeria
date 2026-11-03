@@ -1,7 +1,8 @@
 # Modelo multinegocio: cuenta, sucursal, membresía, dispositivo y sesión
 
-Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. El paso 1 del §9
-(tablas y `sucursal_id`) está implementado en `supabase-schema.sql`; lo demás es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
+Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. Los pasos 1 y 2 del
+§9 (tablas, `sucursal_id`, validadores `_dispositivo` y `_contexto` y todas las funciones por sucursal)
+están implementados en `supabase-schema.sql`; lo demás es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
 [inventario](INVENTARIO.md), generado del código.
 
 ## 1. Entidades nuevas
@@ -82,10 +83,12 @@ por eso no puede tener referencia. Se separa en:
 
 ### 2.3 Candados
 
-Los candados de hoy (`tequeria:corte`, `tequeria:cobro:<id>`, `tequeria:ticket:<id>`) son globales:
-un corte de una sucursal frenaría los cobros de todas. Pasan a incluir la sucursal, por ejemplo
-`tequeria:corte:<sucursal_id>`. El orden de bloqueo no cambia: primero el candado, después las filas
-ordenadas por id.
+- **Corte:** `tequeria:corte:<sucursal_id>`. Antes era global: un corte de una sucursal frenaba los
+  cobros de todas. La prueba toma el candado del corte de A y comprueba que B cobra sin esperar.
+- **Comanda y cobro:** `tequeria:ticket:<id>` y `tequeria:cobro:<id>` siguen por id, porque el id de
+  comandas y cobros es global (es la llave de la tabla): dos sucursales no pueden crear el mismo id, y
+  el candado por id hace que la segunda reciba el error genérico (§3.1) en lugar de un error de llave.
+- El orden de bloqueo no cambia: primero el candado, después las filas ordenadas por id.
 
 ## 3. Contexto autorizado: un validador por tipo de llamada
 
@@ -114,8 +117,13 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
 - **Auxiliares internas** (`_fecha`, `_valorar_items`, `_ticket_json`…): reciben `sucursal_id` como
   parámetro explícito de quien las llama. El [inventario](INVENTARIO.md) marca cuáles dependen de la
   sucursal directamente y cuáles a través de otras.
-- **Transición:** mientras dure la expansión (§9, paso 1) las funciones actuales siguen con `_sesion`
-  y `_exigir` y la sucursal única. Pasan a `_contexto` en el paso 2, una por una.
+- **Implementado (paso 2):** `_dispositivo()` y `_contexto(p_token, p_roles)`; sustituyen a `_sesion` y
+  `_exigir`. Sin `p_roles`, `_contexto` acepta cualquier rol (lectura, latido, salir, cambiar PIN); con
+  ellos exige el rol y que el PIN ya se haya cambiado. El tipo de llamada (`p_tipo`, para la inactividad
+  y el monitor) llega con la política de sesión (paso 3); `_vinculacion`, `_identidad` y `_dueno`, con
+  las funciones que los usan (paso 4).
+- **La API solo la ejecuta `authenticated`**: los equipos entran con una sesión anónima de Supabase, que
+  tiene ese rol. `anon` no ejecuta ninguna función.
 
 ### 3.0 Estado de la cuenta
 
@@ -147,8 +155,9 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
   - como la llave es global, ese caso solo ocurre por error o por un intento malicioso.
 - **PIN de administrador** (`_verificar_admin`): solo se aceptan administradores de la sucursal del
   contexto, y los fallos cuentan en el contador de reautenticación de esa sesión (§6).
-- **Listas mezcladas:** si una lista trae ids de otra sucursal, la operación completa se rechaza; no
-  se procesa en parte.
+- **Listas mezcladas:** si una lista trae algún id que no existe en la sucursal (sea de otra o
+  inexistente), la operación completa se rechaza; no se procesa en parte. Así un id ajeno y uno
+  inexistente dan exactamente la misma respuesta.
 - **Sin firmas antiguas:** las funciones que hoy no reciben contexto no se conservan como alternativa.
   Las antiguas `cambiar_estado_ticket` y `archivar_ticket` se retiran, porque ya existen
   `mover_tickets` y `archivar_tickets`.
@@ -295,10 +304,13 @@ Reglas de aplicación (del plan):
 
 1. **Tablas nuevas y `sucursal_id`** (hecho; detalle en [MIGRACION.md §4.1](MIGRACION.md)):
    - tablas nuevas, cuenta y sucursal inicial (pendiente de activación);
-   - `sucursal_id not null` con `_sucursal_unica()` por omisión, únicos y referencias compuestas;
-   - `estado_cobro` calculado, `folios` e invariante de propietario.
-2. **Validadores (§3) y `_ahora()`:** pasar las funciones una por una, cada una con sus casos en la matriz
-   de aislamiento (`tests/sql/aislamiento.test.js`).
+   - `sucursal_id not null`, únicos y referencias compuestas;
+   - `estado_cobro`, `folios` e invariante de propietario.
+2. **Validadores (§3)** (hecho): `_dispositivo` y `_contexto`; todas las funciones reciben la sucursal de
+   su validador; llaves locales por sucursal (mesas, carnes, bebidas, configuración, cocina activa);
+   candado del corte por sucursal; folio desde `folios`; contracción del estado de cobro. La matriz de
+   aislamiento (`tests/sql/aislamiento.test.js`) prueba cada función con las dos cuentas de las fixtures:
+   solo quedan pendientes los casos de funciones de los pasos 3 y 4.
 3. **Política de seguridad:** PIN de 6 a 8 dígitos, contadores, sesión de 12 h e inactividad, con
    reloj controlado.
 4. **Dispositivos y dueños:** vinculación, revocación, membresías y registro.

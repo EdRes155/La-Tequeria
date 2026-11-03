@@ -7,10 +7,16 @@
 //   ids: recibe ids de la app · lista: recibe varias · idem: devuelve lo ya guardado si se repite el id ·
 //   pin: pide PIN de administrador · casos: casos propios ·
 //   futura: aún no existe (la crea el plan; la llave es solo el nombre)
+// Un caso que termina en «(paso N)» depende de un paso posterior del plan y queda pendiente hasta entonces.
+// Las pruebas están en tests/sql/aislamiento.test.js.
 
 export const MATRIZ = {
   "usuarios_login()": { dispositivo: true, casos: ["solo lista el personal de la sucursal del dispositivo"] },
-  "login(text, text, text)": { dispositivo: true, ids: true, casos: ["un usuario de otra sucursal no entra en este dispositivo", "los fallos cuentan por operador y sucursal, y por dispositivo"] },
+  "login(text, text, text)": { dispositivo: true, ids: true, casos: [
+    "un usuario de otra sucursal no entra en este equipo",
+    "los fallos en otra sucursal no bloquean al operador",
+    "los fallos cuentan también por equipo (paso 3)",
+  ] },
   "logout(text)": { sesion: true },
   "cambiar_pin(text, text, text)": { sesion: true },
   "estado(text, text[])": { sesion: true, casos: ["todas las partes devuelven solo datos de su sucursal", "el folio y los resúmenes son los de su sucursal"] },
@@ -21,8 +27,6 @@ export const MATRIZ = {
   "liberar_mesa(text, integer)": { sesion: true, ids: true },
   "enviar_comanda(text, jsonb)": { sesion: true, ids: true, idem: true, casos: ["precios, existencias y folio salen de su sucursal"] },
   "reenviar_cocina(text, text, integer)": { sesion: true, ids: true, idem: true },
-  "cambiar_estado_ticket(text, text, text)": { sesion: true, ids: true, casos: ["se retira: la sustituye mover_tickets"] },
-  "archivar_ticket(text, text)": { sesion: true, ids: true, casos: ["se retira: la sustituye archivar_tickets"] },
   "mover_tickets(text, jsonb, text)": { sesion: true, ids: true, lista: true },
   "archivar_tickets(text, text[])": { sesion: true, ids: true, lista: true },
   "marcar_hecho(text, text, text, boolean)": { sesion: true, ids: true },
@@ -43,7 +47,7 @@ export const MATRIZ = {
   "eliminar_extra(text, text)": { sesion: true, ids: true },
   "alternar_oculto(text, text)": { sesion: true },
   "fijar_ajuste(text, text, jsonb)": { sesion: true },
-  "agregar_gasto(text, text, text, numeric)": { sesion: true, ids: true, idem: true },
+  "agregar_gasto(text, text, text, numeric)": { sesion: true, idem: true },
   "eliminar_gasto(text, text)": { sesion: true, ids: true },
   "crear_usuario(text, text, text, text, text)": { sesion: true, pin: true },
   "eliminar_usuario(text, text, text)": { sesion: true, ids: true, pin: true },
@@ -54,8 +58,8 @@ export const MATRIZ = {
     "una identidad que ya es un dispositivo vigente no se vincula otra vez",
     "una identidad de persona (no anónima) no se vincula como equipo",
   ] },
-  desbloquear: { futura: true, sesion: true, casos: ["no reinicia las 12 horas", "el PIN de otro operador no desbloquea"] },
-  restablecer_acceso: { futura: true, sesion: true, ids: true, casos: ["solo un administrador de la misma sucursal; queda en bitácora"] },
+  desbloquear: { futura: true, sesion: true, casos: ["no reinicia las 12 horas (paso 3)", "el PIN de otro operador no desbloquea (paso 3)"] },
+  restablecer_acceso: { futura: true, sesion: true, ids: true, casos: ["solo un administrador de la misma sucursal; queda en bitácora (paso 3)"] },
   crear_cuenta: { futura: true, identidad: true, casos: ["la cuenta nace activa con quien la crea como propietario, en la misma transacción"] },
   aceptar_invitacion: { futura: true, identidad: true, casos: [
     "una invitación de otra cuenta, vencida, ya usada o para otro correo no da acceso",

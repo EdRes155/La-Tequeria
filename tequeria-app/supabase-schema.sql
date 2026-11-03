@@ -180,7 +180,6 @@ create index if not exists tickets_corte_idx   on public.tickets (corte_id);
 create index if not exists gastos_corte_idx    on public.gastos (corte_id);
 create index if not exists sesiones_usuario_idx on public.sesiones (usuario_id);
 create index if not exists bitacora_creado_idx on public.bitacora (creado desc);
-create index if not exists tickets_por_cobrar_idx on public.tickets (created_at desc) where cobro_id is null and reenvio is not true;
 create index if not exists tickets_cobro_idx on public.tickets (cobro_id);
 create index if not exists cobros_corte_idx on public.cobros (corte_id);
 create index if not exists tickets_mesa_idx on public.tickets (mesa_id, created_at desc);
@@ -209,35 +208,34 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
---  DATOS INICIALES (solo si faltan; no crea usuarios)
+--  DATOS INICIALES (solo en la primera instalación; no crea usuarios). Después, cada sucursal
+--  recibe su catálogo al crearse (multinegocio, paso 4).
 -- ---------------------------------------------------------------------
 insert into public.carnes (id, nombre, activo, orden)
 select * from (values ('pastor','Pastor',true,0), ('bistec','Bistec',true,1),
                       ('tripa','Tripa',true,2), ('chorizo','Chorizo',true,3)) v(id, nombre, activo, orden)
-where not exists (select 1 from public.carnes);
+where not exists (select 1 from public.carnes) and to_regclass('public.sucursales') is null;
 
 insert into public.bebidas (id, nombre, cantidad, activo, precio)
 select * from (values
   ('coca','Coca-Cola',24,true,25), ('sprite','Sprite',12,true,25), ('fanta','Fanta',12,true,25),
   ('jamaica','Agua de Jamaica',20,true,20), ('horchata','Agua de Horchata',20,true,20),
   ('mineral','Agua Mineral',10,true,25), ('botella','Agua Embotellada',30,true,15)) v(id, nombre, cantidad, activo, precio)
-where not exists (select 1 from public.bebidas);
+where not exists (select 1 from public.bebidas) and to_regclass('public.sucursales') is null;
 
 insert into public.mesas (id, estado)
 select g, 'libre' from generate_series(1, 8) g
-where not exists (select 1 from public.mesas);
+where not exists (select 1 from public.mesas) and to_regclass('public.sucursales') is null;
 
-insert into public.config (id, nombre_negocio, precios, extras, ocultos)
-select 1, 'La Tequería',
+insert into public.config (nombre_negocio, precios, extras, ocultos)
+select 'La Tequería',
   '{"quesa-maiz-queso":25,"quesa-queso":35,"volcan-queso":35,"costra-queso":45,"media-costra-queso":25,
     "bolsa-verdura":15,"tortilla-harina":10,"tortilla-maiz":10}'::jsonb
   || coalesce((select jsonb_object_agg(k, p) from public.carnes c,
        lateral (values ('taco-'||c.id,20), ('taco-queso-'||c.id,30), ('gringa-'||c.id,45), ('llenadora-'||c.id,55),
                        ('volcan-'||c.id,40), ('costra-'||c.id,50), ('media-costra-'||c.id,28)) v(k, p)), '{}'::jsonb),
   '[]'::jsonb, '[]'::jsonb
-where not exists (select 1 from public.config where id = 1);
-
-insert into public.cocina_sesion (id) values (1) on conflict (id) do nothing;
+where not exists (select 1 from public.config) and to_regclass('public.sucursales') is null;
 
 -- PIN de demostración o triviales en datos v2 (hash SHA-256): obligar a cambiarlos
 update public.usuarios u set debe_cambiar_pin = true
@@ -247,12 +245,12 @@ where u.pin_hash not like '$2%'
               where u.pin_hash = encode(extensions.digest(p || '|' || u.id, 'sha256'), 'hex'));
 
 -- ---------------------------------------------------------------------
---  MULTINEGOCIO, PASO 1: EXPANSIÓN (docs/multinegocio/MODELO.md §9 y MIGRACION.md §4)
---  Compatible con la app actual. Todas las filas de operación quedan en la sucursal inicial, y las
---  nuevas la toman por omisión con _sucursal_unica(). Además, toda la API antigua (_sesion, login,
---  usuarios_login y logout) llama primero a _sucursal_unica(): si llegara a existir una segunda
---  sucursal antes del paso 2, no lee ni escribe nada en lugar de mezclar datos. En el paso 2 cada
---  función recibe la sucursal de su validador y la guardia se retira. Se puede ejecutar varias veces.
+--  MULTINEGOCIO (docs/multinegocio/MODELO.md y MIGRACION.md)
+--  Paso 1: cuentas, sucursales y sucursal_id en toda la operación.
+--  Paso 2: llaves locales por sucursal; cada función recibe la sucursal de su validador
+--  (_dispositivo, _contexto) y el estado de cobro se separa de cobro_id (contracción, al final del
+--  archivo). Desde el paso 2, la app publicada antes ya no funciona con este esquema: se aplica junto
+--  con la app nueva, en la ventana del cambio (MIGRACION.md §5). Se puede ejecutar varias veces.
 -- ---------------------------------------------------------------------
 create table if not exists public.cuentas (
   id uuid primary key default gen_random_uuid(),
@@ -324,18 +322,6 @@ create table if not exists public.codigos_vinculacion (
   constraint codigos_dispositivo_fk foreign key (sucursal_id, dispositivo_id) references public.dispositivos (sucursal_id, id)
 );
 
--- Sucursal por omisión mientras solo exista una (ver el encabezado de esta sección)
-create or replace function public._sucursal_unica()
-returns uuid language plpgsql stable set search_path = public as $$
-declare v uuid; n int;
-begin
-  select count(*), min(id::text)::uuid into n, v from public.sucursales;
-  if n <> 1 then
-    raise exception 'Hay % sucursales y esta operación todavía no recibe la sucursal de su validador (multinegocio, paso 2).', n;
-  end if;
-  return v;
-end $$;
-
 -- Cuenta y sucursal inicial: la cuenta nace pendiente de activación, sin propietario (MODELO.md §3.0)
 do $$
 declare v_cuenta uuid; c record;
@@ -343,44 +329,77 @@ begin
   if not exists (select 1 from public.sucursales) then
     select coalesce(nullif(btrim(nombre_negocio), ''), 'La Tequería') nombre,
            coalesce(zona_horaria, 'America/Mexico_City') zona, coalesce(retencion_domicilio_dias, 90) retencion
-      into c from public.config where id = 1;
+      into c from public.config limit 1;
     insert into public.cuentas (nombre) values (coalesce(c.nombre, 'La Tequería')) returning id into v_cuenta;
     insert into public.sucursales (cuenta_id, nombre, zona_horaria, retencion_domicilio_dias)
     values (v_cuenta, coalesce(c.nombre, 'La Tequería'), coalesce(c.zona, 'America/Mexico_City'), coalesce(c.retencion, 90));
   end if;
 end $$;
 
--- Toda fila de operación pertenece a una sucursal
+-- Toda fila de operación pertenece a una sucursal. Las filas que aún no la tienen vienen de la
+-- instalación de una sola sucursal (actualización desde v2 o v3) y pasan a la sucursal inicial. Sin
+-- valor por omisión: cada función indica la sucursal de su validador.
 do $$
-declare t text;
+declare t text; v_unica uuid; n int; v_hay boolean;
 begin
+  select count(*), min(id::text)::uuid into n, v_unica from public.sucursales;
   foreach t in array array['config','cocina_sesion','carnes','bebidas','usuarios','mesas','tickets','cobros',
                            'cortes','gastos','cocina_hechos','sesiones','bitacora'] loop
-    execute format('alter table public.%I add column if not exists sucursal_id uuid default public._sucursal_unica()', t);
-    execute format('update public.%I set sucursal_id = public._sucursal_unica() where sucursal_id is null', t);
+    execute format('alter table public.%I add column if not exists sucursal_id uuid', t);
+    execute format('alter table public.%I alter column sucursal_id drop default', t);
+    execute format('select exists (select 1 from public.%I where sucursal_id is null)', t) into v_hay;
+    if v_hay then
+      if n <> 1 then
+        raise exception 'Multinegocio: hay filas de % sin sucursal y % sucursales; no se puede saber de cuál son.', t, n;
+      end if;
+      execute format('update public.%I set sucursal_id = $1 where sucursal_id is null', t) using v_unica;
+    end if;
     execute format('alter table public.%I alter column sucursal_id set not null', t);
     if not exists (select 1 from pg_constraint where conname = t || '_sucursal_fk') then
       execute format('alter table public.%I add constraint %I foreign key (sucursal_id) references public.sucursales (id)',
                      t, t || '_sucursal_fk');
     end if;
   end loop;
-  -- Una configuración y una cocina activa por sucursal
-  foreach t in array array['config','cocina_sesion'] loop
-    if not exists (select 1 from pg_constraint where conname = t || '_sucursal_uk') then
-      execute format('alter table public.%I add constraint %I unique (sucursal_id)', t, t || '_sucursal_uk');
+
+  -- Llaves locales: «Mesa 1», «pastor» o «coca» se repiten entre sucursales
+  foreach t in array array['mesas','carnes','bebidas'] loop
+    if (select array_agg(a.attname::text order by a.attname::text) from pg_constraint k
+          join pg_attribute a on a.attrelid = k.conrelid and a.attnum = any (k.conkey)
+         where k.conrelid = format('public.%I', t)::regclass and k.contype = 'p') = array['id'] then
+      if t = 'mesas' then alter table public.tickets drop constraint if exists tickets_mesa_fk; end if;
+      execute format('alter table public.%I drop constraint if exists %I', t, t || '_sucursal_id_uk');
+      execute format('alter table public.%I drop constraint %I', t, t || '_pkey');
+      execute format('alter table public.%I add constraint %I primary key (sucursal_id, id)', t, t || '_pkey');
     end if;
   end loop;
-  -- (sucursal_id, id) único: base de las referencias compuestas, que impiden mezclar sucursales
-  foreach t in array array['carnes','bebidas','usuarios','mesas','tickets','cobros','cortes','gastos','sesiones'] loop
+
+  -- Una configuración y una cocina activa por sucursal: la llave pasa a ser la sucursal
+  foreach t in array array['config','cocina_sesion'] loop
+    if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = t and column_name = 'id') then
+      execute format('alter table public.%I drop constraint if exists %I', t, t || '_sucursal_uk');
+      execute format('alter table public.%I drop constraint if exists %I', t, t || '_pkey');
+      execute format('alter table public.%I drop column id', t);
+      execute format('alter table public.%I add constraint %I primary key (sucursal_id)', t, t || '_pkey');
+    end if;
+  end loop;
+
+  -- (sucursal_id, id) único en las tablas con id global: base de las referencias compuestas
+  foreach t in array array['usuarios','tickets','cobros','cortes','gastos','sesiones'] loop
     if not exists (select 1 from pg_constraint where conname = t || '_sucursal_id_uk') then
       execute format('alter table public.%I add constraint %I unique (sucursal_id, id)', t, t || '_sucursal_id_uk');
     end if;
   end loop;
 end $$;
+insert into public.cocina_sesion (sucursal_id) select id from public.sucursales on conflict (sucursal_id) do nothing;
 
--- Referencias compuestas que ya se pueden exigir. Diferidas: se comprueban al confirmar, así que no
--- importa el orden de las sentencias dentro de una función. La de tickets → cobros espera a que
--- cobro_id deje de guardar «previo» y «no_cobrado» (contracción, MIGRACION.md §4.5).
+-- Cada sesión pertenece a un equipo vinculado. Las anteriores no tienen equipo y se cierran: hay que
+-- volver a entrar desde un equipo vinculado (MIGRACION.md §4.3).
+alter table public.sesiones add column if not exists dispositivo_id uuid;
+update public.sesiones set revocada = true where dispositivo_id is null and not revocada;
+
+-- Referencias compuestas: impiden que una fila apunte a otra sucursal. Diferidas: se comprueban al
+-- confirmar, así que no importa el orden de las sentencias dentro de una función. La de tickets → cobros
+-- se agrega en la contracción del estado de cobro (al final del archivo).
 do $$
 declare r record;
 begin
@@ -390,7 +409,8 @@ begin
     ('cobros',        'cobros_corte_fk',      '(sucursal_id, corte_id) references public.cortes (sucursal_id, id)'),
     ('gastos',        'gastos_corte_fk',      '(sucursal_id, corte_id) references public.cortes (sucursal_id, id)'),
     ('cocina_hechos', 'cocina_hechos_ticket_fk', '(sucursal_id, ticket_id) references public.tickets (sucursal_id, id) on delete cascade'),
-    ('sesiones',      'sesiones_usuario_fk',  '(sucursal_id, usuario_id) references public.usuarios (sucursal_id, id) on delete cascade')
+    ('sesiones',      'sesiones_usuario_fk',  '(sucursal_id, usuario_id) references public.usuarios (sucursal_id, id) on delete cascade'),
+    ('sesiones',      'sesiones_dispositivo_fk', '(sucursal_id, dispositivo_id) references public.dispositivos (sucursal_id, id) on delete cascade')
   ) as v(tabla, nombre, regla)
   loop
     if not exists (select 1 from pg_constraint where conname = r.nombre) then
@@ -399,18 +419,27 @@ begin
   end loop;
 end $$;
 
--- Estado de cobro separado del id del cobro (MODELO.md §2.1). Durante la transición se calcula de
--- cobro_id, así que las funciones actuales lo mantienen sin cambios; en la contracción deja de ser
--- calculado (conserva sus valores) y cobro_id queda solo con ids reales.
+-- Estado de cobro separado del id del cobro (MODELO.md §2.1). Al agregarse se calcula de cobro_id, para
+-- conservar el estado de lo que ya existe; la contracción (al final del archivo) lo deja como columna
+-- normal y cobro_id queda solo con ids reales.
 alter table public.tickets add column if not exists estado_cobro text generated always as (
   case when cobro_id is null then 'pendiente'
        when cobro_id in ('previo', 'no_cobrado') then cobro_id
        else 'cobrado' end) stored;
+do $$
+begin
+  if exists (select 1 from pg_indexes where schemaname = 'public' and indexname = 'tickets_por_cobrar_idx'
+               and indexdef !~* 'estado_cobro') then
+    drop index public.tickets_por_cobrar_idx;
+  end if;
+end $$;
+create index if not exists tickets_por_cobrar_idx on public.tickets (sucursal_id, created_at desc)
+  where estado_cobro = 'pendiente' and reenvio is not true;
 
 -- ¿Este código depende del significado antiguo de cobro_id? (valores especiales «previo» y
--- «no_cobrado», o «cobro_id is null» como «falta cobrar»). Lo usa la guardia de la contracción
--- (supabase/multinegocio-contraer-estado-cobro.sql). No marca el uso moderno: comparar estado_cobro
--- con esos valores, o usar cobro_id solo para unir con cobros o guardar un cobro real.
+-- «no_cobrado», o «cobro_id is null» como «falta cobrar»). Lo usa la guardia de la contracción. No
+-- marca el uso moderno: comparar estado_cobro con esos valores, o usar cobro_id solo para unir con
+-- cobros o guardar un cobro real.
 create or replace function public._usa_cobro_id_heredado(p_src text)
 returns boolean language sql immutable set search_path = public as $$
   with s as (select regexp_replace(regexp_replace(coalesce(p_src, ''), '/\*.*?\*/', ' ', 'g'), '--[^\n]*', ' ', 'g') t)
@@ -422,8 +451,8 @@ returns boolean language sql immutable set search_path = public as $$
   from s
 $$;
 
--- Folio por sucursal y periodo (MODELO.md §2.2). Mientras enviar_comanda siga usando la identidad de
--- tickets.folio, cada ejecución de este archivo pone folios al día; el paso 2 lo cambia a folios.
+-- Folio por sucursal y periodo (MODELO.md §2.2). enviar_comanda y reenviar_cocina toman el siguiente
+-- de aquí; al actualizar desde una versión anterior se parte del folio más alto que ya existe.
 alter table public.tickets add column if not exists folio_periodo text not null default 'continuo';
 create table if not exists public.folios (
   sucursal_id uuid not null references public.sucursales (id),
@@ -494,12 +523,13 @@ drop trigger if exists cuenta_con_propietario on public.membresias;
 create constraint trigger cuenta_con_propietario after update or delete on public.membresias
   deferrable initially deferred for each row execute function public._cuenta_con_propietario();
 
--- Comprobación final de la expansión: si algo no cuadra, se aborta todo el archivo
+-- Comprobación de la expansión: si algo no cuadra, se aborta todo el archivo
 do $$
 begin
   if exists (select 1 from public.tickets t
-              where t.estado_cobro = 'cobrado' and not exists (select 1 from public.cobros c where c.id = t.cobro_id)) then
-    raise exception 'Multinegocio: hay comandas cobradas cuyo cobro no existe.';
+              where t.estado_cobro = 'cobrado'
+                and not exists (select 1 from public.cobros c where c.sucursal_id = t.sucursal_id and c.id = t.cobro_id)) then
+    raise exception 'Multinegocio: hay comandas cobradas cuyo cobro no existe en su sucursal.';
   end if;
   if exists (select 1 from public.tickets t
               where t.folio > coalesce((select f.ultimo from public.folios f
@@ -522,9 +552,26 @@ drop function if exists public.hacer_corte(text, text, text, text, jsonb);
 drop function if exists public.claim_cocina(text);
 drop function if exists public.latido_cocina(text);
 drop function if exists public.liberar_cocina(text);
+-- Multinegocio, paso 2: firmas sin sucursal y funciones sustituidas
+drop function if exists public._sucursal_unica();
+drop function if exists public._sesion(text);
+drop function if exists public._exigir(text, text[]);
+drop function if exists public._ahora_local();
+drop function if exists public._fecha();
+drop function if exists public._hora();
+drop function if exists public._log(text, text, text, jsonb);
+drop function if exists public._verificar_admin(text, uuid, text);
+drop function if exists public._resumen(text);
+drop function if exists public._resolver_item(text, boolean);
+drop function if exists public._valorar_items(jsonb, boolean);
+drop function if exists public.cambiar_estado_ticket(text, text, text);
+drop function if exists public.archivar_ticket(text, text);
+drop function if exists public.crear_admin_inicial(text, text);
 
 -- ---------------------------------------------------------------------
 --  FUNCIONES INTERNAS (no se exponen a la API)
+--  Las que dependen de la sucursal la reciben como parámetro explícito de quien las llama, que la
+--  obtuvo de su validador (_dispositivo o _contexto). Nunca la deducen por su cuenta.
 -- ---------------------------------------------------------------------
 create or replace function public._error(p_codigo text, p_mensaje text)
 returns void language plpgsql set search_path = public as $$
@@ -537,15 +584,15 @@ end $$;
 create or replace function public._ahora()
 returns timestamptz language sql stable set search_path = public as $$ select now() $$;
 
-create or replace function public._ahora_local()
+create or replace function public._ahora_local(p_sucursal uuid)
 returns timestamp language sql stable set search_path = public as $$
-  select public._ahora() at time zone coalesce((select zona_horaria from public.config where id = 1), 'America/Mexico_City');
+  select public._ahora() at time zone coalesce((select zona_horaria from public.sucursales where id = p_sucursal), 'America/Mexico_City');
 $$;
-create or replace function public._fecha() returns text language sql stable set search_path = public as $$
-  select to_char(public._ahora_local(), 'DD/MM/YYYY');
+create or replace function public._fecha(p_sucursal uuid) returns text language sql stable set search_path = public as $$
+  select to_char(public._ahora_local(p_sucursal), 'DD/MM/YYYY');
 $$;
-create or replace function public._hora() returns text language sql stable set search_path = public as $$
-  select to_char(public._ahora_local(), 'HH24:MI');
+create or replace function public._hora(p_sucursal uuid) returns text language sql stable set search_path = public as $$
+  select to_char(public._ahora_local(p_sucursal), 'HH24:MI');
 $$;
 
 create or replace function public._ip()
@@ -587,6 +634,8 @@ returns boolean language sql immutable set search_path = public as $$
       or position(p_pin in '9876543210987654') > 0;
 $$;
 
+-- Contadores de intentos. Las claves llevan la sucursal cuando se refieren a un operador
+-- ('u:<sucursal>:<usuario>'), para que los fallos en una sucursal no bloqueen a nadie en otra.
 create or replace function public._espera(p_clave text)
 returns int language sql stable set search_path = public as $$
   select coalesce(greatest(0, ceil(extract(epoch from (bloqueado_hasta - public._ahora()))))::int, 0)
@@ -618,27 +667,52 @@ returns void language sql set search_path = public as $$
   delete from public.intentos where clave = p_clave;
 $$;
 
-create or replace function public._log(p_uid text, p_nombre text, p_accion text, p_detalle jsonb default null)
+create or replace function public._log(p_sucursal uuid, p_uid text, p_nombre text, p_accion text, p_detalle jsonb default null)
 returns void language sql set search_path = public as $$
-  insert into public.bitacora (usuario_id, usuario_nombre, accion, detalle) values (p_uid, p_nombre, p_accion, p_detalle);
+  insert into public.bitacora (sucursal_id, usuario_id, usuario_nombre, accion, detalle)
+  values (p_sucursal, p_uid, p_nombre, p_accion, p_detalle);
 $$;
 
--- Valida el token y devuelve la sesión con su usuario
-create or replace function public._sesion(p_token text,
-  out sid uuid, out uid text, out nombre text, out rol text, out cambiar_pin boolean)
-language plpgsql set search_path = public, extensions as $$
+-- Validador del equipo (MODELO.md §3): la identidad de Supabase de la petición (auth.uid()) debe ser
+-- un dispositivo vinculado y sin revocar, de una sucursal activa de una cuenta activa. De aquí, y
+-- solo de aquí, sale la sucursal.
+create or replace function public._dispositivo(
+  out dispositivo_id uuid, out sucursal_id uuid, out cuenta_id uuid, out monitor_cocina boolean)
+language plpgsql stable set search_path = public as $$
+#variable_conflict use_column
 declare r record;
 begin
-  -- Guardia de transición (multinegocio, paso 1): la API antigua no distingue sucursales, así que no
-  -- lee ni escribe nada si hay más de una. Todas las funciones con sesión pasan por aquí.
-  perform public._sucursal_unica();
+  select d.id, d.sucursal_id, s.cuenta_id, d.monitor_cocina into r
+    from public.dispositivos d
+    join public.sucursales s on s.id = d.sucursal_id
+    join public.cuentas c on c.id = s.cuenta_id
+   where d.auth_user_id = auth.uid() and d.revocado_en is null and s.activa and c.estado = 'activa';
+  if not found then
+    perform public._error('DISPOSITIVO', 'Este equipo no está autorizado. Pide a un dueño que lo vincule a la sucursal.');
+  end if;
+  dispositivo_id := r.id; sucursal_id := r.sucursal_id; cuenta_id := r.cuenta_id; monitor_cocina := r.monitor_cocina;
+end $$;
+
+-- Validador de la operación de sucursal (MODELO.md §3): el equipo (_dispositivo) y una sesión de
+-- operador de ESA sucursal y ESE equipo, vigente. Con p_roles, además exige uno de esos roles y que el
+-- operador ya haya cambiado su PIN; sin p_roles sirve cualquier rol (lectura, latido, salir, cambiar PIN).
+create or replace function public._contexto(p_token text, p_roles text[] default null,
+  out sucursal_id uuid, out cuenta_id uuid, out dispositivo_id uuid, out monitor_cocina boolean,
+  out sid uuid, out uid text, out nombre text, out rol text, out cambiar_pin boolean)
+language plpgsql set search_path = public, extensions as $$
+#variable_conflict use_column
+declare d record; r record;
+begin
+  select * into d from public._dispositivo();
   if p_token is null or p_token !~ '^[0-9a-f]{64}$' then
     perform public._error('SESION', 'Tu sesión no es válida. Vuelve a entrar.');
   end if;
-  select s.id, s.ultimo_uso, s.creada, u.id as uid, u.nombre, u.rol, u.debe_cambiar_pin into r
-    from public.sesiones s join public.usuarios u on u.id = s.usuario_id
-   where s.token_hash = encode(digest(p_token, 'sha256'), 'hex')
-     and not s.revocada and s.expira > public._ahora();
+  select se.id, se.ultimo_uso, se.creada, u.id as uid, u.nombre, u.rol, u.debe_cambiar_pin into r
+    from public.sesiones se
+    join public.usuarios u on u.sucursal_id = se.sucursal_id and u.id = se.usuario_id
+   where se.token_hash = encode(digest(p_token, 'sha256'), 'hex')
+     and se.sucursal_id = d.sucursal_id and se.dispositivo_id = d.dispositivo_id
+     and not se.revocada and se.expira > public._ahora();
   if not found then
     perform public._error('SESION', 'Tu sesión expiró. Vuelve a entrar.');
   end if;
@@ -647,28 +721,22 @@ begin
        set ultimo_uso = public._ahora(), expira = least(r.creada + interval '3 days', public._ahora() + interval '14 hours')
      where id = r.id;
   end if;
-  sid := r.id; uid := r.uid; nombre := r.nombre; rol := r.rol; cambiar_pin := coalesce(r.debe_cambiar_pin, false);
+  if p_roles is not null then
+    if not (r.rol = any (p_roles)) then
+      perform public._error('PERMISO', 'Tu usuario no tiene permiso para esta acción.');
+    end if;
+    if coalesce(r.debe_cambiar_pin, false) then
+      perform public._error('CAMBIAR_PIN', 'Primero cambia tu PIN.');
+    end if;
+  end if;
+  sucursal_id := d.sucursal_id; cuenta_id := d.cuenta_id; dispositivo_id := d.dispositivo_id;
+  monitor_cocina := d.monitor_cocina; sid := r.id; uid := r.uid; nombre := r.nombre; rol := r.rol;
+  cambiar_pin := coalesce(r.debe_cambiar_pin, false);
 end $$;
 
--- Sesión válida + rol permitido + PIN ya cambiado (para operaciones de escritura)
-create or replace function public._exigir(p_token text, p_roles text[],
-  out sid uuid, out uid text, out nombre text, out rol text)
-language plpgsql set search_path = public as $$
-declare s record;
-begin
-  select * into s from public._sesion(p_token);
-  if not (s.rol = any(p_roles)) then
-    perform public._error('PERMISO', 'Tu usuario no tiene permiso para esta acción.');
-  end if;
-  if s.cambiar_pin then
-    perform public._error('CAMBIAR_PIN', 'Primero cambia tu PIN.');
-  end if;
-  sid := s.sid; uid := s.uid; nombre := s.nombre; rol := s.rol;
-end $$;
-
--- Reautenticación: comprueba el PIN de un administrador con límite de intentos.
+-- Reautenticación: comprueba el PIN de un administrador DE LA SUCURSAL con límite de intentos.
 -- Si p_uid se indica, solo vale el PIN de ese administrador.
-create or replace function public._verificar_admin(p_pin text, p_sid uuid, p_uid text default null)
+create or replace function public._verificar_admin(p_sucursal uuid, p_pin text, p_sid uuid, p_uid text default null)
 returns json language plpgsql set search_path = public as $$
 declare v_ip text := public._ip(); v_espera int; v_admin record; v_rest int;
 begin
@@ -677,7 +745,8 @@ begin
     return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v_espera);
   end if;
   select u.id, u.nombre into v_admin from public.usuarios u
-   where u.rol = 'admin' and (p_uid is null or u.id = p_uid) and public._pin_ok(u.pin_hash, p_pin, u.id)
+   where u.sucursal_id = p_sucursal and u.rol = 'admin' and (p_uid is null or u.id = p_uid)
+     and public._pin_ok(u.pin_hash, p_pin, u.id)
    limit 1;
   if v_admin.id is null then
     v_rest := public._fallo('s:' || p_sid, 5);
@@ -700,13 +769,14 @@ returns jsonb language sql stable set search_path = public as $$
     'archivado', coalesce(t.archivado_cocina, false), 'creado', t.created_at, 'folio', t.folio,
     'recibido', t.recibido_at,
     'hechos', case when t.archivado_cocina then '[]'::jsonb else coalesce((select jsonb_agg(h.linea order by h.linea)
-                from public.cocina_hechos h where h.ticket_id = t.id and h.hecho), '[]'::jsonb) end,
-    'cobro', case when t.cobro_id is null then null
-                  when t.cobro_id = 'previo' then jsonb_build_object('previo', true)
-                  when t.cobro_id = 'no_cobrado' then jsonb_build_object('noCobrado', true)
-                  else (select jsonb_build_object('id', c.id, 'metodo', c.metodo, 'hora', c.hora, 'total', c.total,
-                                                  'propina', c.propina, 'recibido', c.recibido, 'enCorte', c.corte_id is not null)
-                          from public.cobros c where c.id = t.cobro_id) end);
+                from public.cocina_hechos h where h.sucursal_id = t.sucursal_id and h.ticket_id = t.id and h.hecho), '[]'::jsonb) end,
+    'cobro', case t.estado_cobro
+               when 'pendiente' then null
+               when 'previo' then jsonb_build_object('previo', true)
+               when 'no_cobrado' then jsonb_build_object('noCobrado', true)
+               else (select jsonb_build_object('id', c.id, 'metodo', c.metodo, 'hora', c.hora, 'total', c.total,
+                                               'propina', c.propina, 'recibido', c.recibido, 'enCorte', c.corte_id is not null)
+                       from public.cobros c where c.sucursal_id = t.sucursal_id and c.id = t.cobro_id) end);
 $$;
 
 create or replace function public._mesa_json(m public.mesas)
@@ -715,15 +785,15 @@ returns jsonb language sql stable set search_path = public as $$
     'pedido', m.pedido, 'extras', coalesce(m.extras, '[]'::jsonb), 'version', coalesce(m.version, 0),
     -- inicio de la visita actual: la comanda original más reciente de la mesa ocupada
     'desde', case when m.estado = 'ocupada' then (select max(t.created_at) from public.tickets t
-                   where t.mesa_id = m.id and t.es_extra is not true and t.reenvio is not true) end);
+                   where t.sucursal_id = m.sucursal_id and t.mesa_id = m.id and t.es_extra is not true and t.reenvio is not true) end);
 $$;
 
--- Total y desglose de un periodo (p_corte null = periodo abierto)
-create or replace function public._resumen(p_corte text)
+-- Total y desglose de un periodo de la sucursal (p_corte null = periodo abierto)
+create or replace function public._resumen(p_sucursal uuid, p_corte text)
 returns jsonb language sql stable set search_path = public as $$
   with t as (
     select * from public.tickets
-     where reenvio is not true
+     where sucursal_id = p_sucursal and reenvio is not true
        and ((p_corte is null and corte_id is null) or corte_id = p_corte)
   ), it as (
     select coalesce(i->>'corto', i->>'nombre', i->>'key') as nombre,
@@ -743,31 +813,32 @@ returns jsonb language sql stable set search_path = public as $$
     'top', coalesce((select jsonb_agg(jsonb_build_object('nombre', nombre, 'cant', cant) order by cant desc, nombre)
         from (select nombre, sum(cant) cant from it group by nombre order by 2 desc, 1 limit 5) x), '[]'::jsonb),
     'gastos', (select coalesce(sum(monto), 0) from public.gastos
-                where (p_corte is null and corte_id is null) or corte_id = p_corte),
-    'porCobrar', (select coalesce(sum(total), 0) from t where cobro_id is null),
-    'porCobrarCount', (select count(*) from t where cobro_id is null),
-    'noCobrado', (select coalesce(sum(total), 0) from t where cobro_id = 'no_cobrado'),
-    'noCobradoCount', (select count(*) from t where cobro_id = 'no_cobrado'),
+                where sucursal_id = p_sucursal and ((p_corte is null and corte_id is null) or corte_id = p_corte)),
+    'porCobrar', (select coalesce(sum(total), 0) from t where estado_cobro = 'pendiente'),
+    'porCobrarCount', (select count(*) from t where estado_cobro = 'pendiente'),
+    'noCobrado', (select coalesce(sum(total), 0) from t where estado_cobro = 'no_cobrado'),
+    'noCobradoCount', (select count(*) from t where estado_cobro = 'no_cobrado'),
     'cobrado', (select jsonb_build_object(
         'count', count(*), 'ventas', coalesce(sum(total), 0), 'propinas', coalesce(sum(propina), 0),
         'total', coalesce(sum(total + propina), 0),
         'efectivo', coalesce(sum(total + propina) filter (where metodo = 'efectivo'), 0),
         'tarjeta', coalesce(sum(total + propina) filter (where metodo = 'tarjeta'), 0),
         'transferencia', coalesce(sum(total + propina) filter (where metodo = 'transferencia'), 0))
-      from public.cobros where not anulado and ((p_corte is null and corte_id is null) or corte_id = p_corte))
+      from public.cobros
+     where sucursal_id = p_sucursal and not anulado and ((p_corte is null and corte_id is null) or corte_id = p_corte))
   );
 $$;
 
--- Catálogo autoritativo: nombre, categoría y precio de un producto por su clave.
+-- Catálogo autoritativo de la sucursal: nombre, categoría y precio de un producto por su clave.
 -- p_empaque = true acepta solo extras de empaque; false los rechaza.
-create or replace function public._resolver_item(p_key text, p_empaque boolean)
+create or replace function public._resolver_item(p_sucursal uuid, p_key text, p_empaque boolean)
 returns table (ok boolean, nombre text, corto text, cat text, precio numeric, inv_id text)
 language plpgsql stable set search_path = public as $$
 declare
   cfg public.config; v_carne public.carnes; v_beb public.bebidas; e jsonb;
   v_pref text; v_label text; v_cat text; v_resto text;
 begin
-  select * into cfg from public.config where id = 1;
+  select * into cfg from public.config where config.sucursal_id = p_sucursal;
   ok := false;
   if p_key is null or p_key !~ '^[A-Za-z0-9_-]{1,80}$' then return next; return; end if;
 
@@ -786,7 +857,8 @@ begin
   if coalesce(cfg.ocultos, '[]'::jsonb) ? p_key then return next; return; end if;
 
   if p_key like 'beb-%' then
-    select * into v_beb from public.bebidas where id = substr(p_key, 5) and activo is not false;
+    select * into v_beb from public.bebidas b
+     where b.sucursal_id = p_sucursal and b.id = substr(p_key, 5) and b.activo is not false;
     if found then
       ok := true; nombre := v_beb.nombre; cat := 'bebida'; precio := coalesce(v_beb.precio, 0); inv_id := v_beb.id;
     end if;
@@ -816,7 +888,8 @@ begin
   foreach v_pref in array array['taco-queso-', 'taco-', 'gringa-', 'llenadora-', 'volcan-', 'media-costra-', 'costra-'] loop
     if left(p_key, length(v_pref)) = v_pref then
       v_resto := substr(p_key, length(v_pref) + 1);
-      select * into v_carne from public.carnes where id = v_resto and activo is not false;
+      select * into v_carne from public.carnes k
+       where k.sucursal_id = p_sucursal and k.id = v_resto and k.activo is not false;
       if found then
         v_label := case v_pref when 'taco-queso-' then 'Taco de queso' when 'taco-' then 'Taco' when 'gringa-' then 'Gringa'
                                when 'llenadora-' then 'Llenadora' when 'volcan-' then 'Volcán'
@@ -832,8 +905,8 @@ begin
   return next;
 end $$;
 
--- Convierte la lista de productos del cliente en la versión con precios del servidor
-create or replace function public._valorar_items(p_items jsonb, p_empaque boolean)
+-- Convierte la lista de productos del cliente en la versión con precios del servidor (de la sucursal)
+create or replace function public._valorar_items(p_sucursal uuid, p_items jsonb, p_empaque boolean)
 returns jsonb language plpgsql stable set search_path = public as $$
 declare v_res jsonb := '[]'::jsonb; it jsonb; r record; v_cant int;
 begin
@@ -846,7 +919,7 @@ begin
       perform public._error('DATOS', 'Cantidad no válida en ' || coalesce(it->>'nombre', it->>'key', 'un producto') || '.');
     end if;
     v_cant := (it->>'cantidad')::int;
-    select * into r from public._resolver_item(it->>'key', p_empaque);
+    select * into r from public._resolver_item(p_sucursal, it->>'key', p_empaque);
     if not r.ok then
       perform public._error('PRODUCTO', coalesce(it->>'nombre', it->>'key', 'Un producto')
         || ' ya no está disponible. Quítalo de la comanda e inténtalo de nuevo.');
@@ -864,7 +937,16 @@ returns numeric language sql immutable set search_path = public as $$
     from jsonb_array_elements(coalesce(p_items, '[]'::jsonb)) i;
 $$;
 
--- Aviso de cambios por Realtime Broadcast: solo el nombre de la tabla, nunca datos
+-- Siguiente folio de la sucursal (MODELO.md §2.2): atómico y solo frena a esa sucursal
+create or replace function public._siguiente_folio(p_sucursal uuid, p_periodo text default 'continuo')
+returns bigint language sql set search_path = public as $$
+  insert into public.folios as f (sucursal_id, periodo, ultimo) values (p_sucursal, p_periodo, 1)
+  on conflict (sucursal_id, periodo) do update set ultimo = f.ultimo + 1
+  returning ultimo;
+$$;
+
+-- Aviso de cambios por Realtime Broadcast: solo el nombre de la tabla, nunca datos.
+-- Sigue en el canal público hasta el paso 5 (canal privado por sucursal).
 create or replace function public._avisar_cambio()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
@@ -877,70 +959,78 @@ end $$;
 
 -- ---------------------------------------------------------------------
 --  API PÚBLICA: login y sesión
+--  Toda la API la ejecuta el rol authenticated: los equipos entran con una sesión anónima de
+--  Supabase y su identidad debe estar vinculada a una sucursal (_dispositivo).
 -- ---------------------------------------------------------------------
--- Pantalla de entrada: nombres para elegir usuario (sin roles ni datos del negocio)
+-- Pantalla de entrada: nombres del personal de la sucursal del equipo (sin roles ni datos del negocio)
 create or replace function public.usuarios_login()
-returns json language sql stable security definer set search_path = public as $$
-  select json_build_object(
-    'negocio', coalesce((select nombre_negocio from public.config where id = 1), 'La Tequería'),
+returns json language plpgsql stable security definer set search_path = public as $$
+declare d record;
+begin
+  select * into d from public._dispositivo();
+  return json_build_object(
+    'negocio', coalesce((select nombre_negocio from public.config where sucursal_id = d.sucursal_id), 'La Tequería'),
     'usuarios', coalesce((select json_agg(json_build_object('id', id, 'nombre', nombre) order by nombre)
-                            from public.usuarios), '[]'::json),
-    'hayAdmin', exists (select 1 from public.usuarios where rol = 'admin'))
-  where public._sucursal_unica() is not null;  -- guardia de transición (ver _sesion)
-$$;
+                            from public.usuarios where sucursal_id = d.sucursal_id), '[]'::json),
+    'hayAdmin', exists (select 1 from public.usuarios where sucursal_id = d.sucursal_id and rol = 'admin'));
+end $$;
 
+-- p_dispositivo es solo una etiqueta informativa del navegador; el equipo real es el de _dispositivo()
 create or replace function public.login(p_id text, p_pin text, p_dispositivo text default null)
 returns json language plpgsql security definer set search_path = public, extensions as $$
 declare
-  v_ip text := public._ip(); v_espera int; u public.usuarios; cs public.cocina_sesion;
-  v_token text; v_sid uuid; v_rest int; v_debil boolean;
+  d record; v_ip text := public._ip(); v_espera int; u public.usuarios; cs public.cocina_sesion;
+  v_token text; v_sid uuid; v_rest int; v_debil boolean; v_clave text;
 begin
-  perform public._sucursal_unica();  -- guardia de transición (ver _sesion)
-  v_espera := greatest(public._espera('u:' || coalesce(p_id, '')), coalesce(public._espera('ip:' || v_ip), 0));
+  select * into d from public._dispositivo();
+  v_clave := 'u:' || d.sucursal_id || ':' || coalesce(p_id, '');
+  v_espera := greatest(public._espera(v_clave), coalesce(public._espera('ip:' || v_ip), 0));
   if v_espera > 0 then
     return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v_espera);
   end if;
 
-  select * into u from public.usuarios where id = p_id;
+  -- un usuario de otra sucursal es, para este equipo, uno que no existe
+  select * into u from public.usuarios where sucursal_id = d.sucursal_id and id = p_id;
   if u.id is null or not public._pin_ok(u.pin_hash, p_pin, u.id) then
-    v_rest := public._fallo('u:' || coalesce(p_id, ''), 5);
+    v_rest := public._fallo(v_clave, 5);
     if v_ip is not null then perform public._fallo('ip:' || v_ip, 30); end if;
     return json_build_object('ok', false, 'error', 'pin', 'restantes', v_rest);
   end if;
-  perform public._limpiar_intentos('u:' || u.id);
+  perform public._limpiar_intentos(v_clave);
 
   v_debil := public._pin_debil(p_pin);
   if u.pin_hash not like '$2%' or (v_debil and not u.debe_cambiar_pin) then
     update public.usuarios
        set pin_hash = case when pin_hash like '$2%' then pin_hash else public._hash_pin(p_pin) end,
            debe_cambiar_pin = debe_cambiar_pin or v_debil
-     where id = u.id;
+     where sucursal_id = d.sucursal_id and id = u.id;
     u.debe_cambiar_pin := u.debe_cambiar_pin or v_debil;
   end if;
 
-  -- Una sola cocina activa: otro dispositivo con latido reciente la conserva
+  -- Una sola cocina activa por sucursal: otro equipo con latido reciente la conserva
   if u.rol = 'cocinero' then
-    insert into public.cocina_sesion (id) values (1) on conflict (id) do nothing;
-    select * into cs from public.cocina_sesion where id = 1 for update;
+    insert into public.cocina_sesion (sucursal_id) values (d.sucursal_id) on conflict (sucursal_id) do nothing;
+    select * into cs from public.cocina_sesion where sucursal_id = d.sucursal_id for update;
     if cs.session_id is not null and cs.actualizado > public._ahora() - interval '45 seconds'
-       and coalesce(cs.dispositivo, '') <> coalesce(left(p_dispositivo, 64), '-')
-       and exists (select 1 from public.sesiones s where s.id::text = cs.session_id and not s.revocada and s.expira > public._ahora()) then
+       and coalesce(cs.dispositivo, '') <> d.dispositivo_id::text
+       and exists (select 1 from public.sesiones x where x.sucursal_id = d.sucursal_id and x.id::text = cs.session_id
+                     and not x.revocada and x.expira > public._ahora()) then
       return json_build_object('ok', false, 'error', 'cocina_ocupada');
     end if;
   end if;
 
   v_token := encode(gen_random_bytes(32), 'hex');
-  insert into public.sesiones (token_hash, usuario_id, dispositivo, creada, ultimo_uso, expira)
-  values (encode(digest(v_token, 'sha256'), 'hex'), u.id, left(p_dispositivo, 64), public._ahora(), public._ahora(),
-          public._ahora() + interval '14 hours')
+  insert into public.sesiones (token_hash, sucursal_id, dispositivo_id, usuario_id, dispositivo, creada, ultimo_uso, expira)
+  values (encode(digest(v_token, 'sha256'), 'hex'), d.sucursal_id, d.dispositivo_id, u.id, left(p_dispositivo, 64),
+          public._ahora(), public._ahora(), public._ahora() + interval '14 hours')
   returning id into v_sid;
 
   if u.rol = 'cocinero' then
-    update public.cocina_sesion set session_id = v_sid::text, dispositivo = left(p_dispositivo, 64), actualizado = public._ahora()
-     where id = 1;
+    update public.cocina_sesion set session_id = v_sid::text, dispositivo = d.dispositivo_id::text, actualizado = public._ahora()
+     where sucursal_id = d.sucursal_id;
   end if;
 
-  delete from public.sesiones where expira < public._ahora() - interval '1 day';
+  delete from public.sesiones where sucursal_id = d.sucursal_id and expira < public._ahora() - interval '1 day';
   delete from public.intentos where ultimo < public._ahora() - interval '1 day' and coalesce(bloqueado_hasta, '-infinity'::timestamptz) < public._ahora();
 
   return json_build_object('ok', true, 'token', v_token, 'debeCambiarPin', u.debe_cambiar_pin,
@@ -949,25 +1039,21 @@ end $$;
 
 create or replace function public.logout(p_token text)
 returns void language plpgsql security definer set search_path = public, extensions as $$
-declare v_sid uuid;
+declare s record;
 begin
-  perform public._sucursal_unica();  -- guardia de transición (ver _sesion)
-  update public.sesiones set revocada = true
-   where token_hash = encode(digest(coalesce(p_token, ''), 'sha256'), 'hex') and not revocada
-  returning id into v_sid;
-  if v_sid is not null then
-    update public.cocina_sesion set session_id = null where id = 1 and session_id = v_sid::text;
-  end if;
+  select * into s from public._contexto(p_token);
+  update public.sesiones set revocada = true where sucursal_id = s.sucursal_id and id = s.sid;
+  update public.cocina_sesion set session_id = null where sucursal_id = s.sucursal_id and session_id = s.sid::text;
 end $$;
 
 create or replace function public.cambiar_pin(p_token text, p_pin_actual text, p_pin_nuevo text)
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; u public.usuarios; v_espera int; v_rest int;
 begin
-  select * into s from public._sesion(p_token);
+  select * into s from public._contexto(p_token);
   v_espera := public._espera('s:' || s.sid);
   if v_espera > 0 then return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v_espera); end if;
-  select * into u from public.usuarios where id = s.uid;
+  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = s.uid;
   if not public._pin_ok(u.pin_hash, p_pin_actual, u.id) then
     v_rest := public._fallo('s:' || s.sid, 5);
     return json_build_object('ok', false, 'error', 'pin', 'restantes', v_rest);
@@ -979,14 +1065,15 @@ begin
     return json_build_object('ok', false, 'error', 'debil');
   end if;
   perform public._limpiar_intentos('s:' || s.sid);
-  update public.usuarios set pin_hash = public._hash_pin(p_pin_nuevo), debe_cambiar_pin = false where id = u.id;
-  update public.sesiones set revocada = true where usuario_id = u.id and id <> s.sid;
-  perform public._log(s.uid, s.nombre, 'cambiar_pin');
+  update public.usuarios set pin_hash = public._hash_pin(p_pin_nuevo), debe_cambiar_pin = false
+   where sucursal_id = s.sucursal_id and id = u.id;
+  update public.sesiones set revocada = true where sucursal_id = s.sucursal_id and usuario_id = u.id and id <> s.sid;
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'cambiar_pin');
   return json_build_object('ok', true);
 end $$;
 
 -- ---------------------------------------------------------------------
---  API: lectura del estado según el rol
+--  API: lectura del estado según el rol (todo de la sucursal de la sesión)
 -- ---------------------------------------------------------------------
 create or replace function public.estado(p_token text, p_partes text[] default null)
 returns json language plpgsql security definer set search_path = public as $$
@@ -995,9 +1082,9 @@ declare
   todo boolean := p_partes is null;
   caja boolean;
 begin
-  select * into s from public._sesion(p_token);
+  select * into s from public._contexto(p_token);
   caja := s.rol in ('cocinero', 'admin');
-  select * into cfg from public.config where id = 1;
+  select * into cfg from public.config where sucursal_id = s.sucursal_id;
   r := jsonb_build_object('yo', jsonb_build_object('id', s.uid, 'nombre', s.nombre, 'rol', s.rol, 'cambiarPin', s.cambiar_pin),
                           'servidor', now());
 
@@ -1008,52 +1095,52 @@ begin
   end if;
   if todo or 'carnes' = any(p_partes) then
     r := r || jsonb_build_object('carnes', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'nombre', nombre,
-      'activo', activo is not false) order by orden, nombre) from public.carnes), '[]'::jsonb));
+      'activo', activo is not false) order by orden, nombre) from public.carnes where sucursal_id = s.sucursal_id), '[]'::jsonb));
   end if;
   if todo or 'bebidas' = any(p_partes) then
     r := r || jsonb_build_object('bebidas', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'nombre', nombre,
       'cantidad', coalesce(cantidad, 0), 'activo', activo is not false, 'precio', coalesce(precio, 0)) order by nombre)
-      from public.bebidas), '[]'::jsonb));
+      from public.bebidas where sucursal_id = s.sucursal_id), '[]'::jsonb));
   end if;
   if todo or 'usuarios' = any(p_partes) then
     r := r || jsonb_build_object('usuarios', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'nombre', nombre,
-      'rol', rol) order by nombre) from public.usuarios), '[]'::jsonb));
+      'rol', rol) order by nombre) from public.usuarios where sucursal_id = s.sucursal_id), '[]'::jsonb));
   end if;
   if todo or 'mesas' = any(p_partes) then
     r := r || jsonb_build_object('mesas', coalesce((select jsonb_agg(public._mesa_json(m) order by m.id)
-      from public.mesas m), '[]'::jsonb));
+      from public.mesas m where m.sucursal_id = s.sucursal_id), '[]'::jsonb));
   end if;
   if todo or 'cocina' = any(p_partes) then
     r := r || jsonb_build_object('cocina', coalesce((select jsonb_agg(j order by c desc) from (
       select public._ticket_json(t, s.rol <> 'mesero' or t.creado_por = s.uid) j, t.created_at c
-        from public.tickets t where t.archivado_cocina is not true
+        from public.tickets t where t.sucursal_id = s.sucursal_id and t.archivado_cocina is not true
        order by t.created_at desc limit 300) x), '[]'::jsonb));
   end if;
   if caja and (todo or 'historial' = any(p_partes)) then
     r := r || jsonb_build_object(
       'historial', coalesce((select jsonb_agg(j order by c desc) from (
         select public._ticket_json(t) j, t.created_at c from public.tickets t
-         where t.corte_id is null and t.reenvio is not true
+         where t.sucursal_id = s.sucursal_id and t.corte_id is null and t.reenvio is not true
          order by t.created_at desc limit 1000) x), '[]'::jsonb),
-      'periodo', public._resumen(null));
+      'periodo', public._resumen(s.sucursal_id, null));
   end if;
   if caja and (todo or 'cortes' = any(p_partes)) then
     r := r || jsonb_build_object('cortes', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'fecha', fecha,
       'hora', hora, 'tickets', tickets, 'total', coalesce(total, 0), 'gastos', coalesce(gastos, 0),
       'cobrado', coalesce(cobrado, 0), 'porCobrar', coalesce(por_cobrar, 0),
       'detalle', detalle) order by created_at desc) from (
-        select * from public.cortes order by created_at desc limit 60) c), '[]'::jsonb));
+        select * from public.cortes k where k.sucursal_id = s.sucursal_id order by k.created_at desc limit 60) c), '[]'::jsonb));
   end if;
   if s.rol in ('mesero', 'admin') and (todo or 'porCobrar' = any(p_partes)) then
     r := r || jsonb_build_object('porCobrar', coalesce((select jsonb_agg(j order by c desc) from (
       select public._ticket_json(t, s.rol <> 'mesero' or t.creado_por = s.uid) j, t.created_at c
-        from public.tickets t where t.cobro_id is null and t.reenvio is not true
+        from public.tickets t where t.sucursal_id = s.sucursal_id and t.estado_cobro = 'pendiente' and t.reenvio is not true
        order by t.created_at desc limit 200) x), '[]'::jsonb));
   end if;
   if s.rol = 'admin' and (todo or 'gastos' = any(p_partes)) then
     r := r || jsonb_build_object('gastos', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'concepto', concepto,
       'monto', coalesce(monto, 0), 'fecha', fecha, 'hora', hora, 'user', usuario) order by created_at desc)
-      from public.gastos where corte_id is null), '[]'::jsonb));
+      from public.gastos where sucursal_id = s.sucursal_id and corte_id is null), '[]'::jsonb));
   end if;
   return r;
 end $$;
@@ -1065,8 +1152,8 @@ create or replace function public.guardar_borrador_mesa(p_token text, p_mesa_id 
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; m public.mesas; v_items int;
 begin
-  select * into s from public._exigir(p_token, array['mesero', 'admin']);
-  select * into m from public.mesas where id = p_mesa_id for update;
+  select * into s from public._contexto(p_token, array['mesero', 'admin']);
+  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id for update;
   if m.id is null then perform public._error('MESA', 'La mesa no existe.'); end if;
   if m.estado = 'ocupada' then
     perform public._error('MESA_OCUPADA', 'La mesa ya tiene una comanda enviada. Usa «Agregar orden extra».');
@@ -1083,11 +1170,11 @@ begin
   if v_items = 0 then
     update public.mesas set estado = 'libre', pedido = null, mesero = null, hora = null, extras = '[]'::jsonb,
            version = coalesce(version, 0) + 1
-     where id = m.id returning * into m;
+     where sucursal_id = s.sucursal_id and id = m.id returning * into m;
   else
-    update public.mesas set estado = 'borrador', pedido = p_pedido, mesero = s.nombre, hora = public._hora(),
+    update public.mesas set estado = 'borrador', pedido = p_pedido, mesero = s.nombre, hora = public._hora(s.sucursal_id),
            version = coalesce(version, 0) + 1
-     where id = m.id returning * into m;
+     where sucursal_id = s.sucursal_id and id = m.id returning * into m;
   end if;
   return public._mesa_json(m);
 end $$;
@@ -1096,25 +1183,27 @@ create or replace function public.liberar_mesa(p_token text, p_mesa_id int)
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; m public.mesas; v_n int;
 begin
-  select * into s from public._exigir(p_token, array['mesero', 'admin']);
-  select * into m from public.mesas where id = p_mesa_id for update;
+  select * into s from public._contexto(p_token, array['mesero', 'admin']);
+  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id for update;
   if m.id is null then perform public._error('MESA', 'La mesa no existe.'); end if;
   -- una mesa con cuentas sin cobrar no se libera: primero se cobra (o un administrador la cierra sin cobro)
-  select count(*) into v_n from public.tickets where mesa_id = m.id and cobro_id is null and reenvio is not true;
+  select count(*) into v_n from public.tickets
+   where sucursal_id = s.sucursal_id and mesa_id = m.id and estado_cobro = 'pendiente' and reenvio is not true;
   if v_n > 0 then
     perform public._error('POR_COBRAR', format('La Mesa %s tiene %s cuenta(s) por cobrar. Cóbrala antes de liberarla.', m.id, v_n));
   end if;
   if m.estado = 'ocupada' then
-    perform public._log(s.uid, s.nombre, 'liberar_mesa', jsonb_build_object('mesa', m.id, 'mesero', m.mesero));
+    perform public._log(s.sucursal_id, s.uid, s.nombre, 'liberar_mesa', jsonb_build_object('mesa', m.id, 'mesero', m.mesero));
   end if;
   update public.mesas set estado = 'libre', pedido = null, mesero = null, hora = null, extras = '[]'::jsonb,
          version = coalesce(version, 0) + 1
-   where id = m.id returning * into m;
+   where sucursal_id = s.sucursal_id and id = m.id returning * into m;
   return public._mesa_json(m);
 end $$;
 
--- Envío atómico: valida, cobra con precios del servidor, descuenta existencias,
--- actualiza la mesa y crea el ticket. Repetir con el mismo id no duplica nada.
+-- Envío atómico: valida, cobra con precios de la sucursal, descuenta existencias, actualiza la mesa,
+-- toma el folio y crea el ticket. Repetir con el mismo id no duplica nada. Un id que ya existe en otra
+-- sucursal se rechaza con un error genérico, sin devolver nada de esa comanda.
 create or replace function public.enviar_comanda(p_token text, p_ticket jsonb)
 returns json language plpgsql security definer set search_path = public as $$
 declare
@@ -1126,17 +1215,20 @@ declare
   v_cuenta text := case when p_ticket->>'cuenta' = 'separada' then 'separada' else 'junta' end;
   v_ref text := nullif(left(btrim(coalesce(p_ticket->>'referencia', '')), 60), '');
   v_dom jsonb; v_ordenes jsonb := '[]'::jsonb; v_extras jsonb; v_total numeric; v_origen text;
-  o jsonb; n int := 0; v_items jsonb; b record; v_hora text := public._hora();
+  o jsonb; n int := 0; v_items jsonb; b record; v_hora text;
 begin
-  select * into s from public._exigir(p_token, array['mesero', 'admin']);
+  select * into s from public._contexto(p_token, array['mesero', 'admin']);
+  v_hora := public._hora(s.sucursal_id);
   if v_id is null or v_id !~ '^[A-Za-z0-9_-]{8,64}$' then
     perform public._error('DATOS', 'Identificador de comanda no válido.');
   end if;
 
-  -- Idempotencia: el mismo id devuelve el ticket ya guardado
+  -- Idempotencia: el mismo id devuelve el ticket ya guardado. El id es global (llave de tickets), por
+  -- eso el candado es por id y no por sucursal.
   perform pg_advisory_xact_lock(hashtextextended('tequeria:ticket:' || v_id, 0));
   select * into t from public.tickets where id = v_id;
   if t.id is not null then
+    if t.sucursal_id <> s.sucursal_id then perform public._error('DATOS', 'Identificador de comanda no válido.'); end if;
     return json_build_object('ok', true, 'duplicado', true, 'ticket', public._ticket_json(t));
   end if;
 
@@ -1149,7 +1241,7 @@ begin
   for o in select x from jsonb_array_elements(p_ticket->'ordenes') x loop
     if jsonb_typeof(o->'items') <> 'array' then perform public._error('DATOS', 'La comanda tiene un formato no válido.'); end if;
     n := n + 1;
-    v_items := public._valorar_items(o->'items', false);
+    v_items := public._valorar_items(s.sucursal_id, o->'items', false);
     if jsonb_array_length(v_items) > 0 then
       v_ordenes := v_ordenes || jsonb_build_array(jsonb_build_object(
         'id', left(coalesce(nullif(o->>'id', ''), md5(random()::text)), 40),
@@ -1158,7 +1250,7 @@ begin
         'items', v_items));
     end if;
   end loop;
-  v_extras := public._valorar_items(p_ticket->'extras', true);
+  v_extras := public._valorar_items(s.sucursal_id, p_ticket->'extras', true);
   if jsonb_array_length(v_ordenes) = 0 and jsonb_array_length(v_extras) = 0 then
     perform public._error('VACIO', 'Agrega al menos un producto.');
   end if;
@@ -1183,23 +1275,24 @@ begin
     v_origen := 'Para llevar' || coalesce(' · ' || v_ref, '');
   end if;
 
-  -- Existencias: descuento atómico; si no alcanza, nada se guarda
+  -- Existencias de la sucursal: descuento atómico; si no alcanza, nada se guarda
   for b in
     select i->>'invId' as id, sum((i->>'cantidad')::int) as q
       from jsonb_array_elements(v_ordenes) x, jsonb_array_elements(x->'items') i
      where i->>'invId' is not null group by 1 order by 1
   loop
-    update public.bebidas set cantidad = cantidad - b.q where id = b.id and cantidad >= b.q;
+    update public.bebidas set cantidad = cantidad - b.q
+     where sucursal_id = s.sucursal_id and id = b.id and cantidad >= b.q;
     if not found then
       perform public._error('SIN_EXISTENCIA', (select format('No hay suficiente %s (quedan %s).', nombre, coalesce(cantidad, 0))
-                                               from public.bebidas where id = b.id));
+                                               from public.bebidas where sucursal_id = s.sucursal_id and id = b.id));
     end if;
   end loop;
 
   if v_tipo = 'aqui' then
     if coalesce(p_ticket->>'mesaId', '') !~ '^[0-9]{1,4}$' then perform public._error('MESA', 'Falta la mesa de la comanda.'); end if;
     v_mesa := (p_ticket->>'mesaId')::int;
-    select * into m from public.mesas where id = v_mesa for update;
+    select * into m from public.mesas where sucursal_id = s.sucursal_id and id = v_mesa for update;
     if m.id is null then perform public._error('MESA', 'La mesa no existe.'); end if;
     v_origen := 'Mesa ' || m.id;
     if v_extra then
@@ -1209,22 +1302,23 @@ begin
       update public.mesas set extras = coalesce(extras, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
                'id', v_id, 'ordenes', v_ordenes, 'extras', v_extras, 'hora', v_hora, 'total', v_total)),
              version = coalesce(version, 0) + 1
-       where id = m.id;
+       where sucursal_id = s.sucursal_id and id = m.id;
     else
       if m.estado = 'ocupada' then
         perform public._error('MESA_OCUPADA', 'Otro dispositivo ya envió una comanda para esta mesa. Usa «Agregar orden extra».');
       end if;
       update public.mesas set estado = 'ocupada', pedido = jsonb_build_object('ordenes', v_ordenes, 'extras', v_extras),
              mesero = s.nombre, hora = v_hora, extras = '[]'::jsonb, version = coalesce(version, 0) + 1
-       where id = m.id;
+       where sucursal_id = s.sucursal_id and id = m.id;
     end if;
   end if;
 
-  insert into public.tickets (id, tipo, es_extra, origen, mesa_id, ordenes, extras, mesero, hora, fecha, estado,
-                              archivado_cocina, total, domicilio, reenvio, cuenta, para_llevar, referencia, creado_por)
-  values (v_id, v_tipo, v_extra, v_origen, v_mesa, v_ordenes, v_extras, s.nombre, v_hora, public._fecha(), 'pendiente',
-          false, v_total, v_dom, false, v_cuenta, v_tipo = 'aqui' and not v_extra and v_llevar,
-          case when v_tipo = 'llevar' then v_ref end, s.uid)
+  insert into public.tickets (id, sucursal_id, folio, folio_periodo, tipo, es_extra, origen, mesa_id, ordenes, extras,
+                              mesero, hora, fecha, estado, archivado_cocina, total, domicilio, reenvio, cuenta,
+                              para_llevar, referencia, creado_por, estado_cobro)
+  values (v_id, s.sucursal_id, public._siguiente_folio(s.sucursal_id), 'continuo', v_tipo, v_extra, v_origen, v_mesa,
+          v_ordenes, v_extras, s.nombre, v_hora, public._fecha(s.sucursal_id), 'pendiente', false, v_total, v_dom, false,
+          v_cuenta, v_tipo = 'aqui' and not v_extra and v_llevar, case when v_tipo = 'llevar' then v_ref end, s.uid, 'pendiente')
   returning * into t;
   return json_build_object('ok', true, 'ticket', public._ticket_json(t));
 end $$;
@@ -1234,12 +1328,15 @@ create or replace function public.reenviar_cocina(p_token text, p_id text, p_mes
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; m public.mesas; t public.tickets; v_ordenes jsonb; v_extras jsonb;
 begin
-  select * into s from public._exigir(p_token, array['mesero', 'admin']);
+  select * into s from public._contexto(p_token, array['mesero', 'admin']);
   if p_id is null or p_id !~ '^[A-Za-z0-9_-]{8,64}$' then perform public._error('DATOS', 'Identificador no válido.'); end if;
   perform pg_advisory_xact_lock(hashtextextended('tequeria:ticket:' || p_id, 0));
   select * into t from public.tickets where id = p_id;
-  if t.id is not null then return json_build_object('ok', true, 'duplicado', true, 'ticket', public._ticket_json(t)); end if;
-  select * into m from public.mesas where id = p_mesa_id;
+  if t.id is not null then
+    if t.sucursal_id <> s.sucursal_id then perform public._error('DATOS', 'Identificador no válido.'); end if;
+    return json_build_object('ok', true, 'duplicado', true, 'ticket', public._ticket_json(t));
+  end if;
+  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id;
   if m.id is null or m.estado <> 'ocupada' then
     perform public._error('MESA_NO_OCUPADA', 'Solo se puede reenviar una mesa con comanda enviada.');
   end if;
@@ -1250,51 +1347,35 @@ begin
     into v_extras from jsonb_array_elements(coalesce(m.extras, '[]'::jsonb)) e
     left join lateral jsonb_array_elements(coalesce(e->'extras', '[]'::jsonb)) x on true;
   if jsonb_array_length(v_ordenes) = 0 then perform public._error('VACIO', 'La mesa no tiene nada que reenviar.'); end if;
-  insert into public.tickets (id, tipo, es_extra, origen, mesa_id, ordenes, extras, mesero, hora, fecha, estado,
-                              archivado_cocina, total, reenvio, creado_por)
-  values (p_id, 'aqui', false, 'Mesa ' || m.id, m.id, v_ordenes, v_extras, coalesce(m.mesero, s.nombre), public._hora(),
-          public._fecha(), 'pendiente', false, 0, true, s.uid)
+  insert into public.tickets (id, sucursal_id, folio, folio_periodo, tipo, es_extra, origen, mesa_id, ordenes, extras,
+                              mesero, hora, fecha, estado, archivado_cocina, total, reenvio, creado_por, estado_cobro)
+  values (p_id, s.sucursal_id, public._siguiente_folio(s.sucursal_id), 'continuo', 'aqui', false, 'Mesa ' || m.id, m.id,
+          v_ordenes, v_extras, coalesce(m.mesero, s.nombre), public._hora(s.sucursal_id), public._fecha(s.sucursal_id),
+          'pendiente', false, 0, true, s.uid, 'pendiente')
   returning * into t;
   return json_build_object('ok', true, 'ticket', public._ticket_json(t));
 end $$;
 
 -- ---------------------------------------------------------------------
 --  API: cocina
+--  Las listas de ids se buscan solo en la sucursal de la sesión. Si alguno no existe en ella (sea
+--  inexistente o de otra sucursal), la operación completa se rechaza: no se procesa en parte.
 -- ---------------------------------------------------------------------
-create or replace function public.cambiar_estado_ticket(p_token text, p_id text, p_estado text)
-returns void language plpgsql security definer set search_path = public as $$
-declare s record; t public.tickets;
-begin
-  select * into s from public._exigir(p_token, array['cocinero', 'admin']);
-  if p_estado not in ('pendiente', 'preparando', 'listo') then perform public._error('DATOS', 'Estado no válido.'); end if;
-  select * into t from public.tickets where id = p_id for update;
-  if t.id is null or t.archivado_cocina then perform public._error('TICKET', 'La comanda ya no está en cocina.'); end if;
-  update public.tickets set estado = p_estado, recibido_at = coalesce(recibido_at, now()) where id = p_id;
-end $$;
-
 -- La cocina confirma que ya tiene las comandas en pantalla: el mesero las ve como «Recibido»
 create or replace function public.marcar_recibido(p_token text, p_ids text[])
 returns int language plpgsql security definer set search_path = public as $$
-declare s record; v_n int;
+declare s record; v_n int; v_ids text[];
 begin
-  select * into s from public._exigir(p_token, array['cocinero', 'admin']);
-  if p_ids is null or not exists (select 1 from public.tickets where id = any(p_ids[1:300])
-                                    and recibido_at is null and archivado_cocina is not true) then
-    return 0;
+  select * into s from public._contexto(p_token, array['cocinero', 'admin']);
+  if p_ids is null or cardinality(p_ids) = 0 then return 0; end if;
+  v_ids := array(select distinct x from unnest(p_ids[1:300]) x);
+  if (select count(*) from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids)) <> cardinality(v_ids) then
+    perform public._error('TICKET', 'Alguna comanda ya no existe.');
   end if;
   update public.tickets set recibido_at = now()
-   where id = any(p_ids[1:300]) and recibido_at is null and archivado_cocina is not true;
+   where sucursal_id = s.sucursal_id and id = any (v_ids) and recibido_at is null and archivado_cocina is not true;
   get diagnostics v_n = row_count;
   return v_n;
-end $$;
-
-create or replace function public.archivar_ticket(p_token text, p_id text)
-returns void language plpgsql security definer set search_path = public as $$
-declare s record;
-begin
-  select * into s from public._exigir(p_token, array['cocinero', 'admin']);
-  update public.tickets set archivado_cocina = true where id = p_id and estado = 'listo';
-  if not found then perform public._error('TICKET', 'Solo se pueden quitar comandas marcadas como listas.'); end if;
 end $$;
 
 -- Cambia de estado varias comandas a la vez, solo si siguen como las vio la pantalla
@@ -1304,72 +1385,81 @@ create or replace function public.mover_tickets(p_token text, p_tickets jsonb, p
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_ids text[]; v_mov int; v_conf jsonb;
 begin
-  select * into s from public._exigir(p_token, array['cocinero', 'admin']);
+  select * into s from public._contexto(p_token, array['cocinero', 'admin']);
   if p_hacia is null or p_hacia not in ('pendiente', 'preparando', 'listo') then perform public._error('DATOS', 'Estado no válido.'); end if;
   if jsonb_typeof(p_tickets) is distinct from 'array' or jsonb_array_length(p_tickets) = 0 or jsonb_array_length(p_tickets) > 100 then
     perform public._error('DATOS', 'Elige al menos una comanda.');
   end if;
-  select array_agg(x->>'id' order by x->>'id') into v_ids from jsonb_array_elements(p_tickets) x;
-  perform 1 from public.tickets where id = any(v_ids) order by id for update;   -- mismo orden de bloqueo: sin interbloqueos
+  select array_agg(distinct x->>'id' order by x->>'id') into v_ids from jsonb_array_elements(p_tickets) x;
+  -- mismo orden de bloqueo: sin interbloqueos
+  perform 1 from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids) order by id for update;
+  if (select count(*) from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids)) <> cardinality(v_ids) then
+    perform public._error('TICKET', 'Alguna comanda ya no existe.');
+  end if;
   update public.tickets t set estado = p_hacia, recibido_at = coalesce(t.recibido_at, now())
     from (select x->>'id' id, x->>'estado' visto from jsonb_array_elements(p_tickets) x) p
-   where t.id = p.id and coalesce(t.estado, 'pendiente') = p.visto and coalesce(t.estado, 'pendiente') <> p_hacia
-     and t.archivado_cocina is not true;
+   where t.sucursal_id = s.sucursal_id and t.id = p.id and coalesce(t.estado, 'pendiente') = p.visto
+     and coalesce(t.estado, 'pendiente') <> p_hacia and t.archivado_cocina is not true;
   get diagnostics v_mov = row_count;
-  select coalesce(jsonb_agg(p.id), '[]'::jsonb) into v_conf
-    from unnest(v_ids) p(id) left join public.tickets t on t.id = p.id
-   where t.id is null or t.archivado_cocina or coalesce(t.estado, 'pendiente') <> p_hacia;
+  select coalesce(jsonb_agg(t.id order by t.id), '[]'::jsonb) into v_conf
+    from public.tickets t
+   where t.sucursal_id = s.sucursal_id and t.id = any (v_ids)
+     and (t.archivado_cocina or coalesce(t.estado, 'pendiente') <> p_hacia);
   return json_build_object('movidos', v_mov, 'conflictos', v_conf);
 end $$;
 
 -- Quita de la cocina varias comandas listas a la vez (idempotente)
 create or replace function public.archivar_tickets(p_token text, p_ids text[])
 returns int language plpgsql security definer set search_path = public as $$
-declare s record; v_n int;
+declare s record; v_n int; v_ids text[];
 begin
-  select * into s from public._exigir(p_token, array['cocinero', 'admin']);
+  select * into s from public._contexto(p_token, array['cocinero', 'admin']);
   if p_ids is null or cardinality(p_ids) = 0 or cardinality(p_ids) > 300 then return 0; end if;
-  perform 1 from public.tickets where id = any(p_ids) order by id for update;
+  v_ids := array(select distinct x from unnest(p_ids) x);
+  perform 1 from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids) order by id for update;
+  if (select count(*) from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids)) <> cardinality(v_ids) then
+    perform public._error('TICKET', 'Alguna comanda ya no existe.');
+  end if;
   update public.tickets set archivado_cocina = true
-   where id = any(p_ids) and estado = 'listo' and archivado_cocina is not true;
+   where sucursal_id = s.sucursal_id and id = any (v_ids) and estado = 'listo' and archivado_cocina is not true;
   get diagnostics v_n = row_count;
   return v_n;
 end $$;
 
--- Tacha o destacha un producto de una comanda; todas las pantallas de cocina lo ven
+-- Tacha o destacha un producto de una comanda; todas las pantallas de cocina de la sucursal lo ven
 create or replace function public.marcar_hecho(p_token text, p_ticket text, p_linea text, p_hecho boolean)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._exigir(p_token, array['cocinero', 'admin']);
+  select * into s from public._contexto(p_token, array['cocinero', 'admin']);
   if p_linea is null or p_linea !~ '^[^|]{1,64}[|][A-Za-z0-9_-]{1,80}$' or p_hecho is null then
     perform public._error('DATOS', 'Producto no válido.');
   end if;
-  if not exists (select 1 from public.tickets where id = p_ticket and archivado_cocina is not true) then
+  if not exists (select 1 from public.tickets where sucursal_id = s.sucursal_id and id = p_ticket and archivado_cocina is not true) then
     perform public._error('TICKET', 'La comanda ya no está en cocina.');
   end if;
-  insert into public.cocina_hechos (ticket_id, linea, hecho, por, actualizado)
-  values (p_ticket, p_linea, p_hecho, s.nombre, now())
+  insert into public.cocina_hechos (sucursal_id, ticket_id, linea, hecho, por, actualizado)
+  values (s.sucursal_id, p_ticket, p_linea, p_hecho, s.nombre, now())
   on conflict (ticket_id, linea) do update set hecho = excluded.hecho, por = excluded.por, actualizado = now()
    where public.cocina_hechos.hecho is distinct from excluded.hecho;
 end $$;
 
--- Latido de la cocina. Normalmente una sola cocina activa; con el ajuste «variasCocinas»
+-- Latido de la cocina. Normalmente una sola cocina activa por sucursal; con el ajuste «variasCocinas»
 -- nadie se queda con la exclusividad y pueden trabajar varias pantallas a la vez.
 create or replace function public.latido_cocina(p_token text)
 returns boolean language plpgsql security definer set search_path = public as $$
 declare s record; v_varias boolean;
 begin
-  select * into s from public._sesion(p_token);
+  select * into s from public._contexto(p_token);
   if s.rol <> 'cocinero' then return true; end if;
-  select coalesce((ajustes->>'variasCocinas')::boolean, false) into v_varias from public.config where id = 1;
+  select coalesce((ajustes->>'variasCocinas')::boolean, false) into v_varias from public.config where sucursal_id = s.sucursal_id;
   if v_varias then
-    update public.cocina_sesion set session_id = null where id = 1 and session_id is not null;
+    update public.cocina_sesion set session_id = null where sucursal_id = s.sucursal_id and session_id is not null;
     return true;
   end if;
   -- si nadie la tiene (por ejemplo al volver a una sola cocina), la toma esta pantalla
-  update public.cocina_sesion set session_id = s.sid::text, actualizado = public._ahora()
-   where id = 1 and (session_id = s.sid::text or session_id is null);
+  update public.cocina_sesion set session_id = s.sid::text, dispositivo = s.dispositivo_id::text, actualizado = public._ahora()
+   where sucursal_id = s.sucursal_id and (session_id = s.sid::text or session_id is null);
   return found;
 end $$;
 
@@ -1377,44 +1467,46 @@ create or replace function public.liberar_cocina(p_token text)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._sesion(p_token);
-  update public.cocina_sesion set session_id = null where id = 1 and session_id = s.sid::text;
+  select * into s from public._contexto(p_token);
+  update public.cocina_sesion set session_id = null where sucursal_id = s.sucursal_id and session_id = s.sid::text;
 end $$;
 
--- Corte: serializado; fija el conjunto de tickets con un solo UPDATE y calcula
--- total y desglose sobre exactamente ese conjunto. No toca la cola de cocina.
+-- Corte de la sucursal: serializado con un candado de la sucursal (no frena a las demás); fija el
+-- conjunto de tickets con un solo UPDATE y calcula total y desglose sobre exactamente ese conjunto.
+-- No toca la cola de cocina.
 create or replace function public.hacer_corte(p_token text, p_admin_pin text)
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_auth json; v_id text := gen_random_uuid()::text; v_res jsonb; v_ret int;
 begin
-  select * into s from public._exigir(p_token, array['cocinero', 'admin']);
-  v_auth := public._verificar_admin(p_admin_pin, s.sid);
+  select * into s from public._contexto(p_token, array['cocinero', 'admin']);
+  v_auth := public._verificar_admin(s.sucursal_id, p_admin_pin, s.sid);
   if not (v_auth->>'ok')::boolean then return v_auth; end if;
 
-  perform pg_advisory_xact_lock(hashtextextended('tequeria:corte', 0));
-  if not exists (select 1 from public.tickets where corte_id is null and reenvio is not true)
-     and not exists (select 1 from public.cobros where corte_id is null and not anulado) then
+  perform pg_advisory_xact_lock(hashtextextended('tequeria:corte:' || s.sucursal_id, 0));
+  if not exists (select 1 from public.tickets where sucursal_id = s.sucursal_id and corte_id is null and reenvio is not true)
+     and not exists (select 1 from public.cobros where sucursal_id = s.sucursal_id and corte_id is null and not anulado) then
     return json_build_object('ok', false, 'error', 'vacio');
   end if;
-  update public.tickets set corte_id = v_id where corte_id is null;
-  update public.gastos set corte_id = v_id where corte_id is null;
-  update public.cobros set corte_id = v_id where corte_id is null;
-  v_res := public._resumen(v_id);
+  -- las referencias a cortes son diferidas: el corte se inserta después, con el resumen ya calculado
+  update public.tickets set corte_id = v_id where sucursal_id = s.sucursal_id and corte_id is null;
+  update public.gastos set corte_id = v_id where sucursal_id = s.sucursal_id and corte_id is null;
+  update public.cobros set corte_id = v_id where sucursal_id = s.sucursal_id and corte_id is null;
+  v_res := public._resumen(s.sucursal_id, v_id);
 
-  insert into public.cortes (id, fecha, hora, tickets, total, gastos, detalle, hecho_por, autorizado_por, cobrado, por_cobrar)
-  values (v_id, public._fecha(), public._hora(), (v_res->>'count')::int, (v_res->>'total')::numeric,
-          (v_res->>'gastos')::numeric,
+  insert into public.cortes (id, sucursal_id, fecha, hora, tickets, total, gastos, detalle, hecho_por, autorizado_por, cobrado, por_cobrar)
+  values (v_id, s.sucursal_id, public._fecha(s.sucursal_id), public._hora(s.sucursal_id), (v_res->>'count')::int,
+          (v_res->>'total')::numeric, (v_res->>'gastos')::numeric,
           jsonb_build_object('porTipo', v_res->'porTipo', 'porMesero', v_res->'porMesero', 'top', v_res->'top',
                              'gastos', v_res->'gastos', 'cobrado', v_res->'cobrado', 'porCobrar', v_res->'porCobrar',
                              'noCobrado', v_res->'noCobrado'),
           s.uid, v_auth->>'id', (v_res->'cobrado'->>'total')::numeric, (v_res->>'porCobrar')::numeric);
-  perform public._log(s.uid, s.nombre, 'corte', jsonb_build_object('corte', v_id, 'autorizo', v_auth->>'nombre',
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'corte', jsonb_build_object('corte', v_id, 'autorizo', v_auth->>'nombre',
                       'tickets', v_res->'count', 'total', v_res->'total'));
 
-  -- Retención: anonimiza domicilios de cortes antiguos
-  select coalesce(retencion_domicilio_dias, 90) into v_ret from public.config where id = 1;
+  -- Retención: anonimiza domicilios de cortes antiguos de la sucursal
+  select coalesce(retencion_domicilio_dias, 90) into v_ret from public.sucursales where id = s.sucursal_id;
   update public.tickets set domicilio = jsonb_build_object('anonimizado', true, 'pago', domicilio->>'pago')
-   where domicilio is not null and not (domicilio ? 'anonimizado') and corte_id is not null
+   where sucursal_id = s.sucursal_id and domicilio is not null and not (domicilio ? 'anonimizado') and corte_id is not null
      and created_at < now() - make_interval(days => coalesce(v_ret, 90));
 
   return json_build_object('ok', true, 'corte', jsonb_build_object('id', v_id, 'tickets', v_res->'count',
@@ -1422,7 +1514,8 @@ begin
     'cobrado', v_res->'cobrado', 'porCobrar', v_res->'porCobrar'));
 end $$;
 
--- Cobro: liquida uno o varios tickets con un método de pago. Repetir con el mismo id no duplica.
+-- Cobro: liquida uno o varios tickets de la sucursal con un método de pago. Repetir con el mismo id no
+-- duplica; un id que ya existe en otra sucursal se rechaza sin devolver nada de ese cobro.
 -- En efectivo valida que lo recibido alcance; opcionalmente libera la mesa si ya no le queda nada por cobrar.
 create or replace function public.cobrar(p_token text, p_id text, p_tickets text[], p_metodo text,
                                          p_recibido numeric default null, p_propina numeric default 0,
@@ -1430,13 +1523,14 @@ create or replace function public.cobrar(p_token text, p_id text, p_tickets text
 returns json language plpgsql security definer set search_path = public as $$
 declare
   s record; c public.cobros; v_n int; v_total numeric; v_propina numeric := round(coalesce(p_propina, 0), 2);
-  v_recibido numeric; v_mesas int[]; v_origen text; v_liberada boolean := false; v_ya text;
+  v_recibido numeric; v_mesas int[]; v_origen text; v_liberada boolean := false; v_ya text; v_ids text[];
 begin
-  select * into s from public._exigir(p_token, array['mesero', 'admin']);
+  select * into s from public._contexto(p_token, array['mesero', 'admin']);
   if p_id is null or p_id !~ '^[A-Za-z0-9_-]{8,64}$' then perform public._error('DATOS', 'Identificador de cobro no válido.'); end if;
   perform pg_advisory_xact_lock(hashtextextended('tequeria:cobro:' || p_id, 0));
   select * into c from public.cobros where id = p_id;
   if c.id is not null then
+    if c.sucursal_id <> s.sucursal_id then perform public._error('DATOS', 'Identificador de cobro no válido.'); end if;
     return json_build_object('ok', true, 'duplicado', true, 'cobro', jsonb_build_object('id', c.id, 'metodo', c.metodo,
       'total', c.total, 'propina', c.propina, 'recibido', c.recibido, 'cambio', greatest(0, coalesce(c.recibido, 0) - c.total - c.propina)));
   end if;
@@ -1447,17 +1541,19 @@ begin
     perform public._error('DATOS', 'Elige al menos una cuenta.');
   end if;
   if v_propina < 0 or v_propina > 100000 then perform public._error('DATOS', 'Propina no válida.'); end if;
-  -- un corte en curso espera a los cobros que ya empezaron (y viceversa)
-  perform pg_advisory_xact_lock_shared(hashtextextended('tequeria:corte', 0));
+  v_ids := array(select distinct x from unnest(p_tickets) x);
+  -- un corte en curso de la sucursal espera a los cobros que ya empezaron (y viceversa)
+  perform pg_advisory_xact_lock_shared(hashtextextended('tequeria:corte:' || s.sucursal_id, 0));
 
-  perform 1 from public.tickets where id = any(p_tickets) order by id for update;
+  perform 1 from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids) order by id for update;
   select count(*), coalesce(sum(total), 0), array_agg(distinct mesa_id) filter (where mesa_id is not null)
     into v_n, v_total, v_mesas
-    from public.tickets where id = any(p_tickets) and reenvio is not true;
-  if v_n <> cardinality(array(select distinct unnest(p_tickets))) then
+    from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids) and reenvio is not true;
+  if v_n <> cardinality(v_ids) then
     perform public._error('TICKET', 'Alguna cuenta ya no existe o es una reimpresión.');
   end if;
-  select coalesce(origen, 'una cuenta') into v_ya from public.tickets where id = any(p_tickets) and cobro_id is not null limit 1;
+  select coalesce(origen, 'una cuenta') into v_ya from public.tickets
+   where sucursal_id = s.sucursal_id and id = any (v_ids) and estado_cobro <> 'pendiente' limit 1;
   if v_ya is not null then
     perform public._error('YA_COBRADO', 'La cuenta de ' || v_ya || ' ya estaba cobrada. Actualiza la pantalla.');
   end if;
@@ -1472,95 +1568,100 @@ begin
     v_recibido := v_total + v_propina;
   end if;
 
-  v_origen := case when cardinality(p_tickets) = 1 then (select origen from public.tickets where id = p_tickets[1])
+  v_origen := case when cardinality(v_ids) = 1 then (select origen from public.tickets where sucursal_id = s.sucursal_id and id = v_ids[1])
                    when coalesce(cardinality(v_mesas), 0) = 1 then 'Mesa ' || v_mesas[1]
                    else 'Varias cuentas' end;
-  insert into public.cobros (id, metodo, total, propina, recibido, tickets, origen, cobrado_por, cobrado_nombre, fecha, hora)
-  values (p_id, p_metodo, v_total, v_propina, v_recibido, v_n, v_origen, s.uid, s.nombre, public._fecha(), public._hora())
+  insert into public.cobros (id, sucursal_id, metodo, total, propina, recibido, tickets, origen, cobrado_por, cobrado_nombre, fecha, hora)
+  values (p_id, s.sucursal_id, p_metodo, v_total, v_propina, v_recibido, v_n, v_origen, s.uid, s.nombre,
+          public._fecha(s.sucursal_id), public._hora(s.sucursal_id))
   returning * into c;
-  update public.tickets set cobro_id = p_id where id = any(p_tickets);
+  update public.tickets set cobro_id = p_id, estado_cobro = 'cobrado' where sucursal_id = s.sucursal_id and id = any (v_ids);
 
   -- con la mesa bloqueada, una orden extra simultánea no queda en una mesa ya libre
   if p_liberar_mesa and coalesce(cardinality(v_mesas), 0) = 1 then
-    perform 1 from public.mesas where id = v_mesas[1] for update;
+    perform 1 from public.mesas where sucursal_id = s.sucursal_id and id = v_mesas[1] for update;
+    if not exists (select 1 from public.tickets where sucursal_id = s.sucursal_id and mesa_id = v_mesas[1]
+                     and estado_cobro = 'pendiente' and reenvio is not true) then
+      update public.mesas set estado = 'libre', pedido = null, mesero = null, hora = null, extras = '[]'::jsonb,
+             version = coalesce(version, 0) + 1
+       where sucursal_id = s.sucursal_id and id = v_mesas[1] and estado = 'ocupada';
+      v_liberada := found;
+    end if;
   end if;
-  if p_liberar_mesa and coalesce(cardinality(v_mesas), 0) = 1 and not exists (
-       select 1 from public.tickets where mesa_id = v_mesas[1] and cobro_id is null and reenvio is not true) then
-    update public.mesas set estado = 'libre', pedido = null, mesero = null, hora = null, extras = '[]'::jsonb,
-           version = coalesce(version, 0) + 1
-     where id = v_mesas[1] and estado = 'ocupada';
-    v_liberada := found;
-  end if;
-  perform public._log(s.uid, s.nombre, 'cobro', jsonb_build_object('cobro', p_id, 'metodo', p_metodo, 'total', v_total,
-                      'propina', v_propina, 'tickets', v_n));
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'cobro', jsonb_build_object('cobro', p_id, 'metodo', p_metodo,
+                      'total', v_total, 'propina', v_propina, 'tickets', v_n));
   return json_build_object('ok', true, 'mesaLiberada', v_liberada, 'cobro', jsonb_build_object('id', c.id, 'metodo', c.metodo,
     'total', c.total, 'propina', c.propina, 'recibido', c.recibido, 'cambio', c.recibido - c.total - c.propina, 'origen', c.origen));
 end $$;
 
--- Anula un cobro que aún no entra en un corte: las cuentas vuelven a quedar por cobrar
+-- Anula un cobro de la sucursal que aún no entra en un corte: las cuentas vuelven a quedar por cobrar
 create or replace function public.anular_cobro(p_token text, p_id text, p_motivo text)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record; c public.cobros; v_motivo text := left(btrim(coalesce(p_motivo, '')), 200);
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  perform pg_advisory_xact_lock(hashtextextended('tequeria:corte', 0));
-  select * into c from public.cobros where id = p_id for update;
+  select * into s from public._contexto(p_token, array['admin']);
+  perform pg_advisory_xact_lock(hashtextextended('tequeria:corte:' || s.sucursal_id, 0));
+  select * into c from public.cobros where sucursal_id = s.sucursal_id and id = p_id for update;
   if c.id is null or c.anulado then perform public._error('COBRO', 'El cobro no existe o ya estaba anulado.'); end if;
   if c.corte_id is not null then perform public._error('COBRO', 'Ese cobro ya pertenece a un corte y no se puede anular.'); end if;
   if v_motivo = '' then perform public._error('DATOS', 'Escribe el motivo de la anulación.'); end if;
-  update public.cobros set anulado = true, anulado_por = s.uid, anulado_motivo = v_motivo where id = c.id;
-  update public.tickets set cobro_id = null where cobro_id = c.id;
-  perform public._log(s.uid, s.nombre, 'anular_cobro', jsonb_build_object('cobro', c.id, 'total', c.total,
+  update public.cobros set anulado = true, anulado_por = s.uid, anulado_motivo = v_motivo
+   where sucursal_id = s.sucursal_id and id = c.id;
+  update public.tickets set cobro_id = null, estado_cobro = 'pendiente' where sucursal_id = s.sucursal_id and cobro_id = c.id;
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'anular_cobro', jsonb_build_object('cobro', c.id, 'total', c.total,
                       'metodo', c.metodo, 'motivo', v_motivo));
 end $$;
 
--- Cierra cuentas que no se van a cobrar (el cliente se fue, comanda equivocada…) con PIN de
--- administrador y motivo. Quedan como «No cobrado» en el corte y en la bitácora.
+-- Cierra cuentas que no se van a cobrar (el cliente se fue, comanda equivocada…) con PIN de un
+-- administrador de la sucursal y motivo. Quedan como «No cobrado» en el corte y en la bitácora.
 create or replace function public.no_cobrar(p_token text, p_admin_pin text, p_tickets text[], p_motivo text,
                                             p_liberar_mesa boolean default false)
 returns json language plpgsql security definer set search_path = public as $$
 declare
   s record; v_auth json; v_motivo text := left(btrim(coalesce(p_motivo, '')), 200);
-  v_n int; v_total numeric; v_mesas int[]; v_ya text; v_liberada boolean := false;
+  v_n int; v_total numeric; v_mesas int[]; v_ya text; v_liberada boolean := false; v_ids text[];
 begin
-  select * into s from public._exigir(p_token, array['mesero', 'admin']);
+  select * into s from public._contexto(p_token, array['mesero', 'admin']);
   if v_motivo = '' then perform public._error('DATOS', 'Escribe el motivo.'); end if;
   if p_tickets is null or cardinality(p_tickets) = 0 or cardinality(p_tickets) > 50 then
     perform public._error('DATOS', 'Elige al menos una cuenta.');
   end if;
-  v_auth := public._verificar_admin(p_admin_pin, s.sid);
+  v_auth := public._verificar_admin(s.sucursal_id, p_admin_pin, s.sid);
   if not (v_auth->>'ok')::boolean then return v_auth; end if;
-  perform pg_advisory_xact_lock_shared(hashtextextended('tequeria:corte', 0));
+  v_ids := array(select distinct x from unnest(p_tickets) x);
+  perform pg_advisory_xact_lock_shared(hashtextextended('tequeria:corte:' || s.sucursal_id, 0));
 
-  perform 1 from public.tickets where id = any(p_tickets) order by id for update;
+  perform 1 from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids) order by id for update;
   select count(*), coalesce(sum(total), 0), array_agg(distinct mesa_id) filter (where mesa_id is not null)
     into v_n, v_total, v_mesas
-    from public.tickets where id = any(p_tickets) and reenvio is not true;
-  if v_n <> cardinality(array(select distinct unnest(p_tickets))) then
+    from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids) and reenvio is not true;
+  if v_n <> cardinality(v_ids) then
     perform public._error('TICKET', 'Alguna cuenta ya no existe o es una reimpresión.');
   end if;
-  select coalesce(origen, 'una cuenta') into v_ya from public.tickets where id = any(p_tickets) and cobro_id is not null limit 1;
+  select coalesce(origen, 'una cuenta') into v_ya from public.tickets
+   where sucursal_id = s.sucursal_id and id = any (v_ids) and estado_cobro <> 'pendiente' limit 1;
   if v_ya is not null then
     perform public._error('YA_COBRADO', 'La cuenta de ' || v_ya || ' ya estaba cerrada. Actualiza la pantalla.');
   end if;
-  update public.tickets set cobro_id = 'no_cobrado' where id = any(p_tickets);
+  update public.tickets set estado_cobro = 'no_cobrado' where sucursal_id = s.sucursal_id and id = any (v_ids);
 
   if p_liberar_mesa and coalesce(cardinality(v_mesas), 0) = 1 then
-    perform 1 from public.mesas where id = v_mesas[1] for update;
-    if not exists (select 1 from public.tickets where mesa_id = v_mesas[1] and cobro_id is null and reenvio is not true) then
+    perform 1 from public.mesas where sucursal_id = s.sucursal_id and id = v_mesas[1] for update;
+    if not exists (select 1 from public.tickets where sucursal_id = s.sucursal_id and mesa_id = v_mesas[1]
+                     and estado_cobro = 'pendiente' and reenvio is not true) then
       update public.mesas set estado = 'libre', pedido = null, mesero = null, hora = null, extras = '[]'::jsonb,
              version = coalesce(version, 0) + 1
-       where id = v_mesas[1] and estado = 'ocupada';
+       where sucursal_id = s.sucursal_id and id = v_mesas[1] and estado = 'ocupada';
       v_liberada := found;
     end if;
   end if;
-  perform public._log(s.uid, s.nombre, 'no_cobrado', jsonb_build_object('tickets', to_jsonb(p_tickets), 'total', v_total,
-                      'motivo', v_motivo, 'autorizo', v_auth->>'nombre'));
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'no_cobrado', jsonb_build_object('tickets', to_jsonb(v_ids),
+                      'total', v_total, 'motivo', v_motivo, 'autorizo', v_auth->>'nombre'));
   return json_build_object('ok', true, 'mesaLiberada', v_liberada, 'total', v_total);
 end $$;
 
 -- ---------------------------------------------------------------------
---  API: inventario, catálogo y precios (administrador)
+--  API: inventario, catálogo y precios de la sucursal (administrador)
 -- ---------------------------------------------------------------------
 create or replace function public._precio_ok(p numeric) returns numeric language plpgsql immutable set search_path = public as $$
 begin
@@ -1572,16 +1673,16 @@ create or replace function public.ajustar_bebida(p_token text, p_id text, p_delt
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if p_delta is null or abs(p_delta) > 10000 then perform public._error('DATOS', 'Cantidad no válida.'); end if;
-  update public.bebidas set cantidad = greatest(0, coalesce(cantidad, 0) + p_delta) where id = p_id;
+  update public.bebidas set cantidad = greatest(0, coalesce(cantidad, 0) + p_delta) where sucursal_id = s.sucursal_id and id = p_id;
 end $$;
 
 create or replace function public.actualizar_bebida(p_token text, p_id text, p_cambios jsonb)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record; v_nombre text;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if p_cambios ? 'cantidad' and coalesce(p_cambios->>'cantidad', '') !~ '^[0-9]{1,6}$' then
     perform public._error('DATOS', 'Existencia no válida.');
   end if;
@@ -1591,9 +1692,9 @@ begin
     activo = case when p_cambios ? 'activo' then (p_cambios->>'activo')::boolean else activo end,
     precio = case when p_cambios ? 'precio' then public._precio_ok((p_cambios->>'precio')::numeric) else precio end,
     cantidad = case when p_cambios ? 'cantidad' then (p_cambios->>'cantidad')::int else cantidad end
-  where id = p_id;
-  if p_cambios ? 'precio' then
-    perform public._log(s.uid, s.nombre, 'precio_bebida', jsonb_build_object('id', p_id, 'precio', p_cambios->'precio'));
+  where sucursal_id = s.sucursal_id and id = p_id;
+  if found and p_cambios ? 'precio' then
+    perform public._log(s.sucursal_id, s.uid, s.nombre, 'precio_bebida', jsonb_build_object('id', p_id, 'precio', p_cambios->'precio'));
   end if;
 end $$;
 
@@ -1601,10 +1702,11 @@ create or replace function public.agregar_bebida(p_token text, p_nombre text, p_
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_id text := substr(replace(gen_random_uuid()::text, '-', ''), 1, 10); v_nombre text := left(btrim(coalesce(p_nombre, '')), 60);
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if v_nombre = '' then perform public._error('DATOS', 'Escribe el nombre de la bebida.'); end if;
   if p_cantidad is null or p_cantidad < 0 or p_cantidad > 100000 then perform public._error('DATOS', 'Existencia no válida.'); end if;
-  insert into public.bebidas (id, nombre, cantidad, activo, precio) values (v_id, v_nombre, p_cantidad, true, public._precio_ok(p_precio));
+  insert into public.bebidas (sucursal_id, id, nombre, cantidad, activo, precio)
+  values (s.sucursal_id, v_id, v_nombre, p_cantidad, true, public._precio_ok(p_precio));
   return json_build_object('id', v_id);
 end $$;
 
@@ -1612,35 +1714,37 @@ create or replace function public.eliminar_bebida(p_token text, p_id text)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  delete from public.bebidas where id = p_id;
-  perform public._log(s.uid, s.nombre, 'eliminar_bebida', jsonb_build_object('id', p_id));
+  select * into s from public._contexto(p_token, array['admin']);
+  delete from public.bebidas where sucursal_id = s.sucursal_id and id = p_id;
+  if found then perform public._log(s.sucursal_id, s.uid, s.nombre, 'eliminar_bebida', jsonb_build_object('id', p_id)); end if;
 end $$;
 
 create or replace function public.actualizar_carne(p_token text, p_id text, p_activo boolean)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  update public.carnes set activo = coalesce(p_activo, true) where id = p_id;
+  select * into s from public._contexto(p_token, array['admin']);
+  update public.carnes set activo = coalesce(p_activo, true) where sucursal_id = s.sucursal_id and id = p_id;
 end $$;
 
 create or replace function public.agregar_carne(p_token text, p_nombre text)
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_nombre text := left(btrim(coalesce(p_nombre, '')), 40); v_id text;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if v_nombre = '' then perform public._error('DATOS', 'Escribe el nombre de la carne.'); end if;
   v_id := trim(both '-' from regexp_replace(translate(lower(v_nombre), 'áéíóúüñàèìòù', 'aeiouunaeiou'), '[^a-z0-9]+', '-', 'g'));
   if v_id = '' then v_id := substr(md5(random()::text), 1, 8); end if;
-  if exists (select 1 from public.carnes where id = v_id) then perform public._error('DUPLICADO', 'Esa carne ya existe.'); end if;
-  insert into public.carnes (id, nombre, activo, orden)
-  values (v_id, v_nombre, true, coalesce((select max(orden) + 1 from public.carnes), 0));
+  if exists (select 1 from public.carnes where sucursal_id = s.sucursal_id and id = v_id) then
+    perform public._error('DUPLICADO', 'Esa carne ya existe.');
+  end if;
+  insert into public.carnes (sucursal_id, id, nombre, activo, orden)
+  values (s.sucursal_id, v_id, v_nombre, true, coalesce((select max(orden) + 1 from public.carnes where sucursal_id = s.sucursal_id), 0));
   -- precios por defecto en la misma transacción (los existentes se conservan)
   update public.config set precios = jsonb_build_object(
       'taco-' || v_id, 20, 'taco-queso-' || v_id, 30, 'gringa-' || v_id, 45, 'llenadora-' || v_id, 55,
       'volcan-' || v_id, 40, 'costra-' || v_id, 50, 'media-costra-' || v_id, 28) || coalesce(precios, '{}'::jsonb)
-   where id = 1;
+   where sucursal_id = s.sucursal_id;
   return json_build_object('id', v_id);
 end $$;
 
@@ -1648,44 +1752,47 @@ create or replace function public.eliminar_carne(p_token text, p_id text)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  delete from public.carnes where id = p_id;
-  perform public._log(s.uid, s.nombre, 'eliminar_carne', jsonb_build_object('id', p_id));
+  select * into s from public._contexto(p_token, array['admin']);
+  delete from public.carnes where sucursal_id = s.sucursal_id and id = p_id;
+  if found then perform public._log(s.sucursal_id, s.uid, s.nombre, 'eliminar_carne', jsonb_build_object('id', p_id)); end if;
 end $$;
 
 create or replace function public.fijar_precio(p_token text, p_clave text, p_precio numeric)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record; v numeric;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if p_clave is null or p_clave !~ '^[a-z0-9-]{1,80}$' then perform public._error('DATOS', 'Producto no válido.'); end if;
   v := public._precio_ok(p_precio);
-  update public.config set precios = jsonb_set(coalesce(precios, '{}'::jsonb), array[p_clave], to_jsonb(v)) where id = 1;
-  perform public._log(s.uid, s.nombre, 'precio', jsonb_build_object('clave', p_clave, 'precio', v));
+  update public.config set precios = jsonb_set(coalesce(precios, '{}'::jsonb), array[p_clave], to_jsonb(v))
+   where sucursal_id = s.sucursal_id;
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'precio', jsonb_build_object('clave', p_clave, 'precio', v));
 end $$;
 
 create or replace function public.fijar_precio_extra(p_token text, p_id text, p_precio numeric)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record; v numeric;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   v := public._precio_ok(p_precio);
   update public.config set extras = coalesce((select jsonb_agg(case when e->>'id' = p_id then jsonb_set(e, '{precio}', to_jsonb(v)) else e end)
                                               from jsonb_array_elements(coalesce(extras, '[]'::jsonb)) e), '[]'::jsonb)
-   where id = 1;
-  perform public._log(s.uid, s.nombre, 'precio', jsonb_build_object('extra', p_id, 'precio', v));
+   where sucursal_id = s.sucursal_id and coalesce(extras, '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('id', p_id));
+  if found then
+    perform public._log(s.sucursal_id, s.uid, s.nombre, 'precio', jsonb_build_object('extra', p_id, 'precio', v));
+  end if;
 end $$;
 
 create or replace function public.agregar_extra(p_token text, p_cat text, p_nombre text, p_precio numeric)
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_id text := substr(replace(gen_random_uuid()::text, '-', ''), 1, 10); v_nombre text := left(btrim(coalesce(p_nombre, '')), 60);
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if p_cat not in ('taco', 'quesa', 'volcan', 'costra') then perform public._error('DATOS', 'Categoría no válida.'); end if;
   if v_nombre = '' then perform public._error('DATOS', 'Escribe el nombre del producto.'); end if;
   update public.config set extras = coalesce(extras, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
     'id', v_id, 'nombre', v_nombre, 'cat', p_cat, 'precio', public._precio_ok(p_precio), 'activo', true))
-   where id = 1;
+   where sucursal_id = s.sucursal_id;
   return json_build_object('id', v_id);
 end $$;
 
@@ -1693,22 +1800,22 @@ create or replace function public.eliminar_extra(p_token text, p_id text)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   update public.config set extras = coalesce((select jsonb_agg(e) from jsonb_array_elements(coalesce(extras, '[]'::jsonb)) e
                                               where e->>'id' is distinct from p_id), '[]'::jsonb)
-   where id = 1;
+   where sucursal_id = s.sucursal_id and coalesce(extras, '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('id', p_id));
 end $$;
 
 create or replace function public.alternar_oculto(p_token text, p_clave text)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if p_clave is null or p_clave !~ '^[A-Za-z0-9_-]{1,80}$' then perform public._error('DATOS', 'Producto no válido.'); end if;
   update public.config set ocultos = case when coalesce(ocultos, '[]'::jsonb) ? p_clave
                                          then coalesce(ocultos, '[]'::jsonb) - p_clave
                                          else coalesce(ocultos, '[]'::jsonb) || to_jsonb(p_clave) end
-   where id = 1;
+   where sucursal_id = s.sucursal_id;
 end $$;
 
 -- Ajustes del negocio: solo claves conocidas y valores válidos
@@ -1719,60 +1826,65 @@ create or replace function public.fijar_ajuste(p_token text, p_clave text, p_val
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v jsonb;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if not ((p_clave = 'modoCocina' and jsonb_typeof(p_valor) = 'string' and p_valor #>> '{}' in ('impresora', 'monitor'))
        or (p_clave in ('imprimirCocinaMonitor', 'variasCocinas') and jsonb_typeof(p_valor) = 'boolean')) then
     perform public._error('DATOS', 'Ajuste no válido.');
   end if;
   update public.config set ajustes = coalesce(ajustes, '{}'::jsonb) || jsonb_build_object(p_clave, p_valor)
-   where id = 1 returning ajustes into v;
-  perform public._log(s.uid, s.nombre, 'ajuste', jsonb_build_object('clave', p_clave, 'valor', p_valor));
+   where sucursal_id = s.sucursal_id returning ajustes into v;
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'ajuste', jsonb_build_object('clave', p_clave, 'valor', p_valor));
   return v::json;
 end $$;
 
 -- ---------------------------------------------------------------------
---  API: gastos (administrador)
+--  API: gastos de la sucursal (administrador)
 -- ---------------------------------------------------------------------
 create or replace function public.agregar_gasto(p_token text, p_id text, p_concepto text, p_monto numeric)
 returns void language plpgsql security definer set search_path = public as $$
-declare s record; v_concepto text := left(btrim(coalesce(p_concepto, '')), 120);
+declare s record; v_concepto text := left(btrim(coalesce(p_concepto, '')), 120); v_suc uuid;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
+  select * into s from public._contexto(p_token, array['admin']);
   if p_id is null or p_id !~ '^[A-Za-z0-9_-]{8,64}$' then perform public._error('DATOS', 'Identificador no válido.'); end if;
   if v_concepto = '' then perform public._error('DATOS', 'Escribe el concepto del gasto.'); end if;
   if p_monto is null or p_monto <= 0 or p_monto > 1000000 then perform public._error('DATOS', 'El monto debe ser mayor a cero.'); end if;
-  insert into public.gastos (id, concepto, monto, fecha, hora, usuario, creado_por)
-  values (p_id, v_concepto, round(p_monto, 2), public._fecha(), public._hora(), s.nombre, s.uid)
+  insert into public.gastos (id, sucursal_id, concepto, monto, fecha, hora, usuario, creado_por)
+  values (p_id, s.sucursal_id, v_concepto, round(p_monto, 2), public._fecha(s.sucursal_id), public._hora(s.sucursal_id), s.nombre, s.uid)
   on conflict (id) do nothing;
+  if not found then
+    -- repetido: si es de esta sucursal no hace nada; si es de otra, error genérico sin datos
+    select sucursal_id into v_suc from public.gastos where id = p_id;
+    if v_suc is distinct from s.sucursal_id then perform public._error('DATOS', 'Identificador no válido.'); end if;
+  end if;
 end $$;
 
 create or replace function public.eliminar_gasto(p_token text, p_id text)
 returns void language plpgsql security definer set search_path = public as $$
 declare s record; g public.gastos;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  delete from public.gastos where id = p_id and corte_id is null returning * into g;
+  select * into s from public._contexto(p_token, array['admin']);
+  delete from public.gastos where sucursal_id = s.sucursal_id and id = p_id and corte_id is null returning * into g;
   if g.id is null then perform public._error('GASTO', 'El gasto no existe o ya pertenece a un corte.'); end if;
-  perform public._log(s.uid, s.nombre, 'eliminar_gasto', jsonb_build_object('concepto', g.concepto, 'monto', g.monto, 'fecha', g.fecha));
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'eliminar_gasto', jsonb_build_object('concepto', g.concepto, 'monto', g.monto, 'fecha', g.fecha));
 end $$;
 
 -- ---------------------------------------------------------------------
---  API: usuarios (administrador + su propio PIN)
+--  API: usuarios de la sucursal (administrador + su propio PIN)
 -- ---------------------------------------------------------------------
 create or replace function public.crear_usuario(p_token text, p_admin_pin text, p_nombre text, p_pin text, p_rol text)
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_auth json; v_nombre text := left(btrim(coalesce(p_nombre, '')), 40); v_id text;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  v_auth := public._verificar_admin(p_admin_pin, s.sid, s.uid);
+  select * into s from public._contexto(p_token, array['admin']);
+  v_auth := public._verificar_admin(s.sucursal_id, p_admin_pin, s.sid, s.uid);
   if not (v_auth->>'ok')::boolean then return v_auth; end if;
   if v_nombre = '' then return json_build_object('ok', false, 'error', 'nombre'); end if;
   if p_rol not in ('admin', 'mesero', 'cocinero') then return json_build_object('ok', false, 'error', 'rol'); end if;
   if not public._pin_formato_ok(p_pin) then return json_build_object('ok', false, 'error', 'formato'); end if;
   if public._pin_debil(p_pin) then return json_build_object('ok', false, 'error', 'debil'); end if;
   v_id := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12);
-  insert into public.usuarios (id, nombre, rol, pin_hash) values (v_id, v_nombre, p_rol, public._hash_pin(p_pin));
-  perform public._log(s.uid, s.nombre, 'crear_usuario', jsonb_build_object('id', v_id, 'nombre', v_nombre, 'rol', p_rol));
+  insert into public.usuarios (id, sucursal_id, nombre, rol, pin_hash) values (v_id, s.sucursal_id, v_nombre, p_rol, public._hash_pin(p_pin));
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'crear_usuario', jsonb_build_object('id', v_id, 'nombre', v_nombre, 'rol', p_rol));
   return json_build_object('ok', true, 'usuario', json_build_object('id', v_id, 'nombre', v_nombre, 'rol', p_rol));
 end $$;
 
@@ -1780,20 +1892,21 @@ create or replace function public.eliminar_usuario(p_token text, p_admin_pin tex
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_auth json; u public.usuarios; v_admins int;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  v_auth := public._verificar_admin(p_admin_pin, s.sid, s.uid);
+  select * into s from public._contexto(p_token, array['admin']);
+  v_auth := public._verificar_admin(s.sucursal_id, p_admin_pin, s.sid, s.uid);
   if not (v_auth->>'ok')::boolean then return v_auth; end if;
   if p_id = s.uid then return json_build_object('ok', false, 'error', 'propio'); end if;
-  -- bloquea a todos los administradores para que dos bajas simultáneas no dejen cero
-  perform 1 from public.usuarios where rol = 'admin' order by id for update;
-  select * into u from public.usuarios where id = p_id;
+  -- bloquea a los administradores de la sucursal para que dos bajas simultáneas no dejen cero
+  perform 1 from public.usuarios where sucursal_id = s.sucursal_id and rol = 'admin' order by id for update;
+  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = p_id;
   if u.id is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
-  select count(*) into v_admins from public.usuarios where rol = 'admin';
+  select count(*) into v_admins from public.usuarios where sucursal_id = s.sucursal_id and rol = 'admin';
   if u.rol = 'admin' and v_admins <= 1 then return json_build_object('ok', false, 'error', 'ultimo_admin'); end if;
   update public.cocina_sesion set session_id = null
-   where id = 1 and session_id in (select id::text from public.sesiones where usuario_id = u.id);
-  delete from public.usuarios where id = u.id;
-  perform public._log(s.uid, s.nombre, 'eliminar_usuario', jsonb_build_object('id', u.id, 'nombre', u.nombre, 'rol', u.rol));
+   where sucursal_id = s.sucursal_id
+     and session_id in (select id::text from public.sesiones where sucursal_id = s.sucursal_id and usuario_id = u.id);
+  delete from public.usuarios where sucursal_id = s.sucursal_id and id = u.id;
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'eliminar_usuario', jsonb_build_object('id', u.id, 'nombre', u.nombre, 'rol', u.rol));
   return json_build_object('ok', true);
 end $$;
 
@@ -1801,36 +1914,43 @@ create or replace function public.restablecer_pin(p_token text, p_admin_pin text
 returns json language plpgsql security definer set search_path = public as $$
 declare s record; v_auth json; u public.usuarios;
 begin
-  select * into s from public._exigir(p_token, array['admin']);
-  v_auth := public._verificar_admin(p_admin_pin, s.sid, s.uid);
+  select * into s from public._contexto(p_token, array['admin']);
+  v_auth := public._verificar_admin(s.sucursal_id, p_admin_pin, s.sid, s.uid);
   if not (v_auth->>'ok')::boolean then return v_auth; end if;
-  select * into u from public.usuarios where id = p_id;
+  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = p_id;
   if u.id is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
   if not public._pin_formato_ok(p_pin_nuevo) then return json_build_object('ok', false, 'error', 'formato'); end if;
   -- El usuario deberá elegir su propio PIN al entrar
   update public.usuarios set pin_hash = public._hash_pin(p_pin_nuevo), debe_cambiar_pin = (u.id <> s.uid) or public._pin_debil(p_pin_nuevo)
-   where id = u.id;
-  update public.sesiones set revocada = true where usuario_id = u.id and id <> s.sid;
-  perform public._limpiar_intentos('u:' || u.id);
-  perform public._log(s.uid, s.nombre, 'restablecer_pin', jsonb_build_object('id', u.id, 'nombre', u.nombre));
+   where sucursal_id = s.sucursal_id and id = u.id;
+  update public.sesiones set revocada = true where sucursal_id = s.sucursal_id and usuario_id = u.id and id <> s.sid;
+  perform public._limpiar_intentos('u:' || s.sucursal_id || ':' || u.id);
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'restablecer_pin', jsonb_build_object('id', u.id, 'nombre', u.nombre));
   return json_build_object('ok', true);
 end $$;
 
--- Alta del primer administrador. NO se expone a la API: ejecútala en el SQL Editor:
---   select public.crear_admin_inicial('Tu nombre', 'PIN de 4 a 8 dígitos');
-create or replace function public.crear_admin_inicial(p_nombre text, p_pin text)
+-- Alta del primer administrador de una sucursal. NO se expone a la API: ejecútala en el SQL Editor:
+--   select public.crear_admin_inicial('Tu nombre', 'PIN de 4 a 8 dígitos');            -- si hay una sola sucursal
+--   select public.crear_admin_inicial('Tu nombre', 'PIN', '<id de la sucursal>');      -- si hay varias
+-- En el paso 4 la sustituye el alta desde el panel de dueños.
+create or replace function public.crear_admin_inicial(p_nombre text, p_pin text, p_sucursal uuid default null)
 returns text language plpgsql security definer set search_path = public as $$
-declare v_id text := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12);
+declare v_id text := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12); v_suc uuid := p_sucursal;
 begin
-  if exists (select 1 from public.usuarios where rol = 'admin') then
+  if v_suc is null then
+    if (select count(*) from public.sucursales) <> 1 then raise exception 'Hay varias sucursales: indica en cuál (tercer parámetro).'; end if;
+    select id into v_suc from public.sucursales;
+  end if;
+  if not exists (select 1 from public.sucursales where id = v_suc) then raise exception 'La sucursal no existe.'; end if;
+  if exists (select 1 from public.usuarios where sucursal_id = v_suc and rol = 'admin') then
     raise exception 'Ya existe un administrador; crea más usuarios desde la app.';
   end if;
   if btrim(coalesce(p_nombre, '')) = '' then raise exception 'Escribe un nombre.'; end if;
   if not public._pin_formato_ok(p_pin) or public._pin_debil(p_pin) then
     raise exception 'Usa un PIN de 4 a 8 dígitos que no sea trivial (no 1234, 1111, etc.).';
   end if;
-  insert into public.usuarios (id, nombre, rol, pin_hash) values (v_id, left(btrim(p_nombre), 40), 'admin', public._hash_pin(p_pin));
-  perform public._log(null, 'SQL Editor', 'crear_admin_inicial', jsonb_build_object('id', v_id));
+  insert into public.usuarios (id, sucursal_id, nombre, rol, pin_hash) values (v_id, v_suc, left(btrim(p_nombre), 40), 'admin', public._hash_pin(p_pin));
+  perform public._log(v_suc, null, 'SQL Editor', 'crear_admin_inicial', jsonb_build_object('id', v_id));
   return v_id;
 end $$;
 
@@ -1854,6 +1974,57 @@ create or replace trigger avisar_cambio after insert or update on public.cobros
   for each statement execute function public._avisar_cambio();
 create or replace trigger avisar_cambio after insert or update on public.cocina_hechos
   for each statement execute function public._avisar_cambio();
+
+-- ---------------------------------------------------------------------
+--  MULTINEGOCIO: CONTRACCIÓN DEL ESTADO DE COBRO (MIGRACION.md §4.3 y §4.5)
+--  Va después de las funciones, porque la guardia comprueba que ya ninguna dependa del cobro_id antiguo.
+--  1. estado_cobro deja de calcularse a partir de cobro_id y conserva sus valores.
+--  2. cobro_id queda solo con ids reales: «previo» y «no_cobrado» pasan a nulo. Su estado ya quedó
+--     guardado en el punto 1; hacerlo al revés los convertiría en «pendiente».
+--  3. Reglas: cobro_id existe si y solo si la comanda está cobrada, y apunta a un cobro de su sucursal.
+-- ---------------------------------------------------------------------
+do $$
+declare v_pendientes text;
+begin
+  select string_agg(x, ', ' order by x) into v_pendientes from (
+    select 'función ' || p.proname as x
+      from pg_proc p
+     where p.pronamespace = 'public'::regnamespace and p.proname <> '_usa_cobro_id_heredado'
+       and public._usa_cobro_id_heredado(p.prosrc)
+    union all
+    select 'índice ' || c.relname
+      from pg_index i join pg_class c on c.oid = i.indexrelid
+     where i.indrelid = 'public.tickets'::regclass and i.indpred is not null
+       and public._usa_cobro_id_heredado(pg_get_expr(i.indpred, i.indrelid))
+  ) d;
+  if v_pendientes is not null then
+    raise exception 'No se puede contraer el estado de cobro: aún dependen del cobro_id antiguo: %', v_pendientes;
+  end if;
+
+  -- 1. Deja de ser calculada (PostgreSQL 13 o posterior); si ya no lo es, no hace nada
+  if exists (select 1 from pg_attribute where attrelid = 'public.tickets'::regclass and attname = 'estado_cobro' and attgenerated = 's') then
+    alter table public.tickets alter column estado_cobro drop expression;
+  end if;
+  alter table public.tickets alter column estado_cobro set default 'pendiente';
+  alter table public.tickets alter column estado_cobro set not null;
+
+  -- 2. Solo ids reales en cobro_id
+  if exists (select 1 from public.tickets where cobro_id in ('previo', 'no_cobrado')) then
+    update public.tickets set cobro_id = null where cobro_id in ('previo', 'no_cobrado');
+    -- las referencias diferidas se comprueban ya: PostgreSQL no altera una tabla con comprobaciones pendientes
+    set constraints all immediate;
+  end if;
+
+  -- 3. Reglas
+  if not exists (select 1 from pg_constraint where conname = 'tickets_estado_cobro_ck') then
+    alter table public.tickets add constraint tickets_estado_cobro_ck
+      check (estado_cobro in ('pendiente', 'cobrado', 'previo', 'no_cobrado') and (cobro_id is not null) = (estado_cobro = 'cobrado'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'tickets_cobro_fk') then
+    alter table public.tickets add constraint tickets_cobro_fk foreign key (sucursal_id, cobro_id)
+      references public.cobros (sucursal_id, id) deferrable initially deferred;
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------
 --  PERMISOS: nada directo para anon/authenticated; solo las funciones de la API
@@ -1894,29 +2065,29 @@ begin
   for f in select p.oid::regprocedure as sig from pg_proc p join pg_namespace n on n.oid = p.pronamespace
            where n.nspname = 'public' and p.proname in (
              '_error','_ahora','_ahora_local','_fecha','_hora','_ip','_hash_pin','_pin_ok','_pin_formato_ok','_pin_debil',
-             '_espera','_fallo','_limpiar_intentos','_log','_sesion','_exigir','_verificar_admin','_ticket_json',
+             '_espera','_fallo','_limpiar_intentos','_log','_dispositivo','_contexto','_verificar_admin','_ticket_json',
              '_mesa_json','_resumen','_resolver_item','_valorar_items','_total_items','_avisar_cambio','_precio_ok',
              'crear_admin_inicial','usuarios_login','login','logout','cambiar_pin','estado','guardar_borrador_mesa',
-             'liberar_mesa','enviar_comanda','reenviar_cocina','cambiar_estado_ticket','archivar_ticket','latido_cocina',
+             'liberar_mesa','enviar_comanda','reenviar_cocina','latido_cocina',
              'liberar_cocina','hacer_corte','ajustar_bebida','actualizar_bebida','agregar_bebida','eliminar_bebida',
              'actualizar_carne','agregar_carne','eliminar_carne','fijar_precio','fijar_precio_extra','agregar_extra',
              'eliminar_extra','alternar_oculto','agregar_gasto','eliminar_gasto','crear_usuario','eliminar_usuario',
              'restablecer_pin','cobrar','anular_cobro','marcar_recibido','no_cobrar','fijar_ajuste',
-             'mover_tickets','archivar_tickets','marcar_hecho','_sucursal_unica','_cuenta_con_propietario',
-             '_usa_cobro_id_heredado')
+             'mover_tickets','archivar_tickets','marcar_hecho','_cuenta_con_propietario',
+             '_usa_cobro_id_heredado','_siguiente_folio')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;
 end $$;
 
--- …salvo la API, que valida sesión y rol por dentro.
+-- …salvo la API, que valida equipo, sesión y rol por dentro. Solo para authenticated: los equipos
+-- entran con una sesión anónima de Supabase (rol authenticated) y la vinculan a una sucursal.
 grant usage on schema public to anon, authenticated;
 grant execute on function
   public.usuarios_login(), public.login(text, text, text), public.logout(text),
   public.cambiar_pin(text, text, text), public.estado(text, text[]),
   public.guardar_borrador_mesa(text, int, jsonb, int), public.liberar_mesa(text, int),
   public.enviar_comanda(text, jsonb), public.reenviar_cocina(text, text, int),
-  public.cambiar_estado_ticket(text, text, text), public.archivar_ticket(text, text),
   public.latido_cocina(text), public.liberar_cocina(text), public.hacer_corte(text, text),
   public.ajustar_bebida(text, text, int), public.actualizar_bebida(text, text, jsonb),
   public.agregar_bebida(text, text, numeric, int), public.eliminar_bebida(text, text),
@@ -1930,7 +2101,7 @@ grant execute on function
   public.marcar_recibido(text, text[]), public.no_cobrar(text, text, text[], text, boolean),
   public.fijar_ajuste(text, text, jsonb), public.mover_tickets(text, jsonb, text),
   public.archivar_tickets(text, text[]), public.marcar_hecho(text, text, text, boolean)
-to anon, authenticated;
+to authenticated;
 
 commit;
 

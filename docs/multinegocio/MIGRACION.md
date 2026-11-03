@@ -1,9 +1,13 @@
 # Migración de La Tequería al modelo multinegocio
 
 Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), paso 6: la migración se diseña
-al principio y se ejecuta al final. La expansión (§4.1 a §4.4) ya está escrita en
-`tequeria-app/supabase-schema.sql` y ensayada sobre una copia exacta del esquema de producción con datos
-sintéticos (`tests/sql/migracion.test.js`). Nada se ha aplicado en producción.
+al principio y se ejecuta al final. La expansión y la contracción de los pasos 1 y 2 ya están escritas
+en `tequeria-app/supabase-schema.sql` y ensayadas sobre una copia exacta del esquema de producción con
+datos sintéticos (`tests/sql/migracion.test.js`). Nada se ha aplicado en producción.
+
+**Desde el paso 2, el esquema de la rama ya no funciona con la app publicada** (exige equipos
+vinculados). Se aplica en la ventana del cambio, junto con la app nueva (§5). La versión que solo
+expandía, compatible con la app de hoy, quedó en el commit `2d88d20`.
 
 ## 1. Principios
 
@@ -80,31 +84,26 @@ recuperable.
 
 ## 4. Pasos de la migración
 
-### 4.1 Expandir (compatible con la app actual)
+### 4.1 Expandir
 
-Implementado en la sección «MULTINEGOCIO, PASO 1» de `supabase-schema.sql`, que se puede ejecutar
-varias veces. Ninguna función de la API cambia.
+Implementado en la sección «MULTINEGOCIO» de `supabase-schema.sql`, que se puede ejecutar varias veces.
 
 - Tablas nuevas: `cuentas`, `sucursales`, `membresias`, `invitaciones`, `dispositivos`,
   `codigos_vinculacion`, `folios`, `intentos_operador` e `intentos_dispositivo`, con RLS y sin
   permisos para `anon` ni `authenticated`.
-- `sucursal_id not null` en todas las tablas de operación, con referencia a `sucursales` y valor por
-  omisión `_sucursal_unica()`: las filas que crean las funciones actuales caen en la sucursal inicial.
-- **Guardia central de transición:** toda la API antigua (`_sesion`, por donde pasan todas las
-  funciones con sesión, y además `login`, `usuarios_login` y `logout`) llama primero a
-  `_sucursal_unica()`. Si llegara a existir una segunda sucursal antes del paso 2, ninguna función lee ni
-  escribe nada, aunque se use una sesión creada antes; la prueba recorre todas las firmas que puede
-  ejecutar la app.
+- `sucursal_id not null` en todas las tablas de operación, con referencia a `sucursales`, sin valor por
+  omisión: las filas existentes pasan a la sucursal inicial y cada función indica la de su validador.
+- Llaves locales por sucursal: `(sucursal_id, id)` en mesas, carnes y bebidas; `sucursal_id` en
+  configuración y cocina activa (se retira su `id = 1`).
 - Únicos `(sucursal_id, id)` y referencias compuestas diferidas: `tickets → mesas`, `tickets → cortes`,
-  `cobros → cortes`, `gastos → cortes`, `cocina_hechos → tickets` y `sesiones → usuarios`.
-- `tickets.estado_cobro`, calculado a partir de `cobro_id` durante la transición (las funciones
-  actuales lo mantienen sin cambios); `tickets.folio_periodo` y `folios`, puestos al día en cada
-  ejecución mientras `enviar_comanda` siga usando la identidad de `tickets.folio`.
+  `cobros → cortes`, `gastos → cortes`, `cocina_hechos → tickets`, `sesiones → usuarios` y
+  `sesiones → dispositivos`.
+- `tickets.estado_cobro`, calculado a partir de `cobro_id` al agregarse (conserva el estado de lo que ya
+  existe); `tickets.folio_periodo` y `folios`, que parten del folio más alto que ya existe.
 - Invariante de propietario (MODELO.md §3.0) con disparadores diferidos que **escriben** la fila de la
   cuenta, probado con bajas simultáneas en READ COMMITTED, REPEATABLE READ y SERIALIZABLE.
-- Se dejan para el paso que las usa: las columnas de seguridad de `sesiones` y `usuarios` (paso 3),
-  `bitacora.cuenta_id` (paso 4, acciones de cuenta) y la llave `(sucursal_id, id)` de mesas, carnes y
-  bebidas (paso 2, junto con los `on conflict` de sus funciones).
+- Se dejan para el paso que las usa: las columnas de seguridad de `sesiones` y `usuarios` (paso 3) y
+  `bitacora.cuenta_id` (paso 4, acciones de cuenta).
 
 ### 4.2 Cuenta y sucursal inicial
 
@@ -118,11 +117,11 @@ varias veces. Ninguna función de la API cambia.
 | Dato | Regla |
 |---|---|
 | `sucursal_id` | La sucursal inicial en todas las filas de operación |
-| `tickets.estado_cobro` | `cobro_id` nulo → `pendiente`; `previo` → `previo`; `no_cobrado` → `no_cobrado`; otro valor → `cobrado`. En la expansión es una columna calculada. En la contracción (`supabase/multinegocio-contraer-estado-cobro.sql`) deja de calcularse conservando sus valores y **después** `cobro_id` pasa a nulo en `previo` y `no_cobrado`. El orden importa: al revés, esas comandas quedarían como `pendiente` (la prueba lo comprueba) |
+| `tickets.estado_cobro` | `cobro_id` nulo → `pendiente`; `previo` → `previo`; `no_cobrado` → `no_cobrado`; otro valor → `cobrado`. Al agregarse es una columna calculada; la contracción (§4.5) la deja de calcular conservando sus valores y **después** pone `cobro_id` en nulo en `previo` y `no_cobrado`. El orden importa: al revés, esas comandas quedarían como `pendiente` (la prueba lo comprueba) |
 | `folios` | Periodo `continuo` con `ultimo = max(folio)`; `tickets.folio_periodo = 'continuo'` |
-| `config`, `cocina_sesion` | La fila `id = 1` pasa a ser la de la sucursal inicial |
+| `config`, `cocina_sesion` | La fila `id = 1` pasa a ser la de la sucursal inicial; su llave pasa a ser `sucursal_id` |
 | `intentos` | No se migran contadores: se registra en la bitácora cualquier bloqueo vigente y se empieza de cero con las tablas nuevas |
-| `sesiones` | Todas se revocan: la política nueva exige iniciar sesión desde un dispositivo vinculado |
+| `sesiones` | Se revocan todas las que no tienen equipo (implementado): hay que volver a entrar desde un equipo vinculado |
 | `usuarios` | `politica_pin = 0` (heredada): al entrar desde un dispositivo vinculado, el PIN anterior solo sirve para elegir uno nuevo de 6 a 8 dígitos |
 | `bitacora` | `cuenta_id` y `sucursal_id` de la inicial |
 
@@ -136,21 +135,24 @@ está al final de su sección en `supabase-schema.sql`):
   permiten explícitamente al comparar (`DIFERENCIAS_DEL_CAMBIO` en `scripts/huella.mjs`):
   - `abierto.sesiones_vigentes` pasa a 0 al cambiar (las sesiones no se comparan por fila);
   - los contadores de intentos se reinician (tampoco se comparan por fila).
-  La expansión sola no tiene ninguna diferencia permitida.
+  El ensayo actual permite solo la primera, y comprueba que sin permitirla la comparación la señala.
 - **Referencias:** las compuestas se crean sin errores, y por lo tanto no hay filas de una sucursal
   que apunten a otra.
 - **Folios:** son únicos por sucursal y periodo, y el siguiente folio es `max + 1`.
 
 ### 4.5 Contraer
 
-- `sucursal_id not null`; llaves y únicos por sucursal; referencias compuestas (ver MODELO.md §2).
-- Reemplazar las funciones por las versiones con sus validadores (`_dispositivo`, `_contexto`; MODELO.md
-  §3) y retirar las antiguas sin contexto.
-- Estado de cobro: `supabase/multinegocio-contraer-estado-cobro.sql`. Se niega a correr mientras
-  alguna función o índice dependa del significado antiguo de `cobro_id` (detectado con
-  `_usa_cobro_id_heredado`: valores especiales comparados con `cobro_id`, o `cobro_id is null` como
+Implementado (paso 2) en `supabase-schema.sql`:
+
+- Todas las funciones pasan a sus validadores (`_dispositivo`, `_contexto`; MODELO.md §3) y se retiran
+  las antiguas sin contexto (`_sesion`, `_exigir`, las auxiliares sin sucursal, `cambiar_estado_ticket`
+  y `archivar_ticket`).
+- Estado de cobro: sección «CONTRACCIÓN DEL ESTADO DE COBRO», después de las funciones. Aborta todo el
+  archivo si alguna función o índice depende todavía del significado antiguo de `cobro_id` (detectado
+  con `_usa_cobro_id_heredado`: valores especiales comparados con `cobro_id`, o `cobro_id is null` como
   «falta cobrar»). Acepta el uso moderno: `estado_cobro` con esos valores y `cobro_id` solo para el
-  cobro real.
+  cobro real. Después, `cobro_id` existe si y solo si la comanda está cobrada y apunta a un cobro de su
+  misma sucursal.
   Desde aquí la app anterior deja de funcionar, por eso va junto con la publicación de la nueva
   (§5).
 

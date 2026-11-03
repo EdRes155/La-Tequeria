@@ -1,59 +1,15 @@
-// Pruebas del esquema v3 contra un PostgreSQL real (no se conecta a producción).
+// Pruebas del esquema contra un PostgreSQL real (no se conecta a producción).
 // Requiere TEST_DATABASE_URL apuntando a una base administrativa, p. ej.
 //   TEST_DATABASE_URL=postgres://postgres@localhost:5432/postgres npm run test:sql
-// Cada bloque crea bases desechables, imita los roles de Supabase y llama a la API como "anon".
+// Cada bloque crea bases desechables, imita los roles de Supabase y llama a la API como un equipo
+// vinculado a la sucursal (rol authenticated con su JWT), igual que el navegador vía PostgREST.
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import fs from "node:fs";
-import path from "node:path";
-import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
+import { URL_ADMIN, ESQUEMA, STUB, leer, crearBase as crear, conectar, cerrarTodo, falla } from "./util.js";
 
-const URL_ADMIN = process.env.TEST_DATABASE_URL;
-if (URL_ADMIN) exigirServidorDesechable(URL_ADMIN);
 const d = URL_ADMIN ? describe : describe.skip;
-const raiz = path.resolve(import.meta.dirname, "../..");
-const leer = (f) => fs.readFileSync(path.join(raiz, f), "utf8");
-const ESQUEMA = leer("supabase-schema.sql");
-const STUB = leer("tests/sql/supabase-stub.sql");
 const V2 = leer("tests/sql/esquema-v2.sql");
 const DATOS_V2 = leer("tests/sql/datos-v2.sql");
-
-const bases = [];
-const clientes = [];
-
-async function crearBase(nombre, scripts) {
-  const admin = clienteDesechable(URL_ADMIN);
-  await admin.connect();
-  await admin.query(`drop database if exists ${nombreDesechable(nombre)} with (force)`);
-  await admin.query(`create database ${nombre}`);
-  await admin.end();
-  bases.push(nombre);
-  const c = await conectar(nombre, false);
-  for (const s of scripts) await c.query(s);
-  return nombre;
-}
-
-// Cliente de la API: entra como el rol "anon", igual que el navegador vía PostgREST.
-async function conectar(nombre, comoAnon = true, ip = "203.0.113.10") {
-  const c = clienteDesechable(URL_ADMIN, nombre);
-  await c.connect();
-  clientes.push(c);
-  if (comoAnon) {
-    await c.query(`select set_config('request.headers', $1, false)`, [JSON.stringify({ "x-forwarded-for": ip })]);
-    await c.query("set role anon");
-  }
-  c.rpc = async (fn, args = {}) => {
-    const ks = Object.keys(args);
-    const sql = `select public.${fn}(${ks.map((k, i) => `${k} => $${i + 1}`).join(", ")}) as r`;
-    const { rows } = await c.query(sql, ks.map((k) => args[k]));
-    return rows[0].r;
-  };
-  return c;
-}
-
-async function falla(promesa) {
-  try { await promesa; } catch (e) { return e; }
-  throw new Error("se esperaba un error");
-}
+const crearBase = async (nombre, scripts) => { await crear(nombre, scripts); return nombre; };
 
 async function entrar(c, id, pin, dispositivo) {
   const r = await c.rpc("login", { p_id: id, p_pin: pin, p_dispositivo: dispositivo || null });
@@ -68,14 +24,7 @@ const ticket = (id, extra = {}) => ({
   extras: [], ...extra,
 });
 
-afterAll(async () => {
-  for (const c of clientes) await c.end().catch(() => {});
-  if (!URL_ADMIN) return;
-  const admin = clienteDesechable(URL_ADMIN);
-  await admin.connect();
-  for (const b of bases) await admin.query(`drop database if exists ${nombreDesechable(b)} with (force)`).catch(() => {});
-  await admin.end();
-});
+afterAll(cerrarTodo);
 
 d("instalación nueva", () => {
   let base, api;
@@ -115,15 +64,22 @@ d("actualización desde v2", () => {
     sql = await conectar(base, false);
   });
 
-  it("anon ya no puede leer ni escribir tablas ni usar la API vieja", async () => {
-    for (const t of ["config", "carnes", "bebidas", "mesas", "tickets", "cortes", "gastos", "usuarios", "cocina_sesion", "sesiones", "bitacora"]) {
+  it("la app no puede leer ni escribir tablas ni usar la API vieja, y anon no ejecuta nada", async () => {
+    for (const t of ["config", "carnes", "bebidas", "mesas", "tickets", "cortes", "gastos", "usuarios", "cocina_sesion", "sesiones",
+                     "bitacora", "cuentas", "sucursales", "dispositivos"]) {
       expect((await falla(api.query(`select * from public.${t} limit 1`))).message).toMatch(/permission denied/);
     }
     expect((await falla(api.query("update public.bebidas set cantidad = 0"))).message).toMatch(/permission denied/);
     expect((await falla(api.query("delete from public.tickets"))).message).toMatch(/permission denied/);
     expect((await falla(api.rpc("es_admin_pin", { p_pin: "1234" }))).message).toMatch(/does not exist/);
-    expect((await falla(api.rpc("_sesion", { p_token: "x" }))).message).toMatch(/permission denied/);
+    expect((await falla(api.rpc("cambiar_estado_ticket", { p_token: "x", p_id: "x", p_estado: "listo" }))).message).toMatch(/does not exist/);
+    expect((await falla(api.rpc("_contexto", { p_token: "x" }))).message).toMatch(/permission denied/);
     expect((await falla(api.rpc("estado", { p_token: "0".repeat(64) }))).message).toBe("SESION");
+    const anon = await conectar(base, false);
+    await anon.query("set role anon");
+    for (const f of ["usuarios_login()", "estado('x')", "login('u1', '1234')"]) {
+      expect((await falla(anon.query(`select public.${f}`))).message).toMatch(/permission denied/);
+    }
   });
 
   it("conserva datos y migra el PIN SHA-256 a bcrypt al entrar", async () => {
@@ -166,7 +122,7 @@ d("actualización desde v2", () => {
     const r = await otra.rpc("login", { p_id: "u2", p_pin: "1111" });
     expect(r.error).toBe("bloqueado");
     expect(r.espera).toBeGreaterThan(200);
-    await sql.query("update intentos set bloqueado_hasta = now() - interval '1 second' where clave = 'u:u2'");
+    await sql.query("update intentos set bloqueado_hasta = now() - interval '1 second' where clave like 'u:%:u2'");
     expect((await otra.rpc("login", { p_id: "u2", p_pin: "1111" })).ok).toBe(true);
   });
 
@@ -243,7 +199,7 @@ d("operación", () => {
     expect(rows[0]).toEqual({ e: "libre", n: 0, c: 1 });
   });
 
-  it("dos dispositivos que venden la misma bebida a la vez descuentan ambas ventas", async () => {
+  it("dos ventas simultáneas de la misma bebida descuentan ambas", async () => {
     await sql.query("update bebidas set cantidad = 10 where id = 'jamaica'");
     const a = await conectar(base), b = await conectar(base);
     const t = (id) => ticket(id, { ordenes: [{ id: "o1", items: [item("beb-jamaica", 1)] }] });
@@ -367,7 +323,7 @@ d("operación", () => {
     // ya cobrada, la mesa sí se libera; preparar la comanda también la marca como recibida
     const t2 = ticket("estatus-mesa7-2", { tipo: "aqui", mesaId: 7 });
     await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: t2 });
-    await api.rpc("cambiar_estado_ticket", { p_token: cocina, p_id: t2.id, p_estado: "preparando" });
+    await api.rpc("mover_tickets", { p_token: cocina, p_tickets: JSON.stringify([{ id: t2.id, estado: "pendiente" }]), p_hacia: "preparando" });
     est = await ver();
     expect(est.cocina.find((x) => x.id === t2.id)).toMatchObject({ estado: "preparando", recibido: expect.any(String) });
     await api.rpc("cobrar", { p_token: mesero, p_id: "cobro-mesa7-a", p_tickets: [t2.id], p_metodo: "tarjeta" });
@@ -430,28 +386,33 @@ d("operación", () => {
 
   it("solo una cocina activa; la otra entra cuando la primera deja de latir", async () => {
     const { rows } = await sql.query("select id from usuarios where rol = 'cocinero'");
-    const otra = await api.rpc("login", { p_id: rows[0].id, p_pin: "6284", p_dispositivo: "tablet-2" });
+    const tablet2 = await conectar(base, true, undefined, "tablet-2");
+    const otra = await tablet2.rpc("login", { p_id: rows[0].id, p_pin: "6284" });
     expect(otra.error).toBe("cocina_ocupada");
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);
     await sql.query("update cocina_sesion set actualizado = now() - interval '1 minute'");
-    const t2 = await entrar(api, rows[0].id, "6284", "tablet-2");
+    const t2 = await entrar(tablet2, rows[0].id, "6284");
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(false);
-    expect(await api.rpc("latido_cocina", { p_token: t2 })).toBe(true);
+    expect(await tablet2.rpc("latido_cocina", { p_token: t2 })).toBe(true);
+    // el token de un equipo no sirve desde otro
+    expect((await falla(api.rpc("latido_cocina", { p_token: t2 }))).message).toBe("SESION");
   });
 
   it("varias pantallas de cocina comparten lo tachado y un cambio atrasado no pisa uno nuevo", async () => {
     const { rows } = await sql.query("select id from usuarios where rol = 'cocinero'");
     await api.rpc("fijar_ajuste", { p_token: admin, p_clave: "variasCocinas", p_valor: "true" });
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);   // libera la exclusividad
-    const pantalla2 = await entrar(api, rows[0].id, "6284", "tablet-3");
-    expect(await api.rpc("latido_cocina", { p_token: pantalla2 })).toBe(true);
+    const tablet3 = await conectar(base, true, undefined, "tablet-3");
+    const pantalla2 = await entrar(tablet3, rows[0].id, "6284");
+    const de = (tk) => (tk === pantalla2 ? tablet3 : api);   // cada token se usa desde su equipo
+    expect(await tablet3.rpc("latido_cocina", { p_token: pantalla2 })).toBe(true);
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);
 
     const orden = [{ id: "o1", items: [item("taco-pastor", 2), item("gringa-pastor", 1)] }];
     await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: ticket("monitores-1", { ordenes: orden }) });
     await api.rpc("enviar_comanda", { p_token: mesero, p_ticket: ticket("monitores-2", { ordenes: orden }) });
-    const ver = async (tk, id = "monitores-1") => (await api.rpc("estado", { p_token: tk, p_partes: ["cocina"] })).cocina.find((t) => t.id === id);
-    const hecho = (tk, linea, h, id = "monitores-1") => api.rpc("marcar_hecho", { p_token: tk, p_ticket: id, p_linea: linea, p_hecho: h });
+    const ver = async (tk, id = "monitores-1") => (await de(tk).rpc("estado", { p_token: tk, p_partes: ["cocina"] })).cocina.find((t) => t.id === id);
+    const hecho = (tk, linea, h, id = "monitores-1") => de(tk).rpc("marcar_hecho", { p_token: tk, p_ticket: id, p_linea: linea, p_hecho: h });
     expect((await falla(hecho(mesero, "o1|taco-pastor", true))).message).toBe("PERMISO");
     expect((await falla(hecho(cocina, "sin-separador", true))).message).toBe("DATOS");
     await hecho(cocina, "o1|taco-pastor", true);
@@ -462,7 +423,7 @@ d("operación", () => {
 
     // se mueve solo lo que sigue como lo vio la pantalla
     const vista = (id) => JSON.stringify([{ id, estado: "pendiente" }]);
-    const mover = (tk, id, hacia) => api.rpc("mover_tickets", { p_token: tk, p_tickets: vista(id), p_hacia: hacia });
+    const mover = (tk, id, hacia) => de(tk).rpc("mover_tickets", { p_token: tk, p_tickets: vista(id), p_hacia: hacia });
     expect(await mover(cocina, "monitores-1", "listo")).toEqual({ movidos: 1, conflictos: [] });
     expect(await mover(pantalla2, "monitores-1", "preparando")).toEqual({ movidos: 0, conflictos: ["monitores-1"] });
     expect(await mover(pantalla2, "monitores-1", "listo")).toEqual({ movidos: 0, conflictos: [] });   // ya estaba así
@@ -470,21 +431,23 @@ d("operación", () => {
     expect((await falla(mover(mesero, "monitores-1", "listo"))).message).toBe("PERMISO");
 
     // dos pantallas a la vez sobre la misma comanda: la segunda espera y ve el cambio de la primera
-    const a = await conectar(base), b = await conectar(base);
+    const a = await conectar(base), b = await conectar(base, true, undefined, "tablet-3");
     await a.query("begin");
     await a.rpc("mover_tickets", { p_token: cocina, p_tickets: vista("monitores-2"), p_hacia: "listo" });
     const otra = b.rpc("mover_tickets", { p_token: pantalla2, p_tickets: vista("monitores-2"), p_hacia: "preparando" });
     await a.query("commit");
     expect(await otra).toEqual({ movidos: 0, conflictos: ["monitores-2"] });
 
-    expect(await api.rpc("archivar_tickets", { p_token: pantalla2, p_ids: ["monitores-1", "monitores-2", "no-existe"] })).toBe(2);
+    // una lista con una comanda que no existe se rechaza entera
+    expect((await falla(tablet3.rpc("archivar_tickets", { p_token: pantalla2, p_ids: ["monitores-1", "monitores-2", "no-existe"] }))).message).toBe("TICKET");
+    expect(await tablet3.rpc("archivar_tickets", { p_token: pantalla2, p_ids: ["monitores-1", "monitores-2"] })).toBe(2);
     expect(await api.rpc("archivar_tickets", { p_token: cocina, p_ids: ["monitores-1"] })).toBe(0);
     expect(await ver(cocina)).toBeUndefined();
     expect((await falla(hecho(cocina, "o1|taco-pastor", true))).message).toBe("TICKET");
 
     // de vuelta a una sola cocina: la primera pantalla que late se queda y las demás salen
     await api.rpc("fijar_ajuste", { p_token: admin, p_clave: "variasCocinas", p_valor: "false" });
-    expect(await api.rpc("latido_cocina", { p_token: pantalla2 })).toBe(true);
+    expect(await tablet3.rpc("latido_cocina", { p_token: pantalla2 })).toBe(true);
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(false);
   });
 

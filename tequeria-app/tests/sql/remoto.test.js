@@ -1,9 +1,11 @@
 // Integra el adaptador remoto (src/store.js) con el esquema real: el cliente de Supabase se
-// sustituye por uno que ejecuta cada RPC en PostgreSQL como "anon", igual que PostgREST.
+// sustituye por uno que ejecuta cada RPC en PostgreSQL como un equipo vinculado (rol authenticated
+// con su JWT), igual que PostgREST.
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
+import { activarCuentas, vincularDePrueba, comoEquipo } from "./util.js";
 
 const URL_ADMIN = process.env.TEST_DATABASE_URL;
 if (URL_ADMIN) exigirServidorDesechable(URL_ADMIN);
@@ -22,7 +24,12 @@ vi.mock("../../src/supabaseClient.js", () => ({
       const ks = Object.keys(args);
       try {
         const { rows } = await conexion.query(`select public.${fn}(${ks.map((k, i) => `${k} => $${i + 1}`).join(", ")}) as r`,
-          ks.map((k) => (args[k] !== null && typeof args[k] === "object" && !Array.isArray(args[k]) ? JSON.stringify(args[k]) : args[k])));
+          // como PostgREST: objetos y listas de objetos van como JSON; listas simples, como arreglos
+          ks.map((k) => {
+            const v = args[k];
+            const json = v !== null && typeof v === "object" && (!Array.isArray(v) || v.some((x) => x !== null && typeof x === "object"));
+            return json ? JSON.stringify(v) : v;
+          }));
         return { data: rows[0].r, error: null, status: 200 };
       } catch (e) {
         const code = e.code === "42883" ? "PGRST202" : e.code;
@@ -47,10 +54,12 @@ d("adaptador remoto contra el esquema real", () => {
     await sql.query(fs.readFileSync(path.join(raiz, "tests/sql/supabase-stub.sql"), "utf8"));
     await sql.query(fs.readFileSync(path.join(raiz, "supabase-schema.sql"), "utf8"));
     await sql.query("select public.crear_admin_inicial('Ana', '8642')");
+    await activarCuentas(sql);
+    const { authUid } = await vincularDePrueba(sql, { nombre: "caja" });
     await sql.end();
     conexion = clienteDesechable(URL_ADMIN, BASE);
     await conexion.connect();
-    await conexion.query("set role anon");
+    await comoEquipo(conexion, authUid);
     ({ api, ErrorApi } = await import("../../src/store.js"));
   });
   afterAll(async () => {
@@ -88,7 +97,7 @@ d("adaptador remoto contra el esquema real", () => {
     expect(e.codigo).toBe("MESA_OCUPADA");
     expect(e.message).toMatch(/orden extra/);
 
-    await a.estadoTicket("remoto-envio-1", "listo");
+    expect(await a.moverTickets([{ id: "remoto-envio-1", estado: "pendiente" }], "listo")).toEqual({ movidos: 1, conflictos: [] });
     await a.reenviar("remoto-reenvio-1", 1);
     const est = await api.cargar();
     expect(est.yo).toMatchObject({ nombre: "Ana", rol: "admin" });

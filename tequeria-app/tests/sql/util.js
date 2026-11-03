@@ -1,5 +1,5 @@
-// Utilidades compartidas por las pruebas de SQL: bases desechables, cliente que llama como «anon»
-// (igual que PostgREST) y un reloj controlado para vencimientos y bloqueos.
+// Utilidades compartidas por las pruebas de SQL: bases desechables, cliente que llama a la API como un
+// equipo vinculado (rol authenticated con su JWT, igual que PostgREST) y un reloj controlado.
 import fs from "node:fs";
 import path from "node:path";
 import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
@@ -12,8 +12,50 @@ export const ESQUEMA = leer("supabase-schema.sql");
 export const STUB = leer("tests/sql/supabase-stub.sql");
 
 const bases = [], clientes = [];
+const equipos = new Map();   // «base|etiqueta» → identidad de Supabase del equipo de prueba
+
+// Activa las cuentas pendientes con un propietario de prueba, para que sus equipos puedan operar
+export async function activarCuentas(sql) {
+  await sql.query(`do $$ declare c record; u uuid; begin
+    for c in select id from public.cuentas where estado = 'pendiente_activacion' loop
+      insert into auth.users (email, email_confirmed_at) values ('propietario-' || c.id || '@ejemplo.invalid', now()) returning id into u;
+      insert into public.membresias (cuenta_id, auth_user_id, rol) values (c.id, u, 'propietario');
+      update public.cuentas set estado = 'activa', activada_en = now() where id = c.id;
+    end loop; end $$`);
+}
+
+// Equipo vinculado a una sucursal sin pasar por códigos (la vinculación real es el paso 4).
+// Sin sucursal, usa la única que haya.
+export async function vincularDePrueba(sql, { sucursal = null, nombre = "caja", monitor = false } = {}) {
+  const { rows } = await sql.query(`with u as (insert into auth.users (is_anonymous) values (true) returning id)
+    insert into public.dispositivos (sucursal_id, auth_user_id, nombre, monitor_cocina)
+    select coalesce($1::uuid, (select id from public.sucursales)), u.id, $2, $3 from u
+    returning auth_user_id, id`, [sucursal, nombre, monitor]);
+  return { authUid: rows[0].auth_user_id, dispositivoId: rows[0].id };
+}
+
+// La conexión actúa como ese equipo: rol authenticated con su identidad en el JWT
+export async function comoEquipo(c, authUid) {
+  await c.query("select set_config('request.jwt.claims', $1, false)",
+    [JSON.stringify({ sub: authUid, role: "authenticated", is_anonymous: true })]);
+  await c.query("set role authenticated");
+}
+
+async function equipoDe(nombre, etiqueta) {
+  const k = nombre + "|" + etiqueta;
+  if (!equipos.has(k)) {
+    const admin = clienteDesechable(URL_ADMIN, nombre);
+    await admin.connect();
+    try {
+      await activarCuentas(admin);
+      equipos.set(k, (await vincularDePrueba(admin, { nombre: etiqueta })).authUid);
+    } finally { await admin.end(); }
+  }
+  return equipos.get(k);
+}
 
 export async function crearBase(nombre, scripts) {
+  for (const k of [...equipos.keys()]) if (k.startsWith(nombre + "|")) equipos.delete(k);
   const admin = clienteDesechable(URL_ADMIN);
   await admin.connect();
   await admin.query(`drop database if exists ${nombreDesechable(nombre)} with (force)`);
@@ -25,13 +67,20 @@ export async function crearBase(nombre, scripts) {
   return c;
 }
 
-export async function conectar(nombre, comoAnon = true, ip = "203.0.113.10") {
+// Cliente de la API: entra como el equipo «equipo» (se vincula la primera vez) de la única sucursal.
+// Con comoApi = false es una conexión administrativa (para preparar o revisar datos).
+export async function conectar(nombre, comoApi = true, ip = "203.0.113.10", equipo = "caja") {
+  return conectarComo(nombre, comoApi ? await equipoDe(nombre, equipo) : null, ip);
+}
+
+// Cliente de la API con una identidad de Supabase concreta (authUid); sin ella, conexión administrativa
+export async function conectarComo(nombre, authUid, ip = "203.0.113.10") {
   const c = clienteDesechable(URL_ADMIN, nombre);
   await c.connect();
   clientes.push(c);
-  if (comoAnon) {
+  if (authUid) {
     await c.query(`select set_config('request.headers', $1, false)`, [JSON.stringify({ "x-forwarded-for": ip })]);
-    await c.query("set role anon");
+    await comoEquipo(c, authUid);
   }
   c.rpc = async (fn, args = {}) => {
     const ks = Object.keys(args);
@@ -46,7 +95,10 @@ export async function cerrarTodo() {
   if (!URL_ADMIN) return;
   const admin = clienteDesechable(URL_ADMIN);
   await admin.connect();
-  for (const b of bases.splice(0)) await admin.query(`drop database if exists ${nombreDesechable(b)} with (force)`).catch(() => {});
+  for (const b of bases.splice(0)) {
+    await admin.query(`drop database if exists ${nombreDesechable(b)} with (force)`).catch(() => {});
+    for (const k of [...equipos.keys()]) if (k.startsWith(b + "|")) equipos.delete(k);
+  }
   await admin.end();
 }
 
