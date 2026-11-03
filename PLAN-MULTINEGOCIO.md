@@ -1,6 +1,6 @@
 # Plan: La Tequería para varias taquerías
 
-Versión 2, 3 de noviembre de 2026. Primera versión: 31 de octubre de 2026.
+Versión 2.1, 3 de noviembre de 2026. Primera versión: 31 de octubre de 2026.
 Estado: **plan aprobado, sin ejecutar.** Nada de esto está implementado todavía.
 
 Esta versión incorpora la [revisión de factibilidad](REVISION-PLAN-MULTINEGOCIO.md) y puntos
@@ -65,15 +65,39 @@ real antes de prometer un número de clientes por plan.
   proceso propio.
 - «Una sola cocina activa» ya es configurable (`variasCocinas`); se corrigió en el paso 2.
 
-## Decisiones pendientes (antes de programar)
+En la versión 2.1:
 
-1. **Qué es una «taquería»:** la empresa o cada sucursal. Si es la empresa, decidir cómo se manejan
-   varias sucursales; si es la sucursal, si hay inventario o reportes compartidos entre ellas.
-2. **Dueños:** si un dueño puede tener varias taquerías y si puede haber más de un dueño por
-   taquería. Distinguir al **dueño** (cuenta, suscripción, alta de dispositivos) del rol operativo
-   **administrador** (precios, usuarios, corte).
-3. **Dispositivos:** cómo se vinculan (aprobación del dueño), con qué credencial, cómo se revocan
-   y cómo se recupera un equipo perdido o un navegador borrado.
+- El respaldo antiguo y `app_state` no se borran al inicio: primero se confirma que están
+  cerrados, se verifica una copia recuperable y se ensaya la migración; la eliminación es lo
+  último.
+- Tiempo real: solo el servidor publica avisos, las políticas separan quién escucha, y se
+  comprueba qué pasa con las conexiones abiertas de un dispositivo revocado.
+- Se tomaron tres decisiones: cuenta con sucursales, varios dueños por cuenta con roles, y
+  vinculación de dispositivos con un código de un solo uso.
+
+## Decisiones
+
+### Tomadas (3 de noviembre de 2026)
+
+1. **Cuenta con sucursales.**
+   - La **cuenta** es la empresa: agrupa sus sucursales, tiene la suscripción y a los dueños.
+   - La **sucursal** es la unidad que separa los datos de operación: mesas, cocina, folio, corte,
+     inventario, menú, personal y dispositivos. **En este plan, «taquería» quiere decir
+     sucursal.**
+   - En el piloto cada cuenta tendrá una sola sucursal, pero el modelo ya permite varias. Los
+     reportes conjuntos y el inventario compartido entre sucursales quedan para después.
+2. **Varios dueños por cuenta, con roles.**
+   - Membresías entre personas (Supabase Auth, Google o correo) y cuentas, con rol:
+     - **encargado:** aprueba y revoca dispositivos, ve reportes;
+     - **propietario:** todo lo del encargado, más la suscripción e invitar o quitar miembros.
+   - Una persona puede pertenecer a varias cuentas. Siempre queda al menos un propietario, como
+     hoy pasa con el último administrador.
+   - Los dueños no son el rol operativo **administrador** del personal, que sigue entrando con su
+     PIN en la sucursal (precios, usuarios, corte).
+3. **Vinculación de dispositivos con un código de un solo uso** (detalle en el paso 3).
+
+### Pendientes
+
 4. **Segunda taquería del piloto:** cuál será y si su menú cabe en la plantilla actual.
 5. **Mínimos de seguridad que ningún cliente puede bajar:** largo del PIN, límites de intentos y
    duración de la sesión.
@@ -105,13 +129,14 @@ El riesgo principal es que un error muestre o cambie datos de otra taquería. Se
 
 ## Acceso
 
-- **Modelo:** identidad del dueño → membresía validada → dispositivo vinculado a una taquería →
-  PIN del operador → sesión de esa taquería.
-- **Dueño:** entra con Google o correo (Supabase Auth). Crea su taquería, ve su suscripción, da de
-  alta a su personal y aprueba los dispositivos.
+- **Modelo:** identidad del dueño → membresía en la cuenta con su rol → dispositivo vinculado a una
+  sucursal → PIN del operador → sesión de esa sucursal.
+- **Dueños:** entran con Google o correo (Supabase Auth). El propietario crea la cuenta y sus
+  sucursales, ve la suscripción e invita a otros miembros. Propietarios y encargados dan de alta
+  al personal y aprueban los dispositivos.
 - **Dispositivos:**
-  - El dueño vincula cada tablet o celular. Después el personal entra como hoy, con su nombre y su
-    PIN, sin correo.
+  - Se vinculan con un código de un solo uso (paso 3). Después el personal entra como hoy, con su
+    nombre y su PIN, sin correo.
   - El identificador que hoy guarda `store.js` en el navegador no es una credencial. La
     vinculación necesita una credencial verificable, que se pueda revocar, y un camino de
     recuperación.
@@ -230,12 +255,27 @@ Según lo que pidan los clientes:
 
 ### 3. Registro, dueños y dispositivos
 
-- Registro del dueño con Google o correo (Supabase Auth) y alta de la taquería. Sustituye a
-  `crear_admin_inicial`, que hoy solo se ejecuta desde el SQL Editor.
-- Membresías entre dueños y taquerías, según las decisiones pendientes.
-- Vinculación de dispositivos con aprobación del dueño, revocación y recuperación, y una sesión
-  de Supabase propia por dispositivo.
-- Pantalla de entrada limitada al personal de la taquería del dispositivo.
+- **Registro:**
+  - El dueño se registra con Google o correo (Supabase Auth) y crea la cuenta y su primera
+    sucursal, con su primer administrador del personal.
+  - Sustituye a `crear_admin_inicial`, que hoy solo se ejecuta desde el SQL Editor.
+- **Membresías:** propietario y encargado, invitaciones por correo, y el último propietario no se
+  puede quitar.
+- **Vinculación con un código de un solo uso:**
+  1. En su panel, un propietario o encargado elige la sucursal y genera un código de 8
+     caracteres que vence en 10 minutos.
+  2. En el dispositivo nuevo se escribe ese código.
+  3. El servidor lo consume una sola vez: lo guarda como hash, rechaza códigos vencidos o ya
+     usados, y limita los intentos por conexión.
+  4. El dispositivo recibe su propia credencial: una sesión de Supabase ligada a esa sucursal y a
+     ese registro de dispositivo, que también sirve para los canales privados (paso 4).
+- **Panel de dispositivos:**
+  - Lista de equipos con nombre, sucursal, quién lo aprobó y última actividad.
+  - **Revocar** surte efecto de inmediato en las funciones de la app, y en el tiempo real dentro
+    del tiempo máximo medido (paso 4).
+- **Recuperación:** si se pierde un equipo o se borra el navegador, se revoca el registro anterior
+  y se vincula de nuevo con otro código. No hay forma de «recuperar» la credencial anterior.
+- **Pantalla de entrada:** muestra solo el personal de la sucursal del dispositivo.
 
 ### 4. Tiempo real y datos del navegador
 
@@ -246,7 +286,25 @@ Según lo que pidan los clientes:
     que piden la sesión de Supabase del dispositivo. El token de las funciones de la app no
     sirve para eso.
   - Hoy, además, cualquiera con la llave pública puede mandar avisos falsos al canal y hacer que
-    todas las pantallas recarguen. Los canales privados lo resuelven.
+    todas las pantallas recarguen.
+- **Quién escucha y quién publica.** Las políticas de los canales privados separan las dos cosas:
+  - Escuchar: solo dispositivos con sesión vigente, no revocada, de la misma taquería que el
+    canal.
+  - Publicar: ningún dispositivo. Los avisos operativos los publica únicamente el servidor (los
+    disparadores de las tablas), así que no hay política de publicación para los clientes.
+  - Los avisos siguen sin llevar datos: solo dicen qué parte cambió, y cada pantalla pide los
+    datos por las funciones de la app, que ya comprueban sesión y taquería.
+- **Dispositivo revocado con la conexión abierta:**
+  - Hay que **comprobar** qué pasa. Según la documentación, el permiso del canal se revisa al
+    conectarse y no necesariamente en cada mensaje, así que la conexión podría seguir recibiendo
+    avisos un tiempo.
+  - Mitigaciones previstas:
+    - el dispositivo no puede leer ni escribir datos desde el momento de la revocación, porque
+      las funciones lo rechazan;
+    - su sesión de Supabase dura poco (minutos) y no se puede renovar tras la revocación;
+    - al renovarla, la app vuelve a unirse al canal y el permiso se revisa de nuevo.
+  - El tiempo máximo en que un dispositivo revocado aún recibe avisos (sin datos) se mide y se
+    documenta como parte del piloto.
 - **Datos del navegador:**
   - Sesión, borradores, estación de impresión y demás preferencias guardadas llevan la taquería,
     o se limpian al cambiar de taquería.
@@ -264,9 +322,23 @@ Según lo que pidan los clientes:
 
 ### 6. Migración de La Tequería (se diseña al principio, se ejecuta al final)
 
-- **Limpieza previa:**
-  - borrar el respaldo `respaldo_v2_20261030`, que guarda hashes de PIN viejos y domicilios;
-  - quitar la tabla vieja `app_state`.
+- **Respaldo antiguo y `app_state`: se borran al final, no al inicio.** El respaldo
+  `respaldo_v2_20261030` guarda hashes de PIN viejos y domicilios; `app_state` es la tabla de la
+  versión 1. Orden:
+  1. **Confirmar que están cerrados** (revisado el 3 de noviembre de 2026):
+     - el esquema del respaldo solo lo puede usar el propietario de la base, sin acceso para la
+       app ni para `service_role`;
+     - `app_state` tiene RLS activa y ningún permiso para la app; conserva 3 políticas antiguas
+       que hoy no tienen efecto.
+     - Se vuelve a comprobar justo antes de empezar.
+  2. **Verificar una copia recuperable** de toda la base: restaurarla en una instancia aparte y
+     comprobar que se puede leer, no solo que existe.
+  3. **Ensayar la migración** sobre esa copia (siguiente punto) y hacer la migración real.
+  4. **Eliminación controlada:**
+     - cuando la migración real esté validada y haya pasado un periodo de observación acordado;
+     - con la copia verificada a la mano;
+     - borrando también las políticas antiguas de `app_state`;
+     - dejando registro de qué se borró y cuándo.
 - **Ensayo en una copia desechable:**
   1. Crear la taquería inicial.
   2. Asignarle todos los registros.
@@ -297,7 +369,7 @@ Según lo que pidan los clientes:
 
 ## Orden de trabajo
 
-1. **Cerrar las decisiones pendientes.**
+1. **Cerrar las decisiones pendientes** (quedan la segunda taquería y los mínimos de seguridad).
 2. **Preparar pruebas y migración:** ambiente de pruebas, copia desechable de los datos e
    inventario de funciones, claves y canales (pasos 5 y 6).
 3. **Implementar el núcleo de aislamiento y acceso:** pasos 1, 3 y 4, y la parte de piloto del
@@ -314,7 +386,11 @@ Según lo que pidan los clientes:
   - identificadores ajenos y listas mezcladas;
   - reintentos de comandas y cobros con identificadores de la otra taquería;
   - el PIN de un administrador de la otra taquería;
-  - un dispositivo revocado;
+  - un código de vinculación vencido, ya usado o de otra cuenta (debe fallar);
+  - un dispositivo revocado: no puede leer ni escribir desde ese momento, y deja de recibir
+    avisos de tiempo real dentro del tiempo máximo medido;
+  - un dispositivo o cualquier cliente que intenta publicar en el canal de tiempo real (debe
+    fallar);
   - cambios de taquería en el mismo navegador;
   - límites de las consultas.
 - Cobros, cortes, retención de domicilios y exportación quedan aislados también con operaciones
