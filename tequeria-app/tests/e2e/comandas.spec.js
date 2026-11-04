@@ -358,3 +358,36 @@ test("dos monitores: una tarjeta por mesa, lo tachado y los cambios se ven en am
   await otra.getByRole("button", { name: "Quitar todos" }).click();
   await expect(page.getByRole("contentinfo", { name: "Listos" })).toHaveCount(0);
 });
+
+test("configuración del piloto: nombre del negocio, zona horaria y número de mesas", async ({ page }) => {
+  await entrarComoAdmin(page);
+  await expect(mesa(page, 8)).toBeVisible();
+  await expect(mesa(page, 9)).toHaveCount(0);
+  const negocio = async () => {
+    await page.getByRole("button", { name: /^Administración/ }).click();
+    await page.getByRole("tab", { name: "Negocio" }).click();
+  };
+  await negocio();
+  await page.getByLabel(/^Número de mesas/).fill("10");
+  await page.getByRole("button", { name: "Guardar mesas" }).click();
+  await expect(page.getByText("Ahora hay 10 mesas")).toBeVisible();
+  await page.getByLabel(/^Nombre \(sale/).fill("Taquería del Piloto");
+  await page.getByLabel(/^Zona horaria/).selectOption("America/Tijuana");
+  await page.getByRole("button", { name: "Guardar negocio" }).click();
+  await expect(page.getByText("Datos del negocio guardados")).toBeVisible();
+
+  // la mesa nueva se usa como cualquier otra, y mientras tenga comanda no se puede quitar
+  await page.getByRole("button", { name: /^Mesas/ }).click();
+  await mesa(page, 10).click();
+  await producto(page, "Taco Pastor").click();
+  await page.getByRole("button", { name: "Enviar a cocina" }).click();
+  await expect(mesa(page, 10)).toHaveAccessibleName(/estatus Enviado/);
+  await negocio();
+  await expect(page.getByLabel(/^Nombre \(sale/)).toHaveValue("Taquería del Piloto");
+  await expect(page.getByLabel(/^Zona horaria/)).toHaveValue("America/Tijuana");
+  await page.getByLabel(/^Número de mesas/).fill("8");
+  await page.getByRole("button", { name: "Guardar mesas" }).click();
+  await expect(page.getByText("La Mesa 10 está en uso o con cuentas por cobrar. Libéralas antes de quitarlas.")).toBeVisible();
+  await page.getByRole("button", { name: /^Mesas/ }).click();
+  await expect(mesa(page, 10)).toBeVisible();
+});

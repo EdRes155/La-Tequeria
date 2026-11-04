@@ -32,7 +32,7 @@ par as (
               else (left(version, 0) || 'huella: huella.version debe ser origen o destino, y huella.sal tener 16 caracteres o más')::boolean end
 ),
 nuevas as (
-  select array['sucursal_id', 'cuenta_id', 'folio_periodo', 'estado_cobro', 'politica_pin', 'pin_cambiado_en', 'version_pin', 'auth_user_id'] as cols
+  select array['sucursal_id', 'cuenta_id', 'folio_periodo', 'estado_cobro', 'politica_pin', 'pin_cambiado_en', 'version_pin', 'auth_user_id', 'activa'] as cols
 ),
 t as (
   select x.id, x.cobro_id, x.corte_id, x.mesa_id, x.total, x.reenvio, x.folio, x.archivado_cocina, to_jsonb(x) as j,

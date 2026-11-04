@@ -198,7 +198,7 @@ d("política de seguridad con reloj controlado", () => {
     const e = await monitor.rpc("estado", { p_token: t });
     expect(e.bloqueo).toBe("inactividad");
     expect(Object.keys(e).filter((k) => !["yo", "servidor", "bloqueo"].includes(k)).sort())
-      .toEqual(["cocina", "extras", "mesas", "nombreNegocio", "ocultos", "ajustes", "precios"].sort());
+      .toEqual(["cocina", "extras", "mesas", "nombreNegocio", "zonaHoraria", "ocultos", "ajustes", "precios"].sort());
     expect(Object.keys(await monitor.rpc("estado", { p_token: t, p_partes: ["historial", "cocina", "gastos"] })).sort())
       .toEqual(["bloqueo", "cocina", "servidor", "yo"]);
     expect(await monitor.rpc("latido_cocina", { p_token: t })).toBe(true);

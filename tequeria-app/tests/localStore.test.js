@@ -120,6 +120,29 @@ describe("modo local", () => {
     expect((await api.cargar(["config"])).ajustes).toEqual({ modoCocina: "monitor", imprimirCocinaMonitor: true });
   });
 
+  it("configuración del piloto: nombre, zona horaria y número de mesas, con las reglas del servidor", async () => {
+    await api.crearAdminInicial("Ana", "8642");
+    const { usuarios } = await api.pantallaLogin();
+    await api.entrar(usuarios[0].id, "8642");
+    const a = api.acciones;
+    expect((await api.cargar(["config"])).zonaHoraria).toBe("America/Mexico_City");
+    expect((await falla(a.fijarNegocio("  ", "America/Mexico_City"))).codigo).toBe("nombre");
+    expect((await falla(a.fijarNegocio("Norte", "Marte/Olimpo"))).codigo).toBe("zona");
+    await a.fijarNegocio("Taquería Norte", "America/Tijuana");
+    expect(await api.cargar(["config"])).toMatchObject({ nombreNegocio: "Taquería Norte", zonaHoraria: "America/Tijuana" });
+    expect((await api.pantallaLogin()).negocio).toBe("Taquería Norte");
+    for (const n of [0, 61, 2.5]) expect((await falla(a.fijarMesas(n))).codigo).toBe("cantidad");
+    await a.fijarMesas(10);
+    expect((await api.cargar(["mesas"])).mesas.map((m) => m.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    await a.enviar(t("local-mesa-10", { tipo: "aqui", mesaId: 10 }));
+    const e = await falla(a.fijarMesas(8));
+    expect([e.codigo, e.message]).toEqual(["ocupadas", "La Mesa 10 está en uso o con cuentas por cobrar. Libéralas antes de quitarlas."]);
+    await a.crearUsuario("8642", "Luis", "5173", "mesero");
+    const mesero = (await api.pantallaLogin()).usuarios.find((u) => u.nombre === "Luis");
+    await api.entrar(mesero.id, "5173");
+    expect((await falla(a.fijarMesas(9))).codigo).toBe("PERMISO");
+  });
+
   it("cocina: cambios con el estado visto, lotes y tachados como el servidor", async () => {
     await api.crearAdminInicial("Ana", "8642");
     const { usuarios } = await api.pantallaLogin();

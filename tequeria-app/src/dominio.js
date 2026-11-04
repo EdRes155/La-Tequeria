@@ -4,7 +4,35 @@
    prueban por separado (tests/dominio.test.js).
    ============================================================ */
 
-export const NUM_MESAS = 8;
+export const NUM_MESAS = 8;          // con las que empieza una sucursal
+export const MAX_MESAS = 60;
+export const ZONA_DEFAULT = "America/Mexico_City";
+// Zonas horarias de México para elegir en Administración → Negocio
+export const ZONAS_MX = [
+  ["America/Mexico_City", "Centro (Ciudad de México, Guadalajara, Monterrey)"],
+  ["America/Cancun", "Sureste (Quintana Roo)"],
+  ["America/Merida", "Mérida"],
+  ["America/Chihuahua", "Chihuahua"],
+  ["America/Ciudad_Juarez", "Ciudad Juárez"],
+  ["America/Mazatlan", "Pacífico (Sinaloa, Nayarit, Baja California Sur)"],
+  ["America/Hermosillo", "Sonora"],
+  ["America/Tijuana", "Noroeste (Baja California)"],
+];
+export const zonaValida = (z) => {
+  if (typeof z !== "string" || !z.trim()) return false;
+  try { new Intl.DateTimeFormat("es-MX", { timeZone: z }); return true; } catch { return false; }
+};
+// Mensaje de las respuestas {ok:false} de la configuración del negocio (servidor y modo local)
+export function mensajeConfig(r) {
+  if (r?.error === "nombre") return "Escribe el nombre del negocio.";
+  if (r?.error === "zona") return "Elige una zona horaria válida.";
+  if (r?.error === "cantidad") return `El número de mesas debe ser de 1 a ${MAX_MESAS}.`;
+  if (r?.error === "ocupadas") {
+    const ms = r.mesas || [];
+    return `${ms.length === 1 ? "La Mesa " + ms[0] + " está" : "Las mesas " + ms.join(", ") + " están"} en uso o con cuentas por cobrar. Libéralas antes de quitarlas.`;
+  }
+  return "No se pudo guardar la configuración.";
+}
 
 export const CARNES_DEFAULT = [
   { id: "pastor",  nombre: "Pastor",  activo: true },

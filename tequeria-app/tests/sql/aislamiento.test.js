@@ -154,6 +154,8 @@ const RECETAS = {
   },
   "alternar_oculto(text, text)": { rol: "admin", args: () => ({ p_clave: "taco-pastor" }) },
   "fijar_ajuste(text, text, jsonb)": { rol: "admin", args: () => ({ p_clave: "variasCocinas", p_valor: "true" }) },
+  "fijar_negocio(text, text, text)": { rol: "admin", args: () => ({ p_nombre: "Nombre nuevo", p_zona_horaria: "America/Tijuana" }) },
+  "fijar_mesas(text, integer)": { rol: "admin", args: () => ({ p_cantidad: 7 }) },
   "agregar_gasto(text, text, text, numeric)": {
     rol: "admin", args: () => ({ p_id: nuevo(), p_concepto: "Hielo", p_monto: 10 }),
     idem: { con: (X, v) => ({ p_id: v }), ajeno: (Y) => Y.gasto },
@@ -921,6 +923,30 @@ d("matriz de aislamiento entre sucursales", () => {
           expect(s.vivas).toBe(0);
           expect(s.revocadas).toBeGreaterThanOrEqual(2);   // la del administrador y la del mesero
         } finally { await c.query("rollback"); }
+      },
+    },
+    "fijar_negocio(text, text, text)": {
+      "el nombre y la zona horaria solo cambian en su sucursal": async () => {
+        const antesB = await huellaDe(sql, B);
+        const res = sinError(await intentar(A.con.caja, "fijar_negocio", { p_token: A.tok.admin, p_nombre: "Nombre nuevo", p_zona_horaria: "America/Tijuana" },
+          null, async (c) => (await c.query("select (select nombre_negocio from public.config where sucursal_id = $1) n, (select zona_horaria from public.sucursales where id = $1) z",
+            [A.id])).rows[0]));
+        expect(res.extra).toEqual({ n: "Nombre nuevo", z: "America/Tijuana" });
+        expect(res.huellaB).toEqual(antesB);
+      },
+    },
+    "fijar_mesas(text, integer)": {
+      "solo cambia las mesas de su sucursal": async () => {
+        // A baja a 7 y sube a 12; B conserva sus 5 mesas, incluida la 3 ocupada
+        const antesB = await huellaDe(sql, B);
+        for (const n of [7, 12]) {
+          const res = sinError(await intentar(A.con.caja, "fijar_mesas", { p_token: A.tok.admin, p_cantidad: n }, null,
+            async (c) => (await c.query("select sucursal_id, count(*) filter (where activa)::int activas from public.mesas group by 1 order by 1")).rows));
+          expect(res.ok).toEqual({ ok: true, mesas: n });
+          expect(res.extra.find((x) => x.sucursal_id === A.id).activas).toBe(n);
+          expect(res.extra.find((x) => x.sucursal_id === B.id).activas).toBe(B.mesas);
+          expect(res.huellaB).toEqual(antesB);
+        }
       },
     },
     "agregar_carne(text, text)": {

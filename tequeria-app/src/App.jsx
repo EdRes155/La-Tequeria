@@ -12,7 +12,7 @@ import {
   pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, pinDebil, hora, fecha,
   METODOS_PAGO, METODO_LABEL, sugerenciasEfectivo, porCobrarDeMesa, iniciales, colorAvatar, redondear,
   ordenarItems, nombreCocina, PASOS_PEDIDO, estadoPedido, unirTickets, pedidosDeMesa, leerAjustes, porPreparar,
-  agruparComandas, lineaCocina,
+  agruparComandas, lineaCocina, ZONAS_MX, ZONA_DEFAULT, MAX_MESAS,
 } from "./dominio.js";
 import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
 import { CSS } from "./estilos.js";
@@ -198,7 +198,7 @@ export default function App() {
       if (diferidasRef.current.size) marcarDiferidas((s) => (partes || TODAS).forEach((p) => s.delete(p)));
       const vigente = (p) => pedidas.current[p] === n;
       const parche = { yo: r.yo };
-      if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, precios: r.precios, extras: r.extras, ocultos: r.ocultos, ajustes: r.ajustes || {} });
+      if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, zonaHoraria: r.zonaHoraria, precios: r.precios, extras: r.extras, ocultos: r.ocultos, ajustes: r.ajustes || {} });
       ["carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos", "porCobrar"].forEach((p) => { if (p in r && vigente(p)) parche[p] = r[p]; });
       if ("periodo" in r && vigente("historial")) parche.periodo = r.periodo;
       setData((d) => ({ ...(d || {}), ...parche }));
@@ -376,6 +376,8 @@ export default function App() {
           throw e;
         }
       },
+      fijarNegocio: (nombre, zona) => ejecutar(() => a.fijarNegocio(nombre, zona), { partes: ["config"], ok: "Datos del negocio guardados" }),
+      fijarMesas: (cantidad) => ejecutar(() => a.fijarMesas(cantidad), { partes: ["mesas"], ok: `Ahora hay ${cantidad} mesas` }),
       fijarAjuste: (clave, valor) => ejecutar(() => a.fijarAjuste(clave, valor), { partes: ["config"], ok: "Ajuste guardado",
         optimista: (nd) => { nd.ajustes = { ...(nd.ajustes || {}), [clave]: valor }; } }),
       anularCobro: (id, motivo) => ejecutar(() => a.anularCobro(id, motivo), { partes: ["porCobrar", "historial"], ok: "Cobro anulado: las cuentas vuelven a estar por cobrar" }),
@@ -2657,7 +2659,7 @@ function Admin({ data, db, user }) {
       <div className="screen-head"><div><h2>Administración</h2>
         <p className="muted">Solo el administrador. Aquí defines precios, productos y usuarios.</p></div></div>
       <div className="admin-tabs" role="tablist" aria-label="Secciones de administración">
-        {[["precios", "Precios"], ["productos", "Productos"], ["meseros", "Usuarios"], ["cocina", "Cocina"]].map(([k, l]) => (
+        {[["precios", "Precios"], ["productos", "Productos"], ["meseros", "Usuarios"], ["cocina", "Cocina"], ["negocio", "Negocio"]].map(([k, l]) => (
           <button type="button" role="tab" key={k} aria-selected={tab === k} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
@@ -2666,7 +2668,42 @@ function Admin({ data, db, user }) {
         {tab === "productos" && <AdminProductos data={data} db={db} />}
         {tab === "meseros" && <AdminMeseros data={data} db={db} user={user} />}
         {tab === "cocina" && <AdminCocina data={data} db={db} />}
+        {tab === "negocio" && <AdminNegocio data={data} db={db} />}
       </div>
+    </div>
+  );
+}
+
+// Configuración del piloto (PLAN §2): nombre del negocio, zona horaria y número de mesas de esta sucursal
+function AdminNegocio({ data, db }) {
+  const id = useId();
+  const zonaActual = data.zonaHoraria || ZONA_DEFAULT;
+  const [nombre, setNombre] = useState(data.nombreNegocio || "");
+  const [zona, setZona] = useState(zonaActual);
+  const [mesas, setMesas] = useState(String(data.mesas?.length || 0));
+  const zonas = ZONAS_MX.some(([z]) => z === zonaActual) ? ZONAS_MX : [[zonaActual, zonaActual], ...ZONAS_MX];
+  const guardarNegocio = (e) => { e.preventDefault(); db.fijarNegocio(nombre, zona); };
+  const guardarMesas = (e) => { e.preventDefault(); db.fijarMesas(Number(mesas)); };
+  return (
+    <div className="admin-negocio">
+      <form onSubmit={guardarNegocio} aria-labelledby={id + "n"}>
+        <h3 className="sub-h" id={id + "n"}>Negocio</h3>
+        <div className="campo"><label htmlFor={id + "nom"}>Nombre (sale en la pantalla de entrada y en los tickets)</label>
+          <input id={id + "nom"} className="inp" value={nombre} maxLength={60} autoComplete="off" onChange={(e) => setNombre(e.target.value)} /></div>
+        <div className="campo"><label htmlFor={id + "zona"}>Zona horaria (horas de las comandas, fechas y cortes)</label>
+          <select id={id + "zona"} className="inp" value={zona} onChange={(e) => setZona(e.target.value)}>
+            {zonas.map(([z, l]) => <option key={z} value={z}>{l}</option>)}
+          </select></div>
+        <button type="submit" className="btn btn-primary">Guardar negocio</button>
+      </form>
+      <form onSubmit={guardarMesas} aria-labelledby={id + "m"} style={{ marginTop: 24 }}>
+        <h3 className="sub-h" id={id + "m"}>Mesas</h3>
+        <div className="campo"><label htmlFor={id + "mesas"}>Número de mesas (1 a {MAX_MESAS})</label>
+          <input id={id + "mesas"} className="inp" type="number" inputMode="numeric" min={1} max={MAX_MESAS} value={mesas}
+            onChange={(e) => setMesas(e.target.value.replace(/\D/g, "").slice(0, 2))} /></div>
+        <p className="muted small">Para quitar mesas, las que se quitan (las de número más alto) deben estar libres y sin cuentas por cobrar.</p>
+        <button type="submit" className="btn btn-primary">Guardar mesas</button>
+      </form>
     </div>
   );
 }

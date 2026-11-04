@@ -8,13 +8,13 @@ canal y clave del navegador de esta lista debe quedar ligada a una sucursal o ju
 ## Resumen
 
 - **25 tablas** en `public`, ninguna con acceso directo para `anon`: correcto.
-- **108 funciones**: 52 de la API (ejecutables por `anon` o `authenticated`) y 56 internas.
+- **110 funciones**: 54 de la API (ejecutables por `anon` o `authenticated`) y 56 internas.
 - **Fila única `id = 1`** (configuración y cocina activa) en 0 funciones: —; y a través de otras en 0 más: —.
 - **Candados** (`pg_advisory_xact_lock`): `tequeria:cobro:` por id; `tequeria:corte:` por sucursal; `tequeria:ticket:` por id. Ninguno global: el del corte es por sucursal y los de comanda y cobro son por su id, que es global.
 - **Devuelven lo ya guardado** si se repite el id: `cobrar`, `enviar_comanda`, `reenviar_cocina`. Todas comprueban que sea de la misma sucursal.
 - **PIN de administrador:** `crear_usuario`, `eliminar_usuario`, `hacer_corte`, `no_cobrar`, `restablecer_acceso`, `restablecer_pin`. Todas lo buscan solo en la sucursal de la sesión.
 - **Tiempo real:** el servidor avisa en el canal `tequeria` (público y único para todos; el canal privado por sucursal es el paso 5); el navegador escucha `tequeria`.
-- **Funciones de la API que el navegador no usa:** `aceptar_invitacion`, `cancelar_invitacion`, `crear_administrador`, `crear_cuenta`, `crear_sucursal`, `desbloquear`, `generar_codigo`, `invitar_miembro`, `listar_dispositivos`, `listar_miembros`, `mis_cuentas`, `quitar_miembro`, `restablecer_acceso`, `revocar_dispositivo`, `vincular_dispositivo` (compatibilidad; decidir si se retiran).
+- **Funciones de la API que el navegador no usa:** `aceptar_invitacion`, `cancelar_invitacion`, `crear_administrador`, `crear_cuenta`, `crear_sucursal`, `desbloquear`, `fijar_mesas`, `fijar_negocio`, `generar_codigo`, `invitar_miembro`, `listar_dispositivos`, `listar_miembros`, `mis_cuentas`, `quitar_miembro`, `restablecer_acceso`, `revocar_dispositivo`, `vincular_dispositivo` (compatibilidad; decidir si se retiran).
 
 ## Tablas
 
@@ -39,7 +39,7 @@ canal y clave del navegador de esta lista debe quedar ligada a una sucursal o ju
 | `intentos_operador` | sucursal_id, usuario_id, fallos, nivel, bloqueado_hasta, ultimo | PK (sucursal_id, usuario_id); FK (sucursal_id, usuario_id) REFERENCES usuarios(sucursal_id, id) ON DELETE CASCADE | sí |
 | `invitaciones` | id, cuenta_id, correo, rol, token_hash, vence, creada, creada_por, usada_en, usada_por | FK (cuenta_id) REFERENCES cuentas(id); PK (id); único (token_hash) | sí |
 | `membresias` | cuenta_id, auth_user_id, rol, creada, creada_por | FK (auth_user_id) REFERENCES auth.users(id) ON DELETE CASCADE; FK (cuenta_id) REFERENCES cuentas(id); PK (cuenta_id, auth_user_id) | sí |
-| `mesas` | id, estado, mesero, hora, pedido, extras, version, sucursal_id | PK (sucursal_id, id); FK (sucursal_id) REFERENCES sucursales(id) | sí |
+| `mesas` | id, estado, mesero, hora, pedido, extras, version, activa, sucursal_id | PK (sucursal_id, id); FK (sucursal_id) REFERENCES sucursales(id) | sí |
 | `sesiones` | id, token_hash, usuario_id, dispositivo, creada, vence_absoluta, revocada, sucursal_id, motivo_fin, dispositivo_id, version_pin | FK (sucursal_id, dispositivo_id) REFERENCES dispositivos(sucursal_id, id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED; PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id); único (token_hash); FK (sucursal_id, usuario_id) REFERENCES usuarios(sucursal_id, id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED; FK (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE | sí |
 | `sesiones_actividad` | sesion_id, ultima_interaccion | PK (sesion_id) | sí |
 | `sucursales` | id, cuenta_id, nombre, zona_horaria, retencion_domicilio_dias, activa, creada | FK (cuenta_id) REFERENCES cuentas(id); único (cuenta_id, id); PK (id) | sí |
@@ -79,8 +79,10 @@ Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las
 | `eliminar_gasto(p_token text, p_id text)` | Sesión: admin · interaccion | `gastos` · por otras: `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales`, `usuarios` | `gastos` · por otras: `bitacora`, `sesiones_actividad` | `_contexto`, `_error`, `_log` | recibe ids del cliente (p_id); usa `now()` (vía `_ahora`) | Sucursal de la sesión operativa |
 | `eliminar_usuario(p_token text, p_admin_pin text, p_id text)` | Sesión: admin · interaccion | `sesiones`, `usuarios` · por otras: `cuentas`, `dispositivos`, `intentos`, `intentos_dispositivo`, `sesiones_actividad`, `sucursales` | `cocina_sesion`, `usuarios` · por otras: `bitacora`, `intentos`, `intentos_dispositivo`, `sesiones_actividad` | `_contexto`, `_log`, `_verificar_admin` | PIN de administrador de su sucursal; recibe ids del cliente (p_id); usa `now()` (vía `_ahora`); verifica o guarda PIN (vía `_verificar_admin`); contadores de intentos `ip:` (vía `_verificar_admin`) | Sucursal de la sesión operativa |
 | `enviar_comanda(p_token text, p_ticket jsonb)` | Sesión: mesero, admin · interaccion | `bebidas`, `mesas`, `tickets` · por otras: `carnes`, `cobros`, `cocina_hechos`, `config`, `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales`, `usuarios` | `bebidas`, `mesas`, `tickets` · por otras: `folios`, `sesiones_actividad` | `_contexto`, `_error`, `_fecha`, `_hora`, `_siguiente_folio`, `_ticket_json`, `_total_items`, `_valorar_items` | candado `tequeria:ticket:` por id; devuelve lo ya guardado si se repite el id (solo de su sucursal); recibe ids del cliente (p_ticket); usa `now()` (vía `_ahora`) | Sucursal de la sesión operativa |
-| `estado(p_token text, p_partes text[])` | Sesión: cualquier rol · lectura | `bebidas`, `carnes`, `config`, `cortes`, `gastos`, `mesas`, `tickets`, `usuarios` · por otras: `cobros`, `cocina_hechos`, `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales` | por otras: `sesiones_actividad` | `_contexto`, `_mesa_json`, `_resumen`, `_ticket_json` | usa `now()` | Sucursal de la sesión operativa |
+| `estado(p_token text, p_partes text[])` | Sesión: cualquier rol · lectura | `bebidas`, `carnes`, `config`, `cortes`, `gastos`, `mesas`, `sucursales`, `tickets`, `usuarios` · por otras: `cobros`, `cocina_hechos`, `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad` | por otras: `sesiones_actividad` | `_contexto`, `_mesa_json`, `_resumen`, `_ticket_json` | usa `now()` | Sucursal de la sesión operativa |
 | `fijar_ajuste(p_token text, p_clave text, p_valor jsonb)` | Sesión: admin · interaccion | por otras: `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales`, `usuarios` | `config` · por otras: `bitacora`, `sesiones_actividad` | `_contexto`, `_error`, `_log` | usa `now()` (vía `_ahora`) | Sucursal de la sesión operativa |
+| `fijar_mesas(p_token text, p_cantidad integer)` | Sesión: admin · interaccion | `mesas`, `tickets` · por otras: `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales`, `usuarios` | `mesas` · por otras: `bitacora`, `sesiones_actividad` | `_contexto`, `_log` | usa `now()` (vía `_ahora`) | Sucursal de la sesión operativa |
+| `fijar_negocio(p_token text, p_nombre text, p_zona_horaria text)` | Sesión: admin · interaccion | por otras: `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales`, `usuarios` | `config`, `sucursales` · por otras: `bitacora`, `sesiones_actividad` | `_contexto`, `_log` | usa `now()` (vía `_ahora`) | Sucursal de la sesión operativa |
 | `fijar_precio(p_token text, p_clave text, p_precio numeric)` | Sesión: admin · interaccion | por otras: `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales`, `usuarios` | `config` · por otras: `bitacora`, `sesiones_actividad` | `_contexto`, `_error`, `_log`, `_precio_ok` | usa `now()` (vía `_ahora`) | Sucursal de la sesión operativa |
 | `fijar_precio_extra(p_token text, p_id text, p_precio numeric)` | Sesión: admin · interaccion | por otras: `cuentas`, `dispositivos`, `sesiones`, `sesiones_actividad`, `sucursales`, `usuarios` | `config` · por otras: `bitacora`, `sesiones_actividad` | `_contexto`, `_log`, `_precio_ok` | recibe ids del cliente (p_id); usa `now()` (vía `_ahora`) | Sucursal de la sesión operativa |
 | `generar_codigo(p_cuenta uuid, p_sucursal uuid, p_monitor boolean)` | Dueño: propietario, encargado · escritura | `codigos_vinculacion`, `sucursales` · por otras: `cuentas`, `dispositivos`, `membresias` | `codigos_vinculacion` · por otras: `bitacora`, `cuentas` | `_ahora`, `_codigo_aleatorio`, `_dueno`, `_hash_secreto`, `_log_cuenta` | usa `now()` (vía `_ahora`) | Cuenta elegida en el panel (membresía comprobada); sucursal e ids dentro de ella |
@@ -213,7 +215,7 @@ deberán adaptarse cuando se implemente, además de agregar casos de rechazo y t
 |---|---|
 | `tests/dominio.test.js` | 8 |
 | `tests/e2e/comandas.spec.js` | 10 |
-| `tests/localStore.test.js` | 32 |
+| `tests/localStore.test.js` | 37 |
 | `tests/sql/credenciales.test.js` | 6 |
 | `tests/sql/duenos.test.js` | 6 |
 | `tests/sql/esquema.test.js` | 20 |

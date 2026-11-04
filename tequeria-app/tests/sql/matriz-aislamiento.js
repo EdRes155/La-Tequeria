@@ -59,6 +59,9 @@ export const MATRIZ = {
   "eliminar_extra(text, text)": { sesion: true, ids: true },
   "alternar_oculto(text, text)": { sesion: true },
   "fijar_ajuste(text, text, jsonb)": { sesion: true },
+  // configuración del piloto (PLAN §2)
+  "fijar_negocio(text, text, text)": { sesion: true, casos: ["el nombre y la zona horaria solo cambian en su sucursal"] },
+  "fijar_mesas(text, integer)": { sesion: true, casos: ["solo cambia las mesas de su sucursal"] },
   "agregar_gasto(text, text, text, numeric)": { sesion: true, idem: true },
   "eliminar_gasto(text, text)": { sesion: true, ids: true },
   "crear_usuario(text, text, text, text, text)": { sesion: true, pin: true },

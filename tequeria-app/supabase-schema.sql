@@ -54,6 +54,9 @@ create table if not exists public.mesas (
   mesero text, hora text, pedido jsonb, extras jsonb default '[]'::jsonb
 );
 alter table public.mesas add column if not exists version int not null default 0;
+-- Configuración del piloto (PLAN §2): el número de mesas se cambia activando o desactivando; una mesa no
+-- se borra porque sus comandas anteriores la siguen señalando
+alter table public.mesas add column if not exists activa boolean not null default true;
 
 create table if not exists public.tickets (
   id text primary key, tipo text, es_extra boolean default false,
@@ -1637,6 +1640,7 @@ begin
 
   if todo or 'config' = any(p_partes) then
     r := r || jsonb_build_object('nombreNegocio', coalesce(cfg.nombre_negocio, 'La Tequería'),
+      'zonaHoraria', (select zona_horaria from public.sucursales where id = s.sucursal_id),
       'precios', coalesce(cfg.precios, '{}'::jsonb), 'extras', coalesce(cfg.extras, '[]'::jsonb),
       'ocultos', coalesce(cfg.ocultos, '[]'::jsonb), 'ajustes', coalesce(cfg.ajustes, '{}'::jsonb));
   end if;
@@ -1655,7 +1659,7 @@ begin
   end if;
   if todo or 'mesas' = any(p_partes) then
     r := r || jsonb_build_object('mesas', coalesce((select jsonb_agg(public._mesa_json(m) order by m.id)
-      from public.mesas m where m.sucursal_id = s.sucursal_id), '[]'::jsonb));
+      from public.mesas m where m.sucursal_id = s.sucursal_id and m.activa), '[]'::jsonb));
   end if;
   if todo or 'cocina' = any(p_partes) then
     r := r || jsonb_build_object('cocina', coalesce((select jsonb_agg(j order by c desc) from (
@@ -1700,7 +1704,7 @@ returns json language plpgsql security definer set search_path = public as $$
 declare s record; m public.mesas; v_items int;
 begin
   select * into s from public._contexto(p_token, array['mesero', 'admin'], 'interaccion');
-  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id for update;
+  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id and activa for update;
   if m.id is null then perform public._error('MESA', 'La mesa no existe.'); end if;
   if m.estado = 'ocupada' then
     perform public._error('MESA_OCUPADA', 'La mesa ya tiene una comanda enviada. Usa «Agregar orden extra».');
@@ -1731,7 +1735,7 @@ returns json language plpgsql security definer set search_path = public as $$
 declare s record; m public.mesas; v_n int;
 begin
   select * into s from public._contexto(p_token, array['mesero', 'admin'], 'interaccion');
-  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id for update;
+  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id and activa for update;
   if m.id is null then perform public._error('MESA', 'La mesa no existe.'); end if;
   -- una mesa con cuentas sin cobrar no se libera: primero se cobra (o un administrador la cierra sin cobro)
   select count(*) into v_n from public.tickets
@@ -1839,7 +1843,7 @@ begin
   if v_tipo = 'aqui' then
     if coalesce(p_ticket->>'mesaId', '') !~ '^[0-9]{1,4}$' then perform public._error('MESA', 'Falta la mesa de la comanda.'); end if;
     v_mesa := (p_ticket->>'mesaId')::int;
-    select * into m from public.mesas where sucursal_id = s.sucursal_id and id = v_mesa for update;
+    select * into m from public.mesas where sucursal_id = s.sucursal_id and id = v_mesa and activa for update;
     if m.id is null then perform public._error('MESA', 'La mesa no existe.'); end if;
     v_origen := 'Mesa ' || m.id;
     if v_extra then
@@ -1883,7 +1887,7 @@ begin
     if t.sucursal_id <> s.sucursal_id then perform public._error('DATOS', 'Identificador no válido.'); end if;
     return json_build_object('ok', true, 'duplicado', true, 'ticket', public._ticket_json(t));
   end if;
-  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id;
+  select * into m from public.mesas where sucursal_id = s.sucursal_id and id = p_mesa_id and activa;
   if m.id is null or m.estado <> 'ocupada' then
     perform public._error('MESA_NO_OCUPADA', 'Solo se puede reenviar una mesa con comanda enviada.');
   end if;
@@ -2385,6 +2389,48 @@ begin
    where sucursal_id = s.sucursal_id returning ajustes into v;
   perform public._log(s.sucursal_id, s.uid, s.nombre, 'ajuste', jsonb_build_object('clave', p_clave, 'valor', p_valor));
   return v::json;
+end $$;
+
+-- Configuración del piloto (PLAN §2): nombre del negocio (el de la pantalla de entrada y los tickets) y
+-- zona horaria de la sucursal (fechas, horas y cortes)
+create or replace function public.fijar_negocio(p_token text, p_nombre text, p_zona_horaria text)
+returns json language plpgsql security definer set search_path = public as $$
+declare s record; v_nombre text := left(btrim(coalesce(p_nombre, '')), 60); v_zona text := btrim(coalesce(p_zona_horaria, ''));
+begin
+  select * into s from public._contexto(p_token, array['admin'], 'interaccion');
+  if v_nombre = '' then return json_build_object('ok', false, 'error', 'nombre'); end if;
+  if not exists (select 1 from pg_timezone_names where name = v_zona) then return json_build_object('ok', false, 'error', 'zona'); end if;
+  update public.config set nombre_negocio = v_nombre, zona_horaria = v_zona where sucursal_id = s.sucursal_id;
+  update public.sucursales set zona_horaria = v_zona where id = s.sucursal_id;
+  perform public._log(s.sucursal_id, s.uid, s.nombre, 'negocio', jsonb_build_object('nombre', v_nombre, 'zona', v_zona));
+  return json_build_object('ok', true, 'nombreNegocio', v_nombre, 'zonaHoraria', v_zona);
+end $$;
+
+-- Número de mesas de la sucursal (1 a 60). Las que sobran se desactivan, no se borran: sus comandas
+-- anteriores las siguen señalando. Solo se quita una mesa libre y sin cuentas por cobrar; las filas de
+-- todas las mesas quedan tomadas, en orden, así que un borrador o una comanda en curso espera o se ve.
+create or replace function public.fijar_mesas(p_token text, p_cantidad int)
+returns json language plpgsql security definer set search_path = public as $$
+declare s record; v_ocupadas int[]; v_antes int;
+begin
+  select * into s from public._contexto(p_token, array['admin'], 'interaccion');
+  if p_cantidad is null or p_cantidad not between 1 and 60 then return json_build_object('ok', false, 'error', 'cantidad'); end if;
+  perform 1 from public.mesas where sucursal_id = s.sucursal_id order by id for update;
+  select count(*) into v_antes from public.mesas where sucursal_id = s.sucursal_id and activa;
+  select array_agg(m.id order by m.id) into v_ocupadas from public.mesas m
+   where m.sucursal_id = s.sucursal_id and m.activa and m.id > p_cantidad
+     and (m.estado <> 'libre' or exists (select 1 from public.tickets t where t.sucursal_id = m.sucursal_id and t.mesa_id = m.id
+                                           and t.estado_cobro = 'pendiente' and t.reenvio is not true));
+  if v_ocupadas is not null then return json_build_object('ok', false, 'error', 'ocupadas', 'mesas', v_ocupadas); end if;
+  update public.mesas set activa = (id <= p_cantidad), version = coalesce(version, 0) + 1
+   where sucursal_id = s.sucursal_id and activa <> (id <= p_cantidad);
+  insert into public.mesas (sucursal_id, id, estado)
+  select s.sucursal_id, g, 'libre' from generate_series(1, p_cantidad) g
+  on conflict (sucursal_id, id) do nothing;
+  if v_antes <> p_cantidad then
+    perform public._log(s.sucursal_id, s.uid, s.nombre, 'mesas', jsonb_build_object('antes', v_antes, 'ahora', p_cantidad));
+  end if;
+  return json_build_object('ok', true, 'mesas', p_cantidad);
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -3000,7 +3046,9 @@ begin
              '_preparar_sucursal','_crear_admin','crear_invitacion_inicial',
              'vincular_dispositivo','crear_cuenta','aceptar_invitacion','mis_cuentas','crear_sucursal',
              'crear_administrador','invitar_miembro','cancelar_invitacion','quitar_miembro','listar_miembros',
-             'generar_codigo','listar_dispositivos','revocar_dispositivo')
+             'generar_codigo','listar_dispositivos','revocar_dispositivo',
+             -- configuración del piloto
+             'fijar_negocio','fijar_mesas')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;
@@ -3033,7 +3081,9 @@ grant execute on function
   public.crear_sucursal(uuid, text, text, text, text), public.crear_administrador(uuid, uuid, text, text),
   public.invitar_miembro(uuid, text, text), public.cancelar_invitacion(uuid, uuid), public.quitar_miembro(uuid, uuid),
   public.listar_miembros(uuid), public.generar_codigo(uuid, uuid, boolean), public.listar_dispositivos(uuid, uuid),
-  public.revocar_dispositivo(uuid, uuid)
+  public.revocar_dispositivo(uuid, uuid),
+  -- configuración del piloto (administrador de la sucursal)
+  public.fijar_negocio(text, text, text), public.fijar_mesas(text, integer)
 to authenticated;
 
 commit;

@@ -10,6 +10,7 @@ sucursal.
 | Entorno de pruebas reproducible, separado de producción | PostgreSQL 16 desechable, local o en la CI (sección siguiente) | Listo |
 | Modelo de cuenta, sucursal, membresía, dispositivo y sesión, con el contexto de cada función | [MODELO.md](MODELO.md): un validador por tipo de llamada y estado de cuenta pendiente de activación | Diseño listo; paso 1 del núcleo implementado (abajo) |
 | Núcleo, paso 1: cuentas, sucursales y `sucursal_id` | Sección «MULTINEGOCIO» de `tequeria-app/supabase-schema.sql`; `tests/sql/migracion.test.js` | Implementado y ensayado sobre la instantánea de producción; no aplicado en producción |
+| Configuración del piloto (PLAN §2) | `fijar_negocio` y `fijar_mesas` en `supabase-schema.sql`, el modo local y Administración → Negocio; `tests/sql/configuracion.test.js` | Implementado y probado (servidor, modo local y navegador) |
 | Núcleo, paso 4: dispositivos y dueños | `_vinculacion`, `_identidad` y `_dueno`; alta de cuentas, invitaciones, membresías, códigos, vinculación y revocación en `supabase-schema.sql`; `tests/sql/duenos.test.js` y la matriz | Implementado y probado con el `auth.users` de pruebas; falta probarlo contra Supabase Auth real en staging. El panel y la pantalla de vinculación van con el cliente (paso 6) |
 | Núcleo, paso 3: política de seguridad del personal | `_contexto` con tipo de llamada, contadores, `desbloquear` y `restablecer_acceso` en `supabase-schema.sql`; `tests/sql/reloj.test.js` | Implementado y probado con reloj controlado en el servidor; la parte de la interfaz va con el cliente (paso 6) |
 | Núcleo, paso 2: validadores y funciones por sucursal | `_dispositivo` y `_contexto` en `supabase-schema.sql`; matriz en `tests/sql/aislamiento.test.js` | Implementado: las funciones de la API prueban sus casos de aislamiento con las dos cuentas; solo quedan pendientes los declarados para pasos posteriores. Desde aquí el esquema exige equipos vinculados y ya no sirve con la app publicada (ver MIGRACION.md) |
@@ -64,10 +65,12 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
      `_auth_vigente`; publicar: nadie) y retiro del canal público `tequeria`;
    - claves del navegador por sucursal; al revocar o desvincular, borrar las claves, cancelar
      suscripciones y descartar respuestas tardías.
-2. **Configuración del piloto** ([PLAN §2](../../PLAN-MULTINEGOCIO.md), «Para el piloto»): número de
-   mesas por sucursal (hoy no hay función para cambiarlo; el catálogo inicial crea 8) y revisar que
-   nombre, zona horaria, folio, menú y cocina se editen por sucursal, con `dominio.js`, el SQL y el
-   modo local alineados.
+2. **Configuración del piloto** ([PLAN §2](../../PLAN-MULTINEGOCIO.md), «Para el piloto») (hecho):
+   `fijar_negocio` (nombre y zona horaria) y `fijar_mesas` (de 1 a 60; las que se quitan se desactivan
+   y solo si están libres y sin cuentas por cobrar), en el servidor, el modo local y Administración →
+   Negocio. Folio, menú, precios, existencias, extras, ocultos y modo de cocina ya eran por sucursal
+   (los cubre la matriz). Pruebas en `tests/sql/configuracion.test.js`, `tests/localStore.test.js` y un
+   recorrido en navegador.
 3. **Paso 6: cliente:**
    - entrada de dueños (correo verificado o Google) y panel: cuentas, sucursales, miembros,
      invitaciones (con su envío por correo), códigos, equipos y revocación; reintento de `40001` en

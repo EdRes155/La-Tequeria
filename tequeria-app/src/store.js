@@ -8,6 +8,7 @@
    ============================================================ */
 import { supabase } from "./supabaseClient.js";
 import { crearLocal } from "./localStore.js";
+import { mensajeConfig } from "./dominio.js";
 
 export class ErrorApi extends Error {
   constructor(codigo, mensaje, extra = {}) {
@@ -102,6 +103,12 @@ function crearRemoto() {
     if (r && r.ok === false) throw new ErrorApi(r.error, mensajePin(r), r);
     return r;
   };
+  // Configuración del negocio: también responde {ok:false,error}
+  const conConfig = async (fn, args) => {
+    const r = await conToken(fn, args);
+    if (r && r.ok === false) throw new ErrorApi(r.error, mensajeConfig(r), r);
+    return r;
+  };
 
   return {
     modo: "remoto",
@@ -191,6 +198,8 @@ function crearRemoto() {
       archivarTickets: (ids) => conToken("archivar_tickets", { p_ids: ids }, seguro),
       marcarHecho: (ticketId, linea, hecho) => conToken("marcar_hecho", { p_ticket: ticketId, p_linea: linea, p_hecho: !!hecho }, seguro),
       fijarAjuste: (clave, valor) => conToken("fijar_ajuste", { p_clave: clave, p_valor: valor }),
+      fijarNegocio: (nombre, zona) => conConfig("fijar_negocio", { p_nombre: nombre, p_zona_horaria: zona }),
+      fijarMesas: (cantidad) => conConfig("fijar_mesas", { p_cantidad: cantidad }),
       noCobrar: (adminPin, tickets, motivo, liberarMesa) => conPin("no_cobrar", {
         p_admin_pin: adminPin, p_tickets: tickets, p_motivo: motivo, p_liberar_mesa: !!liberarMesa,
       }),

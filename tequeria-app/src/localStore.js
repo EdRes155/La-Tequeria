@@ -7,7 +7,8 @@
    · Al hacer corte se borran los tickets cerrados (y sus domicilios).
    ============================================================ */
 import {
-  CARNES_DEFAULT, BEBIDAS_DEFAULT, NUM_MESAS, preciosDefault, preciosCarne, resolverItem, resumenPeriodo, AJUSTES_VALIDOS,
+  CARNES_DEFAULT, BEBIDAS_DEFAULT, NUM_MESAS, MAX_MESAS, ZONA_DEFAULT, zonaValida, mensajeConfig,
+  preciosDefault, preciosCarne, resolverItem, resumenPeriodo, AJUSTES_VALIDOS,
   clone, uid, hora, fecha, redondear, slug, PIN_RE, pinDebil, ticketTotal, METODO_LABEL,
 } from "./dominio.js";
 
@@ -118,7 +119,8 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     const quiere = (p) => todo || partes.includes(p);
     const caja = u.rol === "cocinero" || u.rol === "admin";
     const r = { yo: { id: u.id, nombre: u.nombre, rol: u.rol, cambiarPin: !!u.debeCambiarPin } };
-    if (quiere("config")) Object.assign(r, { nombreNegocio: db.config.nombreNegocio, precios: db.config.precios, extras: db.config.extras,
+    if (quiere("config")) Object.assign(r, { nombreNegocio: db.config.nombreNegocio, zonaHoraria: db.config.zonaHoraria || ZONA_DEFAULT,
+      precios: db.config.precios, extras: db.config.extras,
       ocultos: db.config.ocultos, ajustes: db.config.ajustes || {} });
     if (quiere("carnes")) r.carnes = db.carnes;
     if (quiere("bebidas")) r.bebidas = [...db.bebidas].sort((a, b) => a.nombre.localeCompare(b.nombre));
@@ -427,6 +429,31 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       return { id };
     },
     async eliminarExtra(id) { exigir(["admin"]); db.config.extras = db.config.extras.filter((e) => e.id !== id); guardar(["config"]); },
+    // Configuración del piloto: igual que fijar_negocio y fijar_mesas del servidor. En el modo local las
+    // horas son las del navegador; la zona se guarda para cuando el negocio pase a Supabase.
+    async fijarNegocio(nombre, zona) {
+      exigir(["admin"]);
+      const n = String(nombre ?? "").trim().slice(0, 60);
+      if (!n) fallar("nombre", mensajeConfig({ error: "nombre" }));
+      if (!zonaValida(zona)) fallar("zona", mensajeConfig({ error: "zona" }));
+      db.config.nombreNegocio = n;
+      db.config.zonaHoraria = zona.trim();
+      guardar(["config"]);
+      return { ok: true, nombreNegocio: n, zonaHoraria: db.config.zonaHoraria };
+    },
+    async fijarMesas(cantidad) {
+      exigir(["admin"]);
+      const n = Number(cantidad);
+      if (!Number.isInteger(n) || n < 1 || n > MAX_MESAS) fallar("cantidad", mensajeConfig({ error: "cantidad" }));
+      const ocupadas = db.mesas.filter((m) => m.id > n
+        && (m.estado !== "libre" || db.tickets.some((t) => t.mesaId === m.id && !t.cobroId && !t.reenvio))).map((m) => m.id);
+      if (ocupadas.length) fallar("ocupadas", mensajeConfig({ error: "ocupadas", mesas: ocupadas }));
+      const actuales = new Map(db.mesas.map((m) => [m.id, m]));
+      db.mesas = Array.from({ length: n }, (_, i) => actuales.get(i + 1)
+        || { id: i + 1, estado: "libre", pedido: null, mesero: null, hora: null, extras: [], version: 0 });
+      guardar(["mesas"]);
+      return { ok: true, mesas: n };
+    },
     async fijarAjuste(clave, valor) {
       exigir(["admin"]);
       if (!AJUSTES_VALIDOS[clave]?.(valor)) fallar("DATOS", "Ajuste no válido.");
