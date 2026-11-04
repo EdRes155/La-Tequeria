@@ -10,12 +10,13 @@ sucursal.
 | Entorno de pruebas reproducible, separado de producción | PostgreSQL 16 desechable, local o en la CI (sección siguiente) | Listo |
 | Modelo de cuenta, sucursal, membresía, dispositivo y sesión, con el contexto de cada función | [MODELO.md](MODELO.md): un validador por tipo de llamada y estado de cuenta pendiente de activación | Diseño listo; paso 1 del núcleo implementado (abajo) |
 | Núcleo, paso 1: cuentas, sucursales y `sucursal_id` | Sección «MULTINEGOCIO» de `tequeria-app/supabase-schema.sql`; `tests/sql/migracion.test.js` | Implementado y ensayado sobre la instantánea de producción; no aplicado en producción |
+| Núcleo, paso 5: tiempo real privado y navegador | `_avisar_sucursal`, `privado.puede_escuchar` y la política de `realtime.messages` en `supabase-schema.sql`; `src/claves.js`; `tests/sql/tiempo-real.test.js` y `tests/navegador.test.js` | Implementado y probado con el stub de Realtime; la medición con una conexión abierta queda para staging (paso 7) |
 | Configuración del piloto (PLAN §2) | `fijar_negocio` y `fijar_mesas` en `supabase-schema.sql`, el modo local y Administración → Negocio; `tests/sql/configuracion.test.js` | Implementado y probado (servidor, modo local y navegador) |
 | Núcleo, paso 4: dispositivos y dueños | `_vinculacion`, `_identidad` y `_dueno`; alta de cuentas, invitaciones, membresías, códigos, vinculación y revocación en `supabase-schema.sql`; `tests/sql/duenos.test.js` y la matriz | Implementado y probado con el `auth.users` de pruebas; falta probarlo contra Supabase Auth real en staging. El panel y la pantalla de vinculación van con el cliente (paso 6) |
 | Núcleo, paso 3: política de seguridad del personal | `_contexto` con tipo de llamada, contadores, `desbloquear` y `restablecer_acceso` en `supabase-schema.sql`; `tests/sql/reloj.test.js` | Implementado y probado con reloj controlado en el servidor; la parte de la interfaz va con el cliente (paso 6) |
 | Núcleo, paso 2: validadores y funciones por sucursal | `_dispositivo` y `_contexto` en `supabase-schema.sql`; matriz en `tests/sql/aislamiento.test.js` | Implementado: las funciones de la API prueban sus casos de aislamiento con las dos cuentas; solo quedan pendientes los declarados para pasos posteriores. Desde aquí el esquema exige equipos vinculados y ya no sirve con la app publicada (ver MIGRACION.md) |
 | Fixtures de La Tequería y «Taquería Piloto B» | `tequeria-app/tests/fixtures/multinegocio.js`, validadas por `tests/fixtures.test.js` | Se siembran en la matriz con sus dueños (`tests/sql/sembrar.js`) |
-| Matriz de aislamiento en la CI | `tequeria-app/tests/sql/aislamiento.test.js`: una receta por función y casos genéricos (token de otra sucursal, otro equipo, equipo revocado, id ajeno igual que inexistente, listas mezcladas, id repetido, PIN ajeno, identidad anónima o de un equipo, persona sin correo verificado o sin membresía, cuenta o sucursal ajena) más los propios; la guardia exige caso y receta para cada firma ejecutable desde fuera, y solo admite pendientes declarados para un paso posterior al actual (`PASO_ACTUAL` en `matriz-aislamiento.js`) | Activa: todos los casos de los pasos 2 a 4 probados; solo queda pendiente el del tiempo real de un equipo revocado (paso 5) |
+| Matriz de aislamiento en la CI | `tequeria-app/tests/sql/aislamiento.test.js`: una receta por función y casos genéricos (token de otra sucursal, otro equipo, equipo revocado, id ajeno igual que inexistente, listas mezcladas, id repetido, PIN ajeno, identidad anónima o de un equipo, persona sin correo verificado o sin membresía, cuenta o sucursal ajena) más los propios; la guardia exige caso y receta para cada firma ejecutable desde fuera, y solo admite pendientes declarados para un paso posterior al actual (`PASO_ACTUAL` en `matriz-aislamiento.js`) | Activa: todos los casos de los pasos 2 a 5 probados; solo queda pendiente la medición del tiempo real con una conexión abierta, declarada para staging (paso 7) |
 | Migración diseñada y ensayable | [MIGRACION.md](MIGRACION.md); huella de datos por entidad con versiones de origen y destino (`scripts/huella-datos.sql`, `scripts/huella.mjs`); instantánea del esquema de producción verificada exactamente (`tests/sql/esquema-v3.sql`, `scripts/catalogo-esquema.sql`, `scripts/huella-esquema.mjs`) | Expansión y contracción del estado de cobro ensayadas con datos sintéticos; falta la copia real para el ensayo completo |
 | Pruebas de seguridad con reloj controlado | `public._ahora()` en sesión e intentos; `relojControlado()` en `tests/sql/util.js`; casos en `tests/sql/reloj.test.js` | Reloj listo; los casos documentan la política vigente y se actualizan al implementar la nueva |
 
@@ -59,12 +60,10 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
 
 **A. Núcleo, en desarrollo**
 
-1. **Paso 5: tiempo real privado y navegador** ([MODELO.md §7 y §8](MODELO.md#7-tiempo-real)):
-   - canal privado `sucursal:<id>` que publica solo el servidor (disparadores por sentencia con tablas
-     de transición), políticas sobre `realtime.messages` (escuchar: equipo vigente de esa sucursal, con
-     `_auth_vigente`; publicar: nadie) y retiro del canal público `tequeria`;
-   - claves del navegador por sucursal; al revocar o desvincular, borrar las claves, cancelar
-     suscripciones y descartar respuestas tardías.
+1. **Paso 5: tiempo real privado y navegador** ([MODELO.md §7 y §8](MODELO.md#7-tiempo-real)) (hecho):
+   canal privado `sucursal:<id>` que solo publica el servidor, política de escucha con las reglas del
+   equipo, retiro del canal público, y claves del navegador por sucursal con limpieza al cambiar de
+   sucursal o al revocar el equipo.
 2. **Configuración del piloto** ([PLAN §2](../../PLAN-MULTINEGOCIO.md), «Para el piloto») (hecho):
    `fijar_negocio` (nombre y zona horaria) y `fijar_mesas` (de 1 a 60; las que se quitan se desactivan
    y solo si están libres y sin cuentas por cobrar), en el servidor, el modo local y Administración →
@@ -84,9 +83,9 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
 
 4. **Proyecto de staging:** el esquema, inicio anónimo (con CAPTCHA o límite), correo con
    confirmación, expiración del JWT y la app en una vista previa.
-5. **Pruebas contra Supabase real:** vinculación, dueños, suspensión y borrado de identidades, tiempo
-   real privado, y medir el tiempo máximo en que un equipo revocado aún recibe avisos (cierra el último
-   caso pendiente de la matriz).
+5. **Pruebas contra Supabase real** (paso 7 del núcleo, MODELO.md §9): vinculación, dueños, suspensión
+   y borrado de identidades, tiempo real privado, y medir el tiempo máximo en que un equipo revocado aún
+   recibe avisos con la conexión abierta (cierra el último caso pendiente de la matriz).
 6. **Pruebas de capacidad** (PLAN §5): equipos a la vez, llamadas, conexiones, CPU, mensajes de tiempo
    real, almacenamiento y exportaciones; de ahí, los costos.
 7. **Validar La Tequería y «Taquería Piloto B»** con datos sintéticos: venta, cobro, corte, inventario y

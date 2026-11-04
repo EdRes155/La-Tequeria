@@ -489,6 +489,7 @@ d("matriz de aislamiento entre sucursales", () => {
         const r = await A.con.caja.rpc("usuarios_login");
         expect(r.usuarios.map((u) => u.nombre).sort()).toEqual(Object.values(A.per).map((p) => p.nombre).sort());
         expect(r.negocio).toBe(A.sem.sucursal.nombre);
+        expect(r.sucursal).toEqual({ id: A.id, nombre: A.sem.sucursal.nombre });   // con ella nombra su canal y sus claves
       },
     },
     "login(text, text, text)": {
@@ -899,6 +900,24 @@ d("matriz de aislamiento entre sucursales", () => {
       },
     },
     "revocar_dispositivo(uuid, uuid)": {
+      "el equipo revocado ya no puede escuchar el canal de su sucursal desde la revocación": async () => {
+        // como el servidor de Realtime: con realtime.topic() en el canal, lee realtime.messages como el equipo
+        const c = A.con.caja, topic = "sucursal:" + A.id;
+        const escucha = async () => {
+          await c.query("select set_config('realtime.topic', $1, true)", [topic]);
+          return (await c.query("select count(*)::int n from realtime.messages where topic = $1", [topic])).rows[0].n > 0;
+        };
+        await c.query("begin");
+        try {
+          expect(await escucha()).toBe(true);
+          await comoEquipo(c, A.duenos.propietario.authUid, { anonima: false });
+          expect((await c.rpc("revocar_dispositivo", { p_cuenta: A.cuenta, p_dispositivo: A.equipoId.caja })).ok).toBe(true);
+          await comoEquipo(c, A.sem.equipos.caja.authUid);
+          expect(await escucha()).toBe(false);
+          await comoEquipo(c, A.sem.equipos.cocina.authUid);
+          expect(await escucha()).toBe(true);   // el otro equipo de A sigue escuchando
+        } finally { await c.query("rollback"); }
+      },
       "el equipo revocado pierde el acceso a los datos de inmediato": async () => {
         // en una sola transacción: la propietaria revoca la caja y, enseguida, la caja ya no puede nada
         const c = A.con.caja;

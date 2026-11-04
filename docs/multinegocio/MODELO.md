@@ -2,8 +2,8 @@
 
 Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. Los pasos 1 a 4 del
 §9 (tablas, `sucursal_id`, los cinco validadores, todas las funciones por sucursal, la política de
-seguridad del personal, y dispositivos y dueños) están implementados en `supabase-schema.sql`; lo demás
-es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
+seguridad del personal, dispositivos y dueños) y el 5 (tiempo real privado y claves del navegador por
+sucursal) están implementados en `supabase-schema.sql` y en la app; lo demás es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
 [inventario](INVENTARIO.md), generado del código.
 
 ## 1. Entidades nuevas
@@ -387,6 +387,22 @@ Reglas de aplicación (del plan):
   - escritura (publicar): **sin política para clientes**, así que ningún dispositivo puede publicar.
 - **Revocación con la conexión abierta:** se comprueba en el piloto y se mide el tiempo máximo en que
   el equipo aún recibe avisos (sin datos), con las mitigaciones del §4.
+- **Implementado (paso 5):**
+  - `_avisar_sucursal()` en 28 disparadores por sentencia (inserción, actualización y borrado; en
+    `cobros` y `cocina_hechos`, sin borrado) de las 10 tablas que ve la app. Avisa una vez a cada
+    sucursal que tiene filas en la sentencia; una sentencia sin filas no avisa. Se retiró el canal
+    público `tequeria` y `_avisar_cambio`.
+  - Escuchar: política `tequeria_escuchar_sucursal` (lectura, `authenticated`, solo `broadcast`) con
+    `privado.puede_escuchar(topic)`, que aplica las mismas reglas que `_dispositivo`. Vive en el esquema
+    `privado`, que la API no expone: la política necesita que `authenticated` la pueda ejecutar.
+  - Publicar: no hay política. Si el proyecto tiene **otra** política sobre `realtime.messages`, el
+    archivo se detiene y pide revisarla (una de inserción dejaría publicar a los clientes; una de
+    lectura más amplia, escuchar canales ajenos).
+  - Requisitos en Supabase: en Realtime, desactivar el acceso público a los canales (solo privados); no
+    agregar `privado` a los esquemas expuestos de la API.
+  - Pruebas: `tests/sql/tiempo-real.test.js` reproduce la autorización de Realtime (con
+    `realtime.topic()` y la identidad del equipo) para cada regla. La medición con una conexión ya
+    abierta necesita Supabase real (§9, paso 7).
 
 ## 8. Navegador
 
@@ -396,7 +412,17 @@ Reglas de aplicación (del plan):
 - **Identidad del dispositivo:** la sesión de Supabase la guarda `supabase-js` en su propia clave.
 - **Al revocar el dispositivo o vencer su vinculación:** se borran todas las claves `tequeria:*`, se
   cancelan las suscripciones y se descartan las respuestas que lleguen tarde.
-- **Borradores:**
+- **Implementado (paso 5):** `src/claves.js`:
+  - la sucursal la dice el servidor en la pantalla de entrada (`usuarios_login` devuelve
+    `sucursal`) y se recuerda en `tequeria:sucursal`; el modo local usa la sucursal `local`;
+  - sesión del operador, estación, papel, sonido del monitor y último usuario van en
+    `tequeria:<sucursal>:…`; las claves anteriores (`tequeria_*`) pasan una vez a la sucursal del
+    equipo y la sesión anterior se borra;
+  - si el equipo aparece en otra sucursal, se borran las claves de la anterior y su sesión;
+  - si el servidor responde `DISPOSITIVO`, se borran todas las claves de la app, se sueltan los canales
+    y sube la «generación»: las respuestas de antes se descartan (`DESCARTADA`) y la app vuelve a la
+    entrada. La pantalla de vinculación llega con el cliente (paso 6).
+- **Borradores** (paso 6):
   - se guardan con la sucursal y el autor;
   - tras un bloqueo, solo se recuperan al reautenticar al mismo operador; el siguiente usuario no
     los ve;
@@ -426,6 +452,11 @@ Reglas de aplicación (del plan):
    bitácora por cuenta (§3.3 y §4). Pruebas en la matriz y en `tests/sql/duenos.test.js` (flujos,
    límites y carreras). Falta probarlo contra Supabase Auth real (inicio anónimo, correo verificado,
    suspensión) en un proyecto de staging antes del piloto.
-5. **Tiempo real privado y claves del navegador por sucursal.**
+5. **Tiempo real privado y claves del navegador por sucursal** (hecho): canal `sucursal:<id>` que
+   solo publica el servidor, política de escucha con las reglas de `_dispositivo`, y claves del navegador
+   por sucursal con limpieza al cambiar de sucursal o al revocar el equipo (§7 y §8).
 6. **Cliente:** panel de dueños, vinculación, pantalla de desbloqueo, validación del PIN de 6 a 8
    dígitos en la interfaz (también en el modo local) y borradores por autor.
+7. **Validación con Supabase real (staging):** inicio anónimo, correo verificado, suspensión de
+   identidades, canales privados con el servidor de Realtime real y la medición del tiempo máximo en
+   que un equipo revocado aún recibe avisos con la conexión abierta (el caso «(paso 7)» de la matriz).

@@ -9,6 +9,7 @@
 import { supabase } from "./supabaseClient.js";
 import { crearLocal } from "./localStore.js";
 import { mensajeConfig } from "./dominio.js";
+import { clave, cambiarSucursal, borrarTodo, sucursalActual } from "./claves.js";
 
 export class ErrorApi extends Error {
   constructor(codigo, mensaje, extra = {}) {
@@ -26,12 +27,12 @@ export const TABLA_PARTES = {
   cobros: ["porCobrar", "historial", "cortes", "cocina"], cocina_hechos: ["cocina"],
 };
 
-const SESION_KEY = "tequeria_sesion";
+// La sesión del operador vive en sessionStorage, con la sucursal en la clave (claves.js)
 const DISP_KEY = "tequeria_dispositivo";
 
 export function dispositivo() {
   let s = null;
-  try { s = localStorage.getItem(DISP_KEY) || localStorage.getItem("tequeria_cocina_sid"); } catch {}
+  try { s = localStorage.getItem(DISP_KEY); } catch {}
   if (!s) {
     s = Math.random().toString(36).slice(2) + Date.now().toString(36);
     try { localStorage.setItem(DISP_KEY, s); } catch {}
@@ -39,9 +40,9 @@ export function dispositivo() {
   return s.slice(0, 64);
 }
 
-export const leerSesion = () => { try { return JSON.parse(sessionStorage.getItem(SESION_KEY) || "null"); } catch { return null; } };
+export const leerSesion = () => { try { return JSON.parse(sessionStorage.getItem(clave("sesion")) || "null"); } catch { return null; } };
 export const guardarSesion = (s) => {
-  try { if (s) sessionStorage.setItem(SESION_KEY, JSON.stringify(s)); else sessionStorage.removeItem(SESION_KEY); } catch {}
+  try { if (s) sessionStorage.setItem(clave("sesion"), JSON.stringify(s)); else sessionStorage.removeItem(clave("sesion")); } catch {}
 };
 
 // Errores pasajeros (red, tiempo agotado, servidor ocupado): se pueden reintentar sin riesgo
@@ -75,10 +76,22 @@ const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 function crearRemoto() {
   let sesion = leerSesion();
   const token = () => sesion?.token || null;
+  // Generación: sube cuando el equipo cambia de sucursal o deja de estar autorizado. Las respuestas que
+  // lleguen después de la llamada de otra generación se descartan (MODELO.md §8).
+  let generacion = 0;
+  const canales = new Set();
+  function desvincular() {
+    generacion++;
+    sesion = null;
+    borrarTodo();
+    for (const ch of canales) { try { supabase.removeChannel(ch); } catch {} }
+    canales.clear();
+  }
 
   // Cada llamada tiene tiempo límite. Las que no duplican nada al repetirse (reintentos > 0)
   // se reintentan solas ante fallos pasajeros: 0.6 s, 1.2 s…
   async function rpc(fn, args = {}, { reintentos = 0, limite = LIMITE_MS } = {}) {
+    const g = generacion;
     for (let intento = 0; ; intento++) {
       const ctrl = typeof AbortController === "function" ? new AbortController() : null;
       let vencido = false, res;
@@ -89,8 +102,13 @@ function crearRemoto() {
         res = await q;
       } catch (e) { res = { error: e, status: 0 }; }
       finally { clearTimeout(reloj); }
+      if (g !== generacion) {
+        throw new ErrorApi("DESCARTADA", "La respuesta llegó cuando el equipo ya había cambiado de sucursal o de autorización.");
+      }
       if (!res.error) return res.data;
       const err = traducir(res.error, res.status, vencido);
+      // el equipo dejó de estar autorizado (revocado, suspendido o de una sucursal o cuenta inactiva)
+      if (err.codigo === "DISPOSITIVO") desvincular();
       if (err.codigo === "RED" && intento < reintentos) { await esperar(600 * 2 ** intento); continue; }
       throw err;
     }
@@ -112,7 +130,13 @@ function crearRemoto() {
 
   return {
     modo: "remoto",
-    pantallaLogin: () => rpc("usuarios_login", {}, seguro),
+    async pantallaLogin() {
+      const r = await rpc("usuarios_login", {}, seguro);
+      // el servidor dice de qué sucursal es este equipo; si es otra que la anterior, lo de aquella se borra
+      if (cambiarSucursal(r?.sucursal?.id)) { generacion++; sesion = null; }
+      return r;
+    },
+    sucursal: sucursalActual,
     async entrar(id, pin) {
       const r = await rpc("login", { p_id: id, p_pin: pin, p_dispositivo: dispositivo() });
       if (r.ok) {
@@ -143,13 +167,24 @@ function crearRemoto() {
         clearTimeout(timer);
         timer = setTimeout(() => { const ps = [...pendientes]; pendientes = new Set(); ultimo = Date.now(); onCambio(ps); }, 250);
       };
-      const ch = supabase.channel("tequeria")
-        .on("broadcast", { event: "cambio" }, (m) => disparar(TABLA_PARTES[m?.payload?.t] || TODAS))
-        .subscribe((st) => {
-          suscrito = st === "SUBSCRIBED";
-          onConexion(suscrito ? "online" : "reconnecting");
-          if (suscrito) disparar(TODAS); // al (re)conectar, ponerse al día
+      // Canal privado de la sucursal (MODELO.md §7): solo lo escucha un equipo vinculado y vigente de esa
+      // sucursal, con su sesión de Supabase. Sin sucursal conocida, o si el servidor rechaza el canal, la app
+      // sigue al día con la consulta periódica de abajo.
+      const g = generacion, suc = sucursalActual();
+      let ch = null;
+      if (suc) {
+        ch = supabase.channel("sucursal:" + suc, { config: { private: true } })
+          .on("broadcast", { event: "cambio" }, (m) => { if (g === generacion) disparar(TABLA_PARTES[m?.payload?.t] || TODAS); });
+        canales.add(ch);
+        Promise.resolve(supabase.realtime?.setAuth?.()).catch(() => {}).finally(() => {
+          if (g !== generacion || !canales.has(ch)) return;
+          ch.subscribe((st) => {
+            suscrito = st === "SUBSCRIBED";
+            onConexion(suscrito ? "online" : "reconnecting");
+            if (suscrito) disparar(TODAS); // al (re)conectar, ponerse al día
+          });
         });
+      } else onConexion("reconnecting");
       // Respaldo si el tiempo real no llega: más frecuente mientras no hay suscripción
       const iv = setInterval(() => {
         if (document.visibilityState !== "visible") return;
@@ -162,7 +197,7 @@ function crearRemoto() {
         clearTimeout(timer); clearInterval(iv);
         window.removeEventListener("online", recuperar);
         document.removeEventListener("visibilitychange", recuperar);
-        supabase.removeChannel(ch);
+        if (ch) { canales.delete(ch); supabase.removeChannel(ch); }
       };
     },
 
@@ -227,5 +262,7 @@ export function mensajePin(r) {
   }
 }
 
+// En el modo local no hay servidor: una sola sucursal, «local»
+if (!supabase) cambiarSucursal("local");
 export const api = supabase ? crearRemoto() : crearLocal({ ErrorApi, mensajePin });
 export const remoto = api.modo === "remoto";

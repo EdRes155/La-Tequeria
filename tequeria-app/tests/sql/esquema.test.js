@@ -476,11 +476,12 @@ d("operación", () => {
     expect([r1.ok, r2.ok].filter(Boolean)).toHaveLength(1);
   });
 
-  it("avisa cambios por Broadcast sin enviar datos", async () => {
-    const { rows } = await sql.query("select distinct payload->>'t' t, privado from realtime.avisos order by 1");
+  it("avisa cambios por Broadcast sin enviar datos, en el canal privado de la sucursal", async () => {
+    const { rows } = await sql.query("select distinct payload->>'t' t, private, topic from realtime.messages order by 1");
     expect(rows.map((r) => r.t)).toEqual(expect.arrayContaining(["bebidas", "mesas", "tickets", "cortes"]));
-    expect(rows.every((r) => r.privado === false)).toBe(true);
-    const { rows: claves } = await sql.query("select distinct jsonb_object_keys(payload) k from realtime.avisos");
+    const s = (await sql.query("select id from public.sucursales")).rows[0].id;
+    expect(rows.every((r) => r.private === true && r.topic === "sucursal:" + s)).toBe(true);
+    const { rows: claves } = await sql.query("select distinct jsonb_object_keys(payload) k from realtime.messages");
     expect(claves.map((r) => r.k)).toEqual(["t"]);
   });
 

@@ -163,9 +163,14 @@ Implementado (paso 2) en `supabase-schema.sql`:
 
 ## 5. Cambio en producción (ventana acordada)
 
-Antes de la ventana, en Supabase Auth: inicio de sesión anónimo activado y protegido (CAPTCHA o límite
-por IP), inicio con correo con confirmación obligatoria (o con Google) y la expiración del JWT acordada
-(MODELO.md §4).
+Antes de la ventana, en Supabase:
+
+- Auth: inicio de sesión anónimo activado y protegido (CAPTCHA o límite por IP), inicio con correo con
+  confirmación obligatoria (o con Google) y la expiración del JWT acordada (MODELO.md §4).
+- Realtime: solo canales privados (acceso público desactivado), y ninguna política sobre
+  `realtime.messages` que no sea la de la app: si hay otra, el archivo se detiene para revisarla
+  (MODELO.md §7).
+- API: el esquema `privado` no se agrega a los esquemas expuestos.
 
 1. Fuera del horario de servicio, con el personal avisado.
 2. Comprobar que no haya mesas abiertas, comandas en cocina ni cuentas por cobrar. Lo ideal es hacer

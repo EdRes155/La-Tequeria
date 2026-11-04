@@ -15,7 +15,7 @@
 // pendientes. Las pruebas están en tests/sql/aislamiento.test.js.
 
 // Último paso del núcleo terminado (docs/multinegocio/MODELO.md §9)
-export const PASO_ACTUAL = 4;
+export const PASO_ACTUAL = 5;
 
 export const MATRIZ = {
   "usuarios_login()": { dispositivo: true, casos: ["solo lista el personal de la sucursal del dispositivo"] },
@@ -96,7 +96,9 @@ export const MATRIZ = {
   "listar_dispositivos(uuid, uuid)": { dueno: true, casos: ["solo lista los equipos de las sucursales de su cuenta"] },
   "revocar_dispositivo(uuid, uuid)": { dueno: true, casos: [
     "el equipo revocado pierde el acceso a los datos de inmediato",
-    "el equipo revocado deja de recibir avisos en el tiempo máximo medido (paso 5)",
+    "el equipo revocado ya no puede escuchar el canal de su sucursal desde la revocación",
+    // una conexión de Realtime ya abierta solo se puede medir con Supabase real: staging (MODELO.md §9, paso 7)
+    "el equipo revocado deja de recibir avisos en una conexión ya abierta dentro del tiempo máximo medido (paso 7)",
   ] },
   // funciones nuevas que aún no existen: { futura: N, … } con solo el nombre como llave; al crearlas, la
   // entrada pasa a su firma completa

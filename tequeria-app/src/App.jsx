@@ -15,6 +15,7 @@ import {
   agruparComandas, lineaCocina, ZONAS_MX, ZONA_DEFAULT, MAX_MESAS,
 } from "./dominio.js";
 import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
+import { leer as leerClave, guardar as guardarClave, leerJson, guardarJson } from "./claves.js";
 import { CSS } from "./estilos.js";
 
 /* ============================================================
@@ -166,7 +167,10 @@ export default function App() {
 
   const manejarError = useCallback((e) => {
     if (!(e instanceof ErrorApi)) { console.error(e); toast("Ocurrió un error inesperado.", "error"); return; }
+    if (e.codigo === "DESCARTADA") return;   // respuesta de antes de cambiar de sucursal o de autorización
     if (e.codigo === "SESION") { cerrarSesion(e.message); return; }
+    // el equipo dejó de estar autorizado: el almacén ya borró sus claves y canales; se vuelve a la entrada
+    if (e.codigo === "DISPOSITIVO") { cerrarSesion(e.message); return; }
     if (e.codigo === "CAMBIAR_PIN") { setSesion((s) => s && { ...s, debeCambiarPin: true }); return; }
     if (e.codigo === "RED") setSinRed(true);
     toast(e.message, "error");
@@ -507,7 +511,7 @@ function SinAcceso() {
 }
 
 /* ============================== ENTRADA ============================== */
-const ULTIMO_KEY = "tequeria_ultimo_usuario";
+const ULTIMO_KEY = "ultimo_usuario";   // claves por sucursal (claves.js)
 const fmtHora = new Intl.DateTimeFormat("es-MX", { hour: "2-digit", minute: "2-digit", hour12: false });
 const fmtFecha = new Intl.DateTimeFormat("es-MX", { weekday: "long", day: "numeric", month: "long" });
 
@@ -560,7 +564,7 @@ function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
   useEffect(() => {
     if (sel || !usuarios.length) return;
     let ultimo = null;
-    try { ultimo = localStorage.getItem(ULTIMO_KEY); } catch {}
+    ultimo = leerClave(ULTIMO_KEY);
     if (ultimo && usuarios.some((u) => u.id === ultimo)) setSel(ultimo);
   }, [pantalla]);
   useEffect(() => { if (sel) pinRef.current?.focus({ preventScroll: true }); }, [sel]);
@@ -578,7 +582,7 @@ function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
       // con varias pantallas de cocina permitidas, otra pantalla pudo entrar en el mismo segundo: se reintenta una vez
       if (!r.ok && r.error === "cocina_ocupada") { await new Promise((ok) => setTimeout(ok, 2000)); r = await api.entrar(sel, pin); }
       if (!r.ok) { setErr(mensajePin(r)); setPin(""); setAgitar((n) => n + 1); return; }
-      try { localStorage.setItem(ULTIMO_KEY, sel); } catch {}
+      guardarClave(ULTIMO_KEY, sel);
       onEntrar(r);
     } catch (ex) {
       setErr(ex instanceof ErrorApi ? ex.message : "No se pudo entrar. Inténtalo de nuevo.");
@@ -1546,7 +1550,7 @@ function ticketView(t) {
 const esBebida = (it) => it.cat === "bebida" || (it.key || "").startsWith("beb-");
 const itemPrecio = (it) => (it.precio || 0) * it.cantidad;
 
-const AUTOPRINT_KEY = "tequeria_autoprint";   // versión anterior: «auto-imprimir en cocina»
+const AUTOPRINT_KEY = "autoprint";   // versión anterior: «auto-imprimir en cocina»
 
 // Sonido corto (beep) sin archivos
 function beep() {
@@ -1763,10 +1767,10 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
 }
 
 /* ============================== TICKET ============================== */
-const PAPEL_KEY = "tequeria_papel";
-const leerPapel = () => { try { return localStorage.getItem(PAPEL_KEY) === "80" ? 80 : 58; } catch { return 58; } };
+const PAPEL_KEY = "papel";
+const leerPapel = () => (leerClave(PAPEL_KEY) === "80" ? 80 : 58);
 
-const guardarPapel = (mm) => { try { localStorage.setItem(PAPEL_KEY, String(mm)); } catch {} };
+const guardarPapel = (mm) => guardarClave(PAPEL_KEY, String(mm));
 const estiloPapel = (papel) => `@media print{@page{size:${papel}mm auto;} html,body{width:${papel}mm;} #print-area{width:${papel}mm!important;}}`;
 
 // El papel del ticket: «cuenta» para el cliente (con precios) o «cocina» (comanda sin precios)
@@ -1924,15 +1928,14 @@ function TicketModal({ t, negocio, onClose, formatoInicial = "cuenta" }) {
 /* ============================== ESTACIONES DE IMPRESIÓN ============================== */
 // Cada dispositivo puede ser la «barra» (imprime el ticket del cliente de cada pedido nuevo)
 // o la «cocina» (imprime la comanda). En modo monitor la cocina imprime solo si el negocio lo pide.
-const ESTACION_KEY = "tequeria_estacion";
+const ESTACION_KEY = "estacion";
 const ESTACIONES = { barra: ["mesero", "admin"], cocina: ["cocinero", "admin"] };
 const ESTACION_LABEL = { barra: "Barra", cocina: "Cocina" };
 function leerEstacion(rol) {
-  let v = "";
-  try { v = localStorage.getItem(ESTACION_KEY) ?? (localStorage.getItem(AUTOPRINT_KEY) === "1" ? "cocina" : ""); } catch {}
+  const v = leerClave(ESTACION_KEY) ?? (leerClave(AUTOPRINT_KEY) === "1" ? "cocina" : "");
   return ESTACIONES[v]?.includes(rol) ? v : "";
 }
-const guardarEstacion = (v) => { try { localStorage.setItem(ESTACION_KEY, v); localStorage.removeItem(AUTOPRINT_KEY); } catch {} };
+const guardarEstacion = (v) => { guardarClave(ESTACION_KEY, v); guardarClave(AUTOPRINT_KEY, null); };
 
 // Imprime en cola, sin abrir diálogos, lo que le toca a la estación de este dispositivo
 function ImpresionAutomatica({ data, estacion, ajustes }) {
@@ -2018,9 +2021,9 @@ function DispositivoModal({ user, ajustes, estacion, onCambiar, onClose }) {
 }
 
 /* ============================== MONITOR DE COCINA ============================== */
-const SONIDO_KEY = "tequeria_monitor_sonido";
-const leerLS = (k, def) => { try { const v = localStorage.getItem(k); return v == null ? def : JSON.parse(v); } catch { return def; } };
-const guardarLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const SONIDO_KEY = "monitor_sonido";
+const leerLS = (k, def) => leerJson(k, def);
+const guardarLS = (k, v) => guardarJson(k, v);
 function pitido() {
   try {
     const C = window.AudioContext || window.webkitAudioContext;

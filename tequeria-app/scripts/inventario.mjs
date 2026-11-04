@@ -63,10 +63,17 @@ function cliente() {
   const claves = [], rpcs = new Set(), canales = new Set();
   for (const a of archivos) {
     const s = fs.readFileSync(path.join(src, a), "utf8");
-    for (const m of s.matchAll(/const\s+(\w*KEY\w*)\s*=\s*"(tequeria_[^"]+)"/g)) claves.push({ archivo: a, nombre: m[1], clave: m[2] });
-    for (const m of s.matchAll(/getItem\(\s*"(tequeria_[^"]+)"/g)) claves.push({ archivo: a, nombre: "(literal, versión anterior)", clave: m[1] });
-    for (const m of s.matchAll(/(?:rpc|conToken|conPin)\(\s*"(\w+)"/g)) rpcs.add(m[1]);
-    for (const m of s.matchAll(/\.channel\(\s*"([^"]+)"/g)) canales.add(m[1]);
+    // claves sin sucursal: constantes «tequeria_…» y lecturas literales
+    for (const m of s.matchAll(/const\s+(\w*KEY\w*)\s*=\s*"(tequeria_[^"]+)"/g)) claves.push({ archivo: a, nombre: m[1], clave: m[2], sucursal: false });
+    for (const m of s.matchAll(/getItem\(\s*"(tequeria_[^"]+)"/g)) claves.push({ archivo: a, nombre: "(literal)", clave: m[1], sucursal: false });
+    // claves por sucursal (src/claves.js): constantes con nombre corto en archivos que usan claves.js, y clave("…")
+    if (/from\s+"\.\/claves\.js"/.test(s)) {
+      for (const m of s.matchAll(/const\s+(\w*_KEY)\s*=\s*"(?!tequeria_)([a-z_]+)"/g)) claves.push({ archivo: a, nombre: m[1], clave: `tequeria:<sucursal>:${m[2]}`, sucursal: true });
+      for (const m of s.matchAll(/\bclave\(\s*"([a-z_]+)"\s*\)/g)) claves.push({ archivo: a, nombre: `clave("${m[1]}")`, clave: `tequeria:<sucursal>:${m[1]}`, sucursal: true });
+    }
+    for (const m of s.matchAll(/const\s+(\w*KEY\w*)\s*=\s*PREFIJO\s*\+\s*"([a-z_]+)"/g)) claves.push({ archivo: a, nombre: m[1], clave: `tequeria:${m[2]}`, sucursal: false });
+    for (const m of s.matchAll(/(?:rpc|conToken|conPin|conConfig)\(\s*"(\w+)"/g)) rpcs.add(m[1]);
+    for (const m of s.matchAll(/\.channel\(\s*"([^"]+)"(\s*\+\s*\w+)?/g)) canales.add(m[2] ? `${m[1]}<id>` : m[1]);
   }
   // PIN de 4 o 5 dígitos en las pruebas: deberán cambiar con la política de 6 a 8 dígitos. Las copias
   // fijas de esquemas ya publicados no se adaptan (reproducen producción tal como está).
@@ -82,7 +89,9 @@ function cliente() {
   });
   recorrer(path.join(app, "tests"));
   pruebas.sort((x, y) => (x.archivo < y.archivo ? -1 : 1));
-  return { claves: claves.sort((x, y) => x.clave.localeCompare(y.clave)), rpcs: [...rpcs].sort(), canales: [...canales].sort(), pruebas };
+  const vistas = new Set();
+  const unicasClaves = claves.filter((k) => !vistas.has(k.clave + "|" + k.archivo) && vistas.add(k.clave + "|" + k.archivo));
+  return { claves: unicasClaves.sort((x, y) => x.clave.localeCompare(y.clave)), rpcs: [...rpcs].sort(), canales: [...canales].sort(), pruebas };
 }
 
 function documento({ tablas, funciones, disparadores }, cli) {
@@ -122,7 +131,8 @@ function documento({ tablas, funciones, disparadores }, cli) {
     ? `⚠️ Sin comprobar la sucursal: ${lista(idemSinSucursal)}.` : "Todas comprueban que sea de la misma sucursal."}`);
   L.push(`- **PIN de administrador:** ${lista(pinAdmin)}. ${pinCualquiera.length
     ? `⚠️ Aceptan el de cualquier sucursal: ${lista(pinCualquiera)}.` : "Todas lo buscan solo en la sucursal de la sesión."}`);
-  L.push(`- **Tiempo real:** el servidor avisa en el canal ${lista(unicos(cli.canales))} (público y único para todos; el canal privado por sucursal es el paso 5); el navegador escucha ${lista(cli.canales)}.`);
+  const avisan = disparadores.filter((d) => /_avisar_sucursal/.test(d.def));
+  L.push(`- **Tiempo real:** el servidor avisa en el canal privado de cada sucursal (\`sucursal:<id>\`) desde ${avisan.length} disparadores por sentencia en ${lista(unicos(avisan.map((d) => d.tabla)))}; solo escucha un equipo vigente de esa sucursal (política sobre \`realtime.messages\` con \`privado.puede_escuchar\`) y ningún cliente publica. El navegador escucha ${lista(cli.canales)}.`);
   L.push(`- **Funciones de la API que el navegador no usa:** ${lista(sinUso)} (compatibilidad; decidir si se retiran).`);
   L.push("");
   L.push("## Tablas");
@@ -159,11 +169,13 @@ function documento({ tablas, funciones, disparadores }, cli) {
   L.push("");
   L.push("## Navegador");
   L.push("");
-  L.push("Claves guardadas en `localStorage` o `sessionStorage`. Deberán incluir la sucursal o borrarse al cambiar de sucursal.");
+  L.push("Claves guardadas en `localStorage` o `sessionStorage` (`src/claves.js`). Las de la sucursal se borran al");
+  L.push("cambiar de sucursal; todas las de la app, al revocar el equipo. Las de antes (`tequeria_*`) pasan una vez a la");
+  L.push("sucursal del equipo. Las del modo local son su propia base y no dependen de ningún servidor.");
   L.push("");
-  L.push("| Clave | Constante | Archivo |");
-  L.push("|---|---|---|");
-  for (const k of cli.claves) L.push(`| \`${k.clave}\` | \`${k.nombre}\` | \`src/${k.archivo}\` |`);
+  L.push("| Clave | Constante | Archivo | Por sucursal |");
+  L.push("|---|---|---|---|");
+  for (const k of cli.claves) L.push(`| \`${k.clave}\` | \`${k.nombre}\` | \`src/${k.archivo}\` | ${k.sucursal ? "Sí" : "No"} |`);
   L.push("");
   L.push(`Funciones que llama el navegador (${cli.rpcs.length}): ${lista(cli.rpcs)}.`);
   L.push("");

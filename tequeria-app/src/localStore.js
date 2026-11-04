@@ -521,7 +521,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     modo: "local",
     async pantallaLogin() {
       db = cargarDb();
-      return { negocio: db.config.nombreNegocio, usuarios: db.usuarios.map(({ id, nombre }) => ({ id, nombre })).sort((a, b) => a.nombre.localeCompare(b.nombre)),
+      return { sucursal: { id: "local", nombre: db.config.nombreNegocio }, negocio: db.config.nombreNegocio, usuarios: db.usuarios.map(({ id, nombre }) => ({ id, nombre })).sort((a, b) => a.nombre.localeCompare(b.nombre)),
         hayAdmin: db.usuarios.some((u) => u.rol === "admin") };
     },
     // Solo modo local: primer administrador desde la pantalla de entrada
@@ -550,6 +550,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       return u ? { usuario: { id: u.id, nombre: u.nombre, rol: u.rol }, debeCambiarPin: !!u.debeCambiarPin } : null;
     },
     async salir() { guardarSesion(null); },
+    sucursal: () => "local",
     async cambiarPin(actual, nuevo) {
       const u = yo();
       if (u.pinHash !== await hashPin(actual, u.id)) { const restantes = fallo("s:" + u.id, 5); guardar([]); return { ok: false, error: "pin", restantes }; }

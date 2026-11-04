@@ -1438,17 +1438,43 @@ returns bigint language sql set search_path = public as $$
   returning ultimo;
 $$;
 
--- Aviso de cambios por Realtime Broadcast: solo el nombre de la tabla, nunca datos.
--- Sigue en el canal público hasta el paso 5 (canal privado por sucursal).
-create or replace function public._avisar_cambio()
+-- Aviso de cambios por Realtime Broadcast (MODELO.md §7): canal PRIVADO de cada sucursal,
+-- «sucursal:<id>», y solo el nombre de la tabla, nunca datos (cada pantalla los pide por la API, que
+-- comprueba equipo y sesión). Lo llaman disparadores por sentencia con tablas de transición: «nuevas»
+-- (inserción y actualización) y «viejas» (actualización y borrado), y avisa una vez a cada sucursal que
+-- tiene filas en la sentencia. Una sentencia que no cambia filas no avisa. Si el tiempo real falla, la
+-- operación sigue: las pantallas se ponen al día con su consulta periódica.
+create or replace function public._avisar_sucursal()
 returns trigger language plpgsql security definer set search_path = public as $$
+declare v uuid;
 begin
   begin
-    perform realtime.send(jsonb_build_object('t', tg_table_name), 'cambio', 'tequeria', false);
+    for v in execute case tg_op
+        when 'INSERT' then 'select distinct sucursal_id from nuevas'
+        when 'DELETE' then 'select distinct sucursal_id from viejas'
+        else 'select sucursal_id from nuevas union select sucursal_id from viejas' end loop
+      perform realtime.send(jsonb_build_object('t', tg_table_name), 'cambio', 'sucursal:' || v, true);
+    end loop;
   exception when others then null;
   end;
   return null;
 end $$;
+
+-- ¿Puede esta identidad escuchar este canal? Solo un equipo vinculado, sin revocar, con la identidad vigente
+-- (_auth_vigente), de una sucursal activa de una cuenta activa, y solo el canal de SU sucursal: las mismas
+-- reglas que _dispositivo. La usa la política de realtime.messages; vive en el esquema «privado», que la API
+-- no expone, porque la política necesita que authenticated la pueda ejecutar.
+create schema if not exists privado;
+create or replace function privado.puede_escuchar(p_topic text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select coalesce(p_topic like 'sucursal:%', false) and exists (
+    select 1 from public.dispositivos d
+      join public.sucursales s on s.id = d.sucursal_id
+      join public.cuentas c on c.id = s.cuenta_id
+     where d.auth_user_id = auth.uid() and d.revocado_en is null and s.activa and c.estado = 'activa'
+       and public._auth_vigente(d.auth_user_id, true)
+       and p_topic = 'sucursal:' || d.sucursal_id::text)
+$$;
 
 -- ---------------------------------------------------------------------
 --  API PÚBLICA: login y sesión
@@ -1462,6 +1488,8 @@ declare d record;
 begin
   select * into d from public._dispositivo();
   return json_build_object(
+    -- la sucursal del equipo: con ella la app nombra su canal de tiempo real y sus claves del navegador
+    'sucursal', (select json_build_object('id', s.id, 'nombre', s.nombre) from public.sucursales s where s.id = d.sucursal_id),
     'negocio', coalesce((select nombre_negocio from public.config where sucursal_id = d.sucursal_id), 'La Tequería'),
     'usuarios', coalesce((select json_agg(json_build_object('id', id, 'nombre', nombre) order by nombre)
                             from public.usuarios where sucursal_id = d.sucursal_id), '[]'::json),
@@ -2917,25 +2945,49 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
---  TIEMPO REAL: aviso por Broadcast (sin datos) en lugar de postgres_changes
+--  TIEMPO REAL PRIVADO POR SUCURSAL (MODELO.md §7; multinegocio paso 5)
+--  · Publica solo el servidor, desde estos disparadores. PostgreSQL solo admite tablas de transición en
+--    disparadores de un solo evento: uno para inserción, uno para actualización y uno para borrado.
+--  · Escuchar: política sobre realtime.messages con privado.puede_escuchar. Publicar: ninguna política,
+--    así que ningún cliente puede.
 -- ---------------------------------------------------------------------
 do $$
 declare t text;
 begin
-  foreach t in array array['config','carnes','bebidas','usuarios','mesas','tickets','cortes','gastos'] loop
+  foreach t in array array['config','carnes','bebidas','usuarios','mesas','tickets','cortes','gastos','cobros','cocina_hechos'] loop
     execute format('drop trigger if exists avisar_cambio on public.%I', t);
-    execute format('create trigger avisar_cambio after insert or update or delete on public.%I
-                    for each statement execute function public._avisar_cambio()', t);
+    execute format('create or replace trigger avisar_insercion after insert on public.%I
+                    referencing new table as nuevas for each statement execute function public._avisar_sucursal()', t);
+    execute format('create or replace trigger avisar_actualizacion after update on public.%I
+                    referencing old table as viejas new table as nuevas for each statement execute function public._avisar_sucursal()', t);
+    if t not in ('cobros', 'cocina_hechos') then
+      execute format('create or replace trigger avisar_borrado after delete on public.%I
+                      referencing old table as viejas for each statement execute function public._avisar_sucursal()', t);
+    end if;
     begin
       execute format('alter publication supabase_realtime drop table public.%I', t);
     exception when others then null;
     end;
   end loop;
 end $$;
-create or replace trigger avisar_cambio after insert or update on public.cobros
-  for each statement execute function public._avisar_cambio();
-create or replace trigger avisar_cambio after insert or update on public.cocina_hechos
-  for each statement execute function public._avisar_cambio();
+drop function if exists public._avisar_cambio();
+
+-- Política de escucha. Ninguna otra política sobre realtime.messages puede quedar: una de inserción dejaría
+-- publicar a los clientes, y una de lectura más amplia, escuchar canales ajenos. Si hay alguna (por ejemplo,
+-- de pruebas anteriores en el proyecto), el archivo se detiene para revisarla a mano.
+do $$
+declare v_otras text;
+begin
+  if to_regclass('realtime.messages') is null then return; end if;
+  select string_agg(policyname || ' (' || cmd || ')', ', ' order by policyname) into v_otras
+    from pg_policies where schemaname = 'realtime' and tablename = 'messages' and policyname <> 'tequeria_escuchar_sucursal';
+  if v_otras is not null then
+    raise exception 'Tiempo real: hay otras políticas sobre realtime.messages (%). Revísalas y bórralas antes de aplicar: la app solo admite la suya, de lectura.', v_otras;
+  end if;
+  drop policy if exists tequeria_escuchar_sucursal on realtime.messages;
+  create policy tequeria_escuchar_sucursal on realtime.messages for select to authenticated
+    using (realtime.messages.extension = 'broadcast' and privado.puede_escuchar(realtime.topic()));
+end $$;
 
 -- ---------------------------------------------------------------------
 --  MULTINEGOCIO: CONTRACCIÓN DEL ESTADO DE COBRO (MIGRACION.md §4.3 y §4.5)
@@ -3029,7 +3081,7 @@ begin
            where n.nspname = 'public' and p.proname in (
              '_error','_ahora','_ahora_local','_fecha','_hora','_ip','_hash_pin','_pin_ok','_pin_formato_ok','_pin_debil',
              '_espera','_fallo','_limpiar_intentos','_log','_dispositivo','_contexto','_verificar_admin','_ticket_json',
-             '_mesa_json','_resumen','_resolver_item','_valorar_items','_total_items','_avisar_cambio','_precio_ok',
+             '_mesa_json','_resumen','_resolver_item','_valorar_items','_total_items','_avisar_sucursal','_precio_ok',
              'crear_admin_inicial','usuarios_login','login','logout','cambiar_pin','estado','guardar_borrador_mesa',
              'liberar_mesa','enviar_comanda','reenviar_cocina','latido_cocina',
              'liberar_cocina','hacer_corte','ajustar_bebida','actualizar_bebida','agregar_bebida','eliminar_bebida',
@@ -3053,6 +3105,13 @@ begin
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;
 end $$;
+
+-- Esquema «privado»: no lo expone la API (no se agrega a los esquemas expuestos de Supabase). Solo
+-- authenticated ejecuta puede_escuchar, porque la evalúa la política de tiempo real con su identidad.
+revoke all on schema privado from public, anon;
+grant usage on schema privado to authenticated;
+revoke all on all functions in schema privado from public, anon, authenticated;
+grant execute on function privado.puede_escuchar(text) to authenticated;
 
 -- …salvo la API, que valida equipo, sesión y rol por dentro. Solo para authenticated: los equipos
 -- entran con una sesión anónima de Supabase (rol authenticated) y la vinculan a una sucursal.

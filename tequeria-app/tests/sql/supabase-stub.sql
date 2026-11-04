@@ -16,11 +16,23 @@ alter default privileges in schema public grant all on tables to anon, authentic
 alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
 alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
 
+-- Tiempo real: realtime.messages con RLS (como en Supabase, las políticas deciden quién escucha y quién
+-- publica), realtime.topic() (el canal que se está autorizando) y realtime.send, que registra el aviso.
 create schema if not exists realtime;
-create table if not exists realtime.avisos (id bigserial primary key, payload jsonb, evento text, tema text, privado boolean, creado timestamptz default now());
+create table if not exists realtime.messages (
+  id bigserial primary key, topic text not null, extension text not null default 'broadcast', payload jsonb,
+  event text, private boolean default false, inserted_at timestamptz not null default now()
+);
+alter table realtime.messages enable row level security;
+grant usage on schema realtime to anon, authenticated;
+grant select, insert, update, delete on realtime.messages to anon, authenticated;
+grant usage, select on all sequences in schema realtime to anon, authenticated;
+create or replace function realtime.topic() returns text language sql stable as $$
+  select nullif(current_setting('realtime.topic', true), '')
+$$;
 create or replace function realtime.send(payload jsonb, event text, topic text, private boolean default true)
-returns void language sql as $$
-  insert into realtime.avisos (payload, evento, tema, privado) values (payload, event, topic, private);
+returns void language sql security definer as $$
+  insert into realtime.messages (topic, extension, payload, event, private) values (topic, 'broadcast', payload, event, private);
 $$;
 
 do $$

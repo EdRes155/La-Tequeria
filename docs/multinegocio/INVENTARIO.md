@@ -13,8 +13,8 @@ canal y clave del navegador de esta lista debe quedar ligada a una sucursal o ju
 - **Candados** (`pg_advisory_xact_lock`): `tequeria:cobro:` por id; `tequeria:corte:` por sucursal; `tequeria:ticket:` por id. Ninguno global: el del corte es por sucursal y los de comanda y cobro son por su id, que es global.
 - **Devuelven lo ya guardado** si se repite el id: `cobrar`, `enviar_comanda`, `reenviar_cocina`. Todas comprueban que sea de la misma sucursal.
 - **PIN de administrador:** `crear_usuario`, `eliminar_usuario`, `hacer_corte`, `no_cobrar`, `restablecer_acceso`, `restablecer_pin`. Todas lo buscan solo en la sucursal de la sesión.
-- **Tiempo real:** el servidor avisa en el canal `tequeria` (público y único para todos; el canal privado por sucursal es el paso 5); el navegador escucha `tequeria`.
-- **Funciones de la API que el navegador no usa:** `aceptar_invitacion`, `cancelar_invitacion`, `crear_administrador`, `crear_cuenta`, `crear_sucursal`, `desbloquear`, `fijar_mesas`, `fijar_negocio`, `generar_codigo`, `invitar_miembro`, `listar_dispositivos`, `listar_miembros`, `mis_cuentas`, `quitar_miembro`, `restablecer_acceso`, `revocar_dispositivo`, `vincular_dispositivo` (compatibilidad; decidir si se retiran).
+- **Tiempo real:** el servidor avisa en el canal privado de cada sucursal (`sucursal:<id>`) desde 28 disparadores por sentencia en `bebidas`, `carnes`, `cobros`, `cocina_hechos`, `config`, `cortes`, `gastos`, `mesas`, `tickets`, `usuarios`; solo escucha un equipo vigente de esa sucursal (política sobre `realtime.messages` con `privado.puede_escuchar`) y ningún cliente publica. El navegador escucha `sucursal:<id>`.
+- **Funciones de la API que el navegador no usa:** `aceptar_invitacion`, `cancelar_invitacion`, `crear_administrador`, `crear_cuenta`, `crear_sucursal`, `desbloquear`, `generar_codigo`, `invitar_miembro`, `listar_dispositivos`, `listar_miembros`, `mis_cuentas`, `quitar_miembro`, `restablecer_acceso`, `revocar_dispositivo`, `vincular_dispositivo` (compatibilidad; decidir si se retiran).
 
 ## Tablas
 
@@ -106,7 +106,7 @@ Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las
 | `restablecer_acceso(p_token text, p_admin_pin text, p_id text)` | Sesión: admin · interaccion | `usuarios` · por otras: `cuentas`, `dispositivos`, `intentos`, `intentos_dispositivo`, `intentos_operador`, `sesiones`, `sesiones_actividad`, `sucursales` | por otras: `bitacora`, `intentos`, `intentos_dispositivo`, `intentos_operador`, `sesiones_actividad` | `_bloquear_operador`, `_contexto`, `_espera_operador`, `_limpiar_operador`, `_log`, `_verificar_admin` | PIN de administrador de su sucursal; recibe ids del cliente (p_id); usa `now()` (vía `_ahora`); verifica o guarda PIN (vía `_verificar_admin`); contadores de intentos `ip:` (vía `_verificar_admin`) | Sucursal de la sesión operativa |
 | `restablecer_pin(p_token text, p_admin_pin text, p_id text, p_pin_nuevo text)` | Sesión: admin · interaccion | `usuarios` · por otras: `cuentas`, `dispositivos`, `intentos`, `intentos_dispositivo`, `sesiones`, `sesiones_actividad`, `sucursales` | `sesiones`, `usuarios` · por otras: `bitacora`, `intentos`, `intentos_dispositivo`, `intentos_operador`, `sesiones_actividad` | `_ahora`, `_contexto`, `_hash_pin`, `_limpiar_operador`, `_log`, `_pin_debil`, `_pin_formato_ok`, `_verificar_admin` | PIN de administrador de su sucursal; verifica o guarda PIN; recibe ids del cliente (p_id); usa `now()` (vía `_ahora`); contadores de intentos `ip:` (vía `_verificar_admin`) | Sucursal de la sesión operativa |
 | `revocar_dispositivo(p_cuenta uuid, p_dispositivo uuid)` | Dueño: propietario, encargado · escritura | `dispositivos`, `sucursales` · por otras: `cuentas`, `membresias` | `cocina_sesion`, `dispositivos`, `sesiones` · por otras: `bitacora`, `cuentas` | `_ahora`, `_dueno`, `_log_cuenta` | usa `now()` (vía `_ahora`) | Cuenta elegida en el panel (membresía comprobada); sucursal e ids dentro de ella |
-| `usuarios_login()` | Equipo vinculado, sin operador | `config`, `usuarios` · por otras: `cuentas`, `dispositivos`, `sucursales` | — | `_dispositivo` | usa `now()` (vía `_ahora`) | Sucursal del dispositivo vinculado |
+| `usuarios_login()` | Equipo vinculado, sin operador | `config`, `sucursales`, `usuarios` · por otras: `cuentas`, `dispositivos` | — | `_dispositivo` | usa `now()` (vía `_ahora`) | Sucursal del dispositivo vinculado |
 | `vincular_dispositivo(p_codigo text, p_nombre text)` | Identidad anónima con código de vinculación | `sucursales` · por otras: `codigos_vinculacion`, `cuentas`, `dispositivos`, `intentos` | `codigos_vinculacion`, `dispositivos` · por otras: `bitacora`, `intentos` | `_ahora`, `_log_cuenta`, `_vinculacion` | usa `now()` (vía `_ahora`); contadores de intentos `vip:` (vía `_vinculacion`) | Sucursal del código de vinculación |
 
 ## Funciones internas
@@ -116,7 +116,7 @@ Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las
 | `_ahora()` | — | — | — | usa `now()` | Ninguno (no toca datos, ni directa ni indirectamente) |
 | `_ahora_local(p_sucursal uuid)` | `sucursales` | — | `_ahora` | usa `now()` (vía `_ahora`) | Recibe la sucursal de quien la llama |
 | `_auth_vigente(p_uid uuid, p_anonima boolean)` | — | — | `_ahora` | usa `now()` (vía `_ahora`) | Ninguno (no toca datos, ni directa ni indirectamente) |
-| `_avisar_cambio()` | — | — | — | aviso en tiempo real (canal `tequeria`, público) | Sucursal de la fila (canal privado por sucursal) |
+| `_avisar_sucursal()` | — | — | — | aviso en tiempo real (canal `tequeria`, público) | Sucursal de la fila (canal privado por sucursal) |
 | `_bloquear_contador(p_clave text)` | — | `intentos` | `_ahora` | usa `now()` (vía `_ahora`) | Recibe la sucursal de quien la llama |
 | `_bloquear_equipo(p_sucursal uuid, p_dispositivo uuid)` | `dispositivos` | — | — | — | Recibe la sucursal de quien la llama |
 | `_bloquear_operador(p_sucursal uuid, p_usuario text)` | — | `intentos_operador` | `_ahora` | usa `now()` (vía `_ahora`) | Recibe la sucursal de quien la llama |
@@ -174,37 +174,57 @@ Lee y escribe: primero lo directo; «por otras» es lo que hace a través de las
 
 | Tabla | Disparador | Definición |
 |---|---|---|
-| `bebidas` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.bebidas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
-| `carnes` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.carnes FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
-| `cobros` | `avisar_cambio` | `AFTER INSERT OR UPDATE ON public.cobros FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
-| `cocina_hechos` | `avisar_cambio` | `AFTER INSERT OR UPDATE ON public.cocina_hechos FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
-| `config` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.config FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
-| `cortes` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.cortes FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
+| `bebidas` | `avisar_actualizacion` | `AFTER UPDATE ON public.bebidas REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `bebidas` | `avisar_borrado` | `AFTER DELETE ON public.bebidas REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `bebidas` | `avisar_insercion` | `AFTER INSERT ON public.bebidas REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `carnes` | `avisar_actualizacion` | `AFTER UPDATE ON public.carnes REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `carnes` | `avisar_borrado` | `AFTER DELETE ON public.carnes REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `carnes` | `avisar_insercion` | `AFTER INSERT ON public.carnes REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `cobros` | `avisar_actualizacion` | `AFTER UPDATE ON public.cobros REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `cobros` | `avisar_insercion` | `AFTER INSERT ON public.cobros REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `cocina_hechos` | `avisar_actualizacion` | `AFTER UPDATE ON public.cocina_hechos REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `cocina_hechos` | `avisar_insercion` | `AFTER INSERT ON public.cocina_hechos REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `config` | `avisar_actualizacion` | `AFTER UPDATE ON public.config REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `config` | `avisar_borrado` | `AFTER DELETE ON public.config REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `config` | `avisar_insercion` | `AFTER INSERT ON public.config REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `cortes` | `avisar_actualizacion` | `AFTER UPDATE ON public.cortes REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `cortes` | `avisar_borrado` | `AFTER DELETE ON public.cortes REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `cortes` | `avisar_insercion` | `AFTER INSERT ON public.cortes REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
 | `cuentas` | `cuenta_con_propietario` | `CREATE CONSTRAINT TRIGGER cuenta_con_propietario AFTER INSERT OR UPDATE OF estado ON public.cuentas DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION _cuenta_con_propietario()` |
-| `gastos` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.gastos FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
+| `gastos` | `avisar_actualizacion` | `AFTER UPDATE ON public.gastos REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `gastos` | `avisar_borrado` | `AFTER DELETE ON public.gastos REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `gastos` | `avisar_insercion` | `AFTER INSERT ON public.gastos REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
 | `membresias` | `cuenta_con_propietario` | `CREATE CONSTRAINT TRIGGER cuenta_con_propietario AFTER DELETE OR UPDATE ON public.membresias DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION _cuenta_con_propietario()` |
-| `mesas` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.mesas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
-| `tickets` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.tickets FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
-| `usuarios` | `avisar_cambio` | `AFTER INSERT OR DELETE OR UPDATE ON public.usuarios FOR EACH STATEMENT EXECUTE FUNCTION _avisar_cambio()` |
+| `mesas` | `avisar_actualizacion` | `AFTER UPDATE ON public.mesas REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `mesas` | `avisar_borrado` | `AFTER DELETE ON public.mesas REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `mesas` | `avisar_insercion` | `AFTER INSERT ON public.mesas REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `tickets` | `avisar_actualizacion` | `AFTER UPDATE ON public.tickets REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `tickets` | `avisar_borrado` | `AFTER DELETE ON public.tickets REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `tickets` | `avisar_insercion` | `AFTER INSERT ON public.tickets REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `usuarios` | `avisar_actualizacion` | `AFTER UPDATE ON public.usuarios REFERENCING OLD TABLE AS viejas NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `usuarios` | `avisar_borrado` | `AFTER DELETE ON public.usuarios REFERENCING OLD TABLE AS viejas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
+| `usuarios` | `avisar_insercion` | `AFTER INSERT ON public.usuarios REFERENCING NEW TABLE AS nuevas FOR EACH STATEMENT EXECUTE FUNCTION _avisar_sucursal()` |
 
 ## Navegador
 
-Claves guardadas en `localStorage` o `sessionStorage`. Deberán incluir la sucursal o borrarse al cambiar de sucursal.
+Claves guardadas en `localStorage` o `sessionStorage` (`src/claves.js`). Las de la sucursal se borran al
+cambiar de sucursal; todas las de la app, al revocar el equipo. Las de antes (`tequeria_*`) pasan una vez a la
+sucursal del equipo. Las del modo local son su propia base y no dependen de ningún servidor.
 
-| Clave | Constante | Archivo |
-|---|---|---|
-| `tequeria_autoprint` | `AUTOPRINT_KEY` | `src/App.jsx` |
-| `tequeria_cocina_sid` | `(literal, versión anterior)` | `src/store.js` |
-| `tequeria_dispositivo` | `DISP_KEY` | `src/store.js` |
-| `tequeria_estacion` | `ESTACION_KEY` | `src/App.jsx` |
-| `tequeria_local_v3` | `KEY` | `src/localStore.js` |
-| `tequeria_monitor_sonido` | `SONIDO_KEY` | `src/App.jsx` |
-| `tequeria_papel` | `PAPEL_KEY` | `src/App.jsx` |
-| `tequeria_sesion` | `SESION_KEY` | `src/store.js` |
-| `tequeria_sesion_local` | `SESION_KEY` | `src/localStore.js` |
-| `tequeria_ultimo_usuario` | `ULTIMO_KEY` | `src/App.jsx` |
+| Clave | Constante | Archivo | Por sucursal |
+|---|---|---|---|
+| `tequeria_dispositivo` | `DISP_KEY` | `src/store.js` | No |
+| `tequeria_local_v3` | `KEY` | `src/localStore.js` | No |
+| `tequeria_sesion_local` | `SESION_KEY` | `src/localStore.js` | No |
+| `tequeria:<sucursal>:autoprint` | `AUTOPRINT_KEY` | `src/App.jsx` | Sí |
+| `tequeria:<sucursal>:estacion` | `ESTACION_KEY` | `src/App.jsx` | Sí |
+| `tequeria:<sucursal>:monitor_sonido` | `SONIDO_KEY` | `src/App.jsx` | Sí |
+| `tequeria:<sucursal>:papel` | `PAPEL_KEY` | `src/App.jsx` | Sí |
+| `tequeria:<sucursal>:sesion` | `clave("sesion")` | `src/store.js` | Sí |
+| `tequeria:<sucursal>:ultimo_usuario` | `ULTIMO_KEY` | `src/App.jsx` | Sí |
+| `tequeria:sucursal` | `SUCURSAL_KEY` | `src/claves.js` | No |
 
-Funciones que llama el navegador (37): `actualizar_bebida`, `actualizar_carne`, `agregar_bebida`, `agregar_carne`, `agregar_extra`, `agregar_gasto`, `ajustar_bebida`, `alternar_oculto`, `anular_cobro`, `archivar_tickets`, `cambiar_pin`, `cobrar`, `crear_usuario`, `eliminar_bebida`, `eliminar_carne`, `eliminar_extra`, `eliminar_gasto`, `eliminar_usuario`, `enviar_comanda`, `estado`, `fijar_ajuste`, `fijar_precio`, `fijar_precio_extra`, `guardar_borrador_mesa`, `hacer_corte`, `latido_cocina`, `liberar_cocina`, `liberar_mesa`, `login`, `logout`, `marcar_hecho`, `marcar_recibido`, `mover_tickets`, `no_cobrar`, `reenviar_cocina`, `restablecer_pin`, `usuarios_login`.
+Funciones que llama el navegador (39): `actualizar_bebida`, `actualizar_carne`, `agregar_bebida`, `agregar_carne`, `agregar_extra`, `agregar_gasto`, `ajustar_bebida`, `alternar_oculto`, `anular_cobro`, `archivar_tickets`, `cambiar_pin`, `cobrar`, `crear_usuario`, `eliminar_bebida`, `eliminar_carne`, `eliminar_extra`, `eliminar_gasto`, `eliminar_usuario`, `enviar_comanda`, `estado`, `fijar_ajuste`, `fijar_mesas`, `fijar_negocio`, `fijar_precio`, `fijar_precio_extra`, `guardar_borrador_mesa`, `hacer_corte`, `latido_cocina`, `liberar_cocina`, `liberar_mesa`, `login`, `logout`, `marcar_hecho`, `marcar_recibido`, `mover_tickets`, `no_cobrar`, `reenviar_cocina`, `restablecer_pin`, `usuarios_login`.
 
 ## Pruebas con PIN de 4 o 5 dígitos
 
