@@ -1,8 +1,9 @@
 # Modelo multinegocio: cuenta, sucursal, membresía, dispositivo y sesión
 
-Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. Los pasos 1 a 3 del
-§9 (tablas, `sucursal_id`, validadores `_dispositivo` y `_contexto`, todas las funciones por sucursal y la
-política de seguridad del personal) están implementados en `supabase-schema.sql`; lo demás es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
+Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. Los pasos 1 a 4 del
+§9 (tablas, `sucursal_id`, los cinco validadores, todas las funciones por sucursal, la política de
+seguridad del personal, y dispositivos y dueños) están implementados en `supabase-schema.sql`; lo demás
+es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
 [inventario](INVENTARIO.md), generado del código.
 
 ## 1. Entidades nuevas
@@ -22,7 +23,8 @@ política de seguridad del personal) están implementados en `supabase-schema.sq
 Columnas principales:
 
 - `cuentas`: `nombre`, `estado` (`pendiente_activacion`, `activa`, `suspendida`; §3.0), `creada`,
-  `activada_en`.
+  `activada_en`, `creada_por` (quien la creó con `crear_cuenta`; nulo si la creó la migración o el
+  proveedor) y `revision_propietarios` (§3.0).
 - `sucursales`: `nombre`, `zona_horaria`, `retencion_domicilio_dias`, `creada`, `activa`.
 - `membresias`: `rol`, `creada`, `creada_por`. Una persona puede estar en varias cuentas; una cuenta
   activa conserva siempre al menos un `propietario` (§3.0).
@@ -59,7 +61,7 @@ mezclar sucursales. Las claves locales pasan a ser únicas dentro de la sucursal
 | `cobros` | llave `id`, `corte_id` suelto | `id` + único `(sucursal_id, id)`; `(sucursal_id, corte_id) → cortes` |
 | `cortes`, `gastos` | llave `id` | `id` + único `(sucursal_id, id)`; `gastos.(sucursal_id, corte_id) → cortes` |
 | `cocina_hechos` | llave `(ticket_id, linea)` | + `sucursal_id`; `(sucursal_id, ticket_id) → tickets` |
-| `bitacora` | sin sucursal | + `cuenta_id`, `sucursal_id` (nulo solo para acciones de cuenta) |
+| `bitacora` | sin sucursal | + `cuenta_id`, `sucursal_id` (nulo solo para acciones de cuenta, regla `bitacora_alcance_ck`), `auth_user_id` (la persona o el equipo, cuando no actúa un operador) |
 | `intentos` | claves de texto `u:`, `s:`, `ip:` | se sustituye por `intentos_operador`, `intentos_dispositivo` y un contador por IP (§6) |
 
 ### 2.1 Estado de cobro de una comanda
@@ -100,11 +102,11 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
 
 | Validador | Lo usan | Exige | Devuelve |
 |---|---|---|---|
-| `_vinculacion(p_codigo)` | `vincular_dispositivo` | Identidad anónima de Supabase (`auth.uid()`) **sin** dispositivo vigente; código vigente y sin usar; su sucursal activa y su cuenta `activa` | `codigo_id`, `sucursal_id`, `cuenta_id`, `monitor_cocina` |
+| `_vinculacion(p_codigo)` | `vincular_dispositivo` | Identidad anónima de Supabase (`auth.uid()`) **sin** dispositivo (ni vigente ni revocado); código vigente y sin usar; su sucursal activa y su cuenta `activa` | `codigo_id`, `sucursal_id`, `cuenta_id`, `monitor_cocina`, `aprobado_por`; si el código no sirve, `espera` o `restantes` (§4) |
 | `_dispositivo()` | `usuarios_login`, `login` | `auth.uid()` de un dispositivo sin revocar; su sucursal activa y su cuenta `activa` | `dispositivo_id`, `sucursal_id`, `cuenta_id`, `monitor_cocina` |
 | `_contexto(p_token, p_roles, p_tipo)` | Toda operación de sucursal (§3.2) | Lo de `_dispositivo()` y además una sesión de operador de **esa sucursal y ese dispositivo**, no vencida ni revocada; rol y estado (§5) | Lo de `_dispositivo()` más `sid`, `uid`, `nombre`, `rol` y si solo puede leer cocina (§5.4) |
-| `_identidad()` | `crear_cuenta`, `aceptar_invitacion` | Sesión de Supabase de una persona: **no anónima** y con correo verificado. No exige membresía: estas llamadas la crean | `auth_user_id`, `correo` |
-| `_dueno(p_cuenta, p_roles)` | Operaciones de dueños (§3.2) | Lo de `_identidad()` y además membresía en `p_cuenta` con uno de los roles; cuenta `activa` | `cuenta_id`, `rol` |
+| `_identidad()` | `crear_cuenta`, `aceptar_invitacion`, `mis_cuentas` | Sesión de Supabase de una persona: **no anónima**, con correo verificado, sin suspender ni borrar, y que nunca fue un equipo. No exige membresía: estas llamadas la crean | `auth_user_id`, `correo` |
+| `_dueno(p_cuenta, p_roles, p_tipo)` | Operaciones de dueños (§3.2) | Lo de `_identidad()` y además membresía en `p_cuenta` con uno de los roles; cuenta `activa`. `p_tipo`: `lectura` o `escritura` | `cuenta_id`, `rol`, `auth_user_id`, `correo` |
 
 - **Por qué el token solo no basta:** `_contexto` exige el dispositivo y la sesión del operador a la
   vez. Robar solo el token no sirve sin el equipo, y viceversa.
@@ -120,8 +122,18 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
 - **Implementado (pasos 2 y 3):** `_dispositivo()` y `_contexto(p_token, p_roles, p_tipo)`; sustituyen
   a `_sesion` y `_exigir`. Sin `p_roles`, `_contexto` acepta cualquier rol; con ellos exige el rol y que
   el PIN ya se haya cambiado. `p_tipo` es obligatorio y dice qué es la llamada (§3.2 y §5):
-  `interaccion`, `lectura`, `automatica`, `latido`, `sesion`, `desbloqueo` o `salida`. `_vinculacion`,
-  `_identidad` y `_dueno` llegan con las funciones que los usan (paso 4).
+  `interaccion`, `lectura`, `automatica`, `latido`, `sesion`, `desbloqueo` o `salida`.
+- **Implementado (paso 4):**
+  - `_identidad()` lee `auth.users` y no el JWT, que puede ser de antes de verificar el correo o de
+    convertir la identidad. `_dispositivo()` exige además que la identidad del equipo siga siendo
+    anónima: si se convierte en una con correo, deja de servir como equipo y tampoco entra como persona.
+  - `_dueno(p_cuenta, p_roles, p_tipo)`: una **escritura** toma la fila de la cuenta antes que cualquier
+    otra (orden fijo: cuenta → lo demás) y vuelve a leer la membresía en otra sentencia. Si otro dueño
+    la quitó mientras esperaba, se rechaza: lo que hace un dueño al que acaban de quitar no se confirma
+    después de su baja. Cuenta ajena e inexistente dan la misma respuesta (`CUENTA`); un rol
+    insuficiente, `PERMISO`.
+  - `_vinculacion(p_codigo)` cuenta los fallos (§4) y los **devuelve** en lugar de lanzarlos, para que
+    el conteo se confirme.
 - **La API solo la ejecuta `authenticated`**: los equipos entran con una sesión anónima de Supabase, que
   tiene ese rol. `anon` no ejecuta ninguna función.
 
@@ -137,10 +149,17 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
   último propietario se rechaza al confirmar. Para que dos bajas simultáneas no dejen la cuenta vacía,
   cada cambio de propietarios **escribe** la fila de la cuenta (`revision_propietarios`): en READ
   COMMITTED la segunda transacción espera y vuelve a leer; en REPEATABLE READ y SERIALIZABLE falla por
-  actualización concurrente (código `40001`), y las funciones de dueños (paso 4) la reintentan.
+  actualización concurrente (código `40001`). Una función no puede reintentarse a sí misma (su
+  fotografía de los datos no cambia), así que reintenta **quien la llama** (la app, paso 6); PostgREST
+  usa READ COMMITTED. Además, las escrituras de dueños toman la fila de la cuenta al empezar (`_dueno`),
+  así que se ordenan entre sí, y `quitar_miembro` responde `ultimo_propietario` antes de llegar al
+  invariante (que sigue como respaldo).
 - **Invitación inicial:** la del propietario de una cuenta pendiente la crea el proveedor desde el
-  servidor (SQL Editor o un script de alta), nunca la app. Es de un solo uso, vence y, como toda
-  invitación, solo la acepta una identidad con el mismo correo verificado.
+  servidor (SQL Editor o un script de alta), nunca la app:
+  `select public.crear_invitacion_inicial('<id de la cuenta>', '<correo>');` (implementado; sin permiso
+  para `anon` ni `authenticated`). Devuelve el token una sola vez, deja sin efecto las anteriores sin
+  usar, vence (7 días por omisión) y, como toda invitación, solo la acepta una identidad con el mismo
+  correo verificado.
 - **Para la migración:** como los equipos se vinculan con códigos y los códigos exigen cuenta
   activa, el dueño debe aceptar su invitación **antes** de publicar la app que exige dispositivo
   ([MIGRACION.md](MIGRACION.md) §5).
@@ -174,12 +193,38 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
 | Mesero | `guardar_borrador_mesa`, `liberar_mesa`, `enviar_comanda`, `reenviar_cocina`, `cobrar`, `no_cobrar` | `_contexto` | Sí | No (se pide PIN) |
 | Cocina | `mover_tickets`, `archivar_tickets`, `marcar_hecho`, `liberar_cocina`, `hacer_corte` | `_contexto` | Sí | No (se pide PIN) |
 | Administración | Catálogo, precios, ajustes, gastos, usuarios, `anular_cobro`, `restablecer_acceso` (nueva) | `_contexto`; algunas también PIN de administrador | Sí | No (se pide PIN) |
-| Alta de personas | `crear_cuenta`, `aceptar_invitacion` (nuevas) | `_identidad` | — | — |
-| Dueños: propietario | `crear_sucursal`, `invitar_miembro`, `quitar_miembro` (nuevas) | `_dueno(cuenta, {propietario})` | — | — |
-| Dueños: propietario o encargado | `generar_codigo`, `listar_dispositivos`, `revocar_dispositivo` (nuevas) | `_dueno(cuenta, {propietario, encargado})` | — | — |
+| Alta de personas | `crear_cuenta`, `aceptar_invitacion`, `mis_cuentas` (nuevas) | `_identidad` | — | — |
+| Dueños: propietario | `crear_sucursal`, `crear_administrador`, `invitar_miembro`, `cancelar_invitacion`, `quitar_miembro` (nuevas) | `_dueno(cuenta, {propietario}, escritura)` | — | — |
+| Dueños: propietario o encargado | `generar_codigo`, `revocar_dispositivo` (escritura); `listar_dispositivos`, `listar_miembros` (lectura) (nuevas) | `_dueno(cuenta, {propietario, encargado}, …)` | — | — |
 
 Consecuencia que conviene confirmar: con la cocina bloqueada por inactividad, `marcar_recibido` no se
 registra. El mesero verá «Enviado» hasta que alguien desbloquee la cocina con su PIN.
+
+### 3.3 Alta, panel de dueños y vinculación (implementado, paso 4)
+
+Las funciones de dueños reciben la cuenta y, si tocan algo concreto, la sucursal o el id, y los buscan
+siempre dentro de esa cuenta: lo de otra cuenta responde igual que lo inexistente (`no_existe`). Los
+errores de datos vuelven como `{ok: false, error}`; los de identidad o permiso se lanzan (`IDENTIDAD`,
+`CUENTA`, `PERMISO`). Todo queda en la bitácora de la cuenta, nunca con el código ni el token.
+
+| Función | Qué hace | Límites y respuestas propias |
+|---|---|---|
+| `crear_cuenta(nombre, sucursal, zona, admin_nombre, admin_pin)` | La cuenta nace `activa` con quien la crea como propietario, en la misma transacción; su primera sucursal con el catálogo inicial y el primer administrador del personal | 3 cuentas creadas por persona (sus altas van de una en una); `nombre`, `zona`, `admin_nombre`, `formato`, `debil`, `limite` |
+| `aceptar_invitacion(clave)` | Crea la membresía; la primera de propietario activa una cuenta pendiente. Si ya es miembro, puede subir de encargado a propietario, nunca bajar | `INVITACION`, igual para inexistente, vencida, usada, de otro correo, cuenta suspendida o de encargado en una cuenta pendiente |
+| `mis_cuentas()` | Cuentas de la persona, con su rol y sus sucursales | — |
+| `crear_sucursal(cuenta, nombre, zona, admin_nombre, admin_pin)` | Sucursal con el catálogo inicial y su primer administrador | 20 por cuenta |
+| `crear_administrador(cuenta, sucursal, nombre, pin)` | Rescate: administrador del personal si nadie puede entrar como tal | `formato`, `debil` |
+| `invitar_miembro(cuenta, correo, rol)` | Devuelve el token una vez (se guarda su hash); vence en 7 días; una vigente por correo: la anterior deja de servir | 30 vigentes por cuenta; `ya_miembro`, `correo`, `rol` |
+| `cancelar_invitacion(cuenta, invitacion)` | La invitación deja de servir | `no_existe` |
+| `quitar_miembro(cuenta, miembro)` | También a sí mismo. Las invitaciones y los códigos que dejó pendientes dejan de servir | `ultimo_propietario` |
+| `listar_miembros(cuenta)` | Miembros (correo y rol) e invitaciones vigentes | — |
+| `generar_codigo(cuenta, sucursal, monitor)` | Código de 8 caracteres (sin I, L, O, 0 ni 1; se acepta con minúsculas, espacios o guiones), vence en 10 minutos, se guarda como hash | 10 vigentes por sucursal |
+| `listar_dispositivos(cuenta, sucursal)` | Equipos con su sucursal, quién lo aprobó, último uso (se anota al entrar) y revocación | — |
+| `revocar_dispositivo(cuenta, dispositivo)` | Revoca (§4); repetirlo responde `yaRevocado` | — |
+| `vincular_dispositivo(codigo, nombre)` | §4 | `codigo` (con `restantes`), `bloqueado` (con `espera`), `nombre`; se lanzan `IDENTIDAD`, `VINCULADO`, `REVOCADO` |
+
+El correo de la invitación lo envía la app o un servicio aparte (se decide con el cliente, paso 6): el
+servidor solo devuelve el token para armar el enlace.
 
 ## 4. Identidad del dispositivo
 
@@ -194,6 +239,16 @@ registra. El mesero verá «Enviado» hasta que alguien desbloquee la cocina con
   dispositivo vinculado no tienen ningún permiso.
 - **Requisitos en Supabase:** activar el inicio de sesión anónimo y protegerlo con CAPTCHA o límite
   de solicitudes.
+- **Implementado (paso 4):**
+  - el código se busca por su hash y se toma su fila hasta confirmar: dos equipos con el mismo código a
+    la vez se ordenan y el segundo ya lo ve usado;
+  - fallos (código mal escrito, vencido, usado o inexistente): por identidad, 5 → bloqueo de 15, 30 y
+    60 minutos; por IP, 30 → de 5 a 60 minutos. Son contadores propios (`vin:` y `vip:`), aparte de
+    los del PIN. Mientras dura el bloqueo, ni el código correcto entra;
+  - una identidad que ya es equipo responde `VINCULADO`; una revocada, `REVOCADO`: la app inicia otra
+    sesión anónima y se vincula con otro código;
+  - revocar termina las sesiones de operador de ese equipo (`motivo_fin = 'equipo_revocado'`) y suelta
+    la cocina si la tenía.
 - **Revocar:**
   - marca `revocado_en`; desde ese momento `_dispositivo` (y con él `_contexto`) rechaza al equipo en
     todas las funciones;
@@ -212,7 +267,7 @@ registra. El mesero verá «Enviado» hasta que alguien desbloquee la cocina con
 
 `sesiones`: `id`, `token_hash`, `sucursal_id`, `dispositivo_id`, `usuario_id`, `creada`,
 `vence_absoluta` (= `creada + 12 h`), `revocada`, `motivo_fin` (`salida`, `cambio_pin`,
-`pin_restablecido`, `sin_equipo`).
+`pin_restablecido`, `sin_equipo`, `equipo_revocado`).
 
 `ultima_interaccion` vive en `sesiones_actividad` (una fila por sesión, **sin** referencia a
 `sesiones`). Así marcar la interacción no bloquea la fila de la sesión, y revocar o borrar sesiones de
@@ -339,7 +394,12 @@ Reglas de aplicación (del plan):
    de 12 h e inactividad de 15 min con el tipo de llamada; `desbloquear` y `restablecer_acceso`;
    excepción del monitor. Pruebas con reloj controlado en `tests/sql/reloj.test.js`. Falta su parte en
    la interfaz (validación del PIN en pantalla y pantalla de desbloqueo), que va con el cliente (paso 6).
-4. **Dispositivos y dueños:** vinculación, revocación, membresías y registro.
+4. **Dispositivos y dueños** (hecho): validadores `_vinculacion`, `_identidad` y `_dueno`; alta de
+   cuentas con su primera sucursal, catálogo inicial único y primer administrador; invitaciones (también
+   la inicial del proveedor), membresías y bajas sin dejar la cuenta sin propietario; códigos de
+   vinculación, vinculación, panel de equipos y revocación; bitácora por cuenta (§3.3 y §4). Pruebas en
+   la matriz y en `tests/sql/duenos.test.js` (flujos, límites y carreras). Falta probarlo contra Supabase
+   Auth real (inicio anónimo, correo verificado) en un proyecto de staging antes del piloto.
 5. **Tiempo real privado y claves del navegador por sucursal.**
 6. **Cliente:** panel de dueños, vinculación, pantalla de desbloqueo, validación del PIN de 6 a 8
    dígitos en la interfaz (también en el modo local) y borradores por autor.

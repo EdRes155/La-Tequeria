@@ -25,6 +25,10 @@ describe("inventario: dependencias indirectas", () => {
     fn("vender", "perform _contexto(p_token, array['mesero'], 'interaccion'); perform _fecha(); insert into public.bebidas values (1)",
       { api: true, args: "p_token text" }),
     fn("_no_es_llamada", "select 1 -- _fecha() solo en un comentario\n; select 'x_fecha(1)'"),
+    fn("revocar", "select * into d from public._dueno(p_cuenta, array['propietario', 'encargado'], 'escritura'); update public.sesiones set revocada = true",
+      { api: true, args: "p_cuenta uuid, p_dispositivo uuid" }),
+    fn("alta", "select * into i from public._identidad(); insert into public.usuarios values (1)", { api: true, args: "p_nombre text" }),
+    fn("crear_invitacion_inicial", "insert into public.usuarios values (1)"),
   ]);
 
   it("un ayudante sin tablas propias hereda las de las funciones que llama", () => {
@@ -52,6 +56,13 @@ describe("inventario: dependencias indirectas", () => {
     expect(r._error.contexto).toMatch(/^Ninguno/);
     expect(r._no_es_llamada.llama).toEqual([]);
     expect(r._no_es_llamada.contexto).toMatch(/^Ninguno/);
+  });
+
+  it("las funciones de dueños y de personas dicen su validador, roles y tipo", () => {
+    expect(r.revocar.acceso).toBe("Dueño: propietario, encargado · escritura");
+    expect(r.revocar.contexto).toMatch(/^Cuenta elegida en el panel/);
+    expect(r.alta.acceso).toBe("Persona con correo verificado");
+    expect(r.crear_invitacion_inicial.acceso).toBe("Solo SQL Editor");
   });
 
   it("las llamadas en ciclo terminan y conservan lo que tocan", () => {

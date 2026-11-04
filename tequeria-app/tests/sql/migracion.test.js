@@ -1,9 +1,9 @@
-// Migración multinegocio (pasos 1 y 2: sucursales, llaves locales, validadores y contracción del estado
-// de cobro), ensayada sobre una copia exacta del esquema de producción con datos sintéticos (nunca contra
-// producción).
+// Migración multinegocio (sucursales, llaves locales, validadores y contracción del estado de cobro, y la
+// activación de la cuenta con la invitación inicial del paso 4), ensayada sobre una copia exacta del
+// esquema de producción con datos sintéticos (nunca contra producción).
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomBytes, createHash } from "node:crypto";
-import { URL_ADMIN, STUB, ESQUEMA, leer, crearBase, conectar, cerrarTodo, falla, huellaDe } from "./util.js";
+import { URL_ADMIN, STUB, ESQUEMA, leer, crearBase, conectar, conectarComo, cerrarTodo, falla, huellaDe, crearPersona, crearAnonimo } from "./util.js";
 import { compararHuellas } from "../../scripts/huella.mjs";
 import { huellaEsquema } from "../../scripts/huella-esquema.mjs";
 
@@ -133,7 +133,16 @@ d("multinegocio: migración desde el esquema de producción", () => {
     // como en MIGRACION.md §5: la huella «después» se compara antes de la prueba de humo (primera prueba);
     // aquí se toma la de partida de la prueba de humo para verificar después sus diferencias una por una
     const antesDeHumo = await huellaDe(sql, "destino", sal);
-    const api = await conectar("tq_migracion");   // activa la cuenta con un propietario de prueba y vincula un equipo
+    // MIGRACION.md §5, pasos 6 y 7: el proveedor deja la invitación inicial, el dueño la acepta (la cuenta pasa a
+    // activa), genera un código y la caja se vincula con él
+    const { id: cuenta } = await uno("select id from public.cuentas where estado = 'pendiente_activacion'");
+    const { id: sucursal } = await uno("select id from public.sucursales where cuenta_id = $1", [cuenta]);
+    const { t: clave } = await uno("select public.crear_invitacion_inicial($1, 'dueno@ejemplo.invalid') t", [cuenta]);
+    const dueno = await conectarComo("tq_migracion", await crearPersona(sql, "dueno@ejemplo.invalid"), "203.0.113.50", { persona: true });
+    expect(await dueno.rpc("aceptar_invitacion", { p_clave: clave })).toMatchObject({ ok: true, cuenta: { id: cuenta, rol: "propietario" } });
+    const { codigo } = await dueno.rpc("generar_codigo", { p_cuenta: cuenta, p_sucursal: sucursal, p_monitor: false });
+    const api = await conectarComo("tq_migracion", await crearAnonimo(sql), "203.0.113.51");
+    expect(await api.rpc("vincular_dispositivo", { p_codigo: codigo, p_nombre: "Caja" })).toMatchObject({ ok: true, sucursal: { id: sucursal } });
     const login = await api.rpc("login", { p_id: "b2c3d4e5f6a1", p_pin: "571936" });
     // PIN heredado (de antes de la política): solo sirve para elegir uno nuevo (MIGRACION.md §5, paso 8)
     expect(login).toMatchObject({ ok: true, debeCambiarPin: true });
@@ -149,11 +158,13 @@ d("multinegocio: migración desde el esquema de producción", () => {
       .toEqual({ sucursal_id: s, estado_cobro: "cobrado", cobro_id: "cobro-nuevo-0001", folio_periodo: "continuo", folio: 9 });
     expect((await uno("select sucursal_id from public.cobros where id = 'cobro-nuevo-0001'")).sucursal_id).toBe(s);
     expect(await uno("select ultimo::int from public.folios")).toEqual({ ultimo: 9 });
-    // sobran la comanda, el cobro y sus entradas de bitácora (cambio de PIN y cobro); cambia solo el
-    // usuario que eligió PIN nuevo; nada falta
+    // sobran la comanda, el cobro y las entradas de bitácora de los pasos 6 a 9 (invitación inicial, activación,
+    // código, vinculación, cambio de PIN y cobro); cambia solo el usuario que eligió PIN nuevo; nada falta
     const r = compararHuellas(antesDeHumo, await huellaDe(sql, "destino", sal));
+    expect(r.sinSucursal).toEqual([]);   // las acciones de cuenta no tienen sucursal y no cuentan como olvido
     const bitacora = (await sql.query(`select id::text from public.bitacora
-      where (accion = 'cobro' and detalle->>'cobro' = 'cobro-nuevo-0001') or (accion = 'cambiar_pin' and usuario_id = 'b2c3d4e5f6a1') order by id`)).rows.map((x) => x.id);
+      where (accion = 'cobro' and detalle->>'cobro' = 'cobro-nuevo-0001') or (accion = 'cambiar_pin' and usuario_id = 'b2c3d4e5f6a1')
+         or accion in ('crear_invitacion_inicial', 'aceptar_invitacion', 'generar_codigo', 'vincular_dispositivo') order by id`)).rows.map((x) => x.id);
     const llaveUsuario = "u:" + createHash("md5").update(sal + "b2c3d4e5f6a1").digest("hex").slice(0, 16);
     expect(r.entidades).toEqual({
       bitacora: { faltan: [], sobran: bitacora, distintas: [] },
@@ -161,7 +172,7 @@ d("multinegocio: migración desde el esquema de producción", () => {
       tickets: { faltan: [], sobran: ["t-nuevo-0001"], distintas: [] },
       usuarios: { faltan: [], sobran: [], distintas: [llaveUsuario] },
     });
-    expect(bitacora).toHaveLength(2);
+    expect(bitacora).toHaveLength(6);
     // en el resumen, además, la comanda está en cocina y quien entró tiene una sesión abierta
     expect(r.resumen.map((x) => x.ruta)).toEqual([
       "abierto.en_cocina", "abierto.sesiones_vigentes",
@@ -178,7 +189,10 @@ d("multinegocio: migración desde el esquema de producción", () => {
       expect((await falla(api.query(`select * from public.${t}`))).message).toMatch(/permission denied/);
     }
     for (const f of ["_contexto('x', null, 'lectura')", "_dispositivo()", "_siguiente_folio(gen_random_uuid())",
-                     "_fallo_operador(gen_random_uuid(), 'x')", "_marcar_interaccion(gen_random_uuid())"]) {
+                     "_fallo_operador(gen_random_uuid(), 'x')", "_marcar_interaccion(gen_random_uuid())",
+                     "_identidad()", "_dueno(gen_random_uuid(), array['propietario'], 'lectura')", "_vinculacion('x')",
+                     "_preparar_sucursal(gen_random_uuid(), 'x', null)", "crear_invitacion_inicial(gen_random_uuid(), 'x@ejemplo.invalid')",
+                     "crear_admin_inicial('x', '583920')"]) {
       expect((await falla(api.query(`select public.${f}`))).message).toMatch(/permission denied/);
     }
   });

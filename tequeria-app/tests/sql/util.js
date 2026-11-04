@@ -1,5 +1,6 @@
 // Utilidades compartidas por las pruebas de SQL: bases desechables, cliente que llama a la API como un
-// equipo vinculado (rol authenticated con su JWT, igual que PostgREST) y un reloj controlado.
+// equipo vinculado o como una persona (rol authenticated con su JWT, igual que PostgREST) y un reloj
+// controlado.
 import fs from "node:fs";
 import path from "node:path";
 import { clienteDesechable, exigirServidorDesechable, nombreDesechable } from "../../scripts/base-desechable.mjs";
@@ -24,7 +25,8 @@ export async function activarCuentas(sql) {
     end loop; end $$`);
 }
 
-// Equipo vinculado a una sucursal sin pasar por códigos (la vinculación real es el paso 4).
+// Equipo vinculado a una sucursal sin pasar por códigos: un atajo para preparar pruebas. La vinculación
+// real (generar_codigo y vincular_dispositivo) se prueba en tests/sql/duenos.test.js.
 // Sin sucursal, usa la única que haya.
 export async function vincularDePrueba(sql, { sucursal = null, nombre = "caja", monitor = false } = {}) {
   const { rows } = await sql.query(`with u as (insert into auth.users (is_anonymous) values (true) returning id)
@@ -34,10 +36,23 @@ export async function vincularDePrueba(sql, { sucursal = null, nombre = "caja", 
   return { authUid: rows[0].auth_user_id, dispositivoId: rows[0].id };
 }
 
-// La conexión actúa como ese equipo: rol authenticated con su identidad en el JWT
-export async function comoEquipo(c, authUid) {
+// Persona de Supabase Auth (dueño o encargado), con correo verificado salvo que se pida lo contrario
+export async function crearPersona(sql, correo, { verificado = true } = {}) {
+  const { rows } = await sql.query("insert into auth.users (email, email_confirmed_at) values ($1, $2) returning id",
+    [correo, verificado ? new Date().toISOString() : null]);
+  return rows[0].id;
+}
+
+// Identidad anónima que aún no es un equipo (un navegador antes de vincularse)
+export async function crearAnonimo(sql) {
+  return (await sql.query("insert into auth.users (is_anonymous) values (true) returning id")).rows[0].id;
+}
+
+// La conexión actúa como esa identidad: rol authenticated con su identidad en el JWT. Las funciones
+// leen auth.users (no el JWT) para saber si es anónima o tiene correo verificado.
+export async function comoEquipo(c, authUid, { anonima = true } = {}) {
   await c.query("select set_config('request.jwt.claims', $1, false)",
-    [JSON.stringify({ sub: authUid, role: "authenticated", is_anonymous: true })]);
+    [JSON.stringify({ sub: authUid, role: "authenticated", is_anonymous: anonima })]);
   await c.query("set role authenticated");
 }
 
@@ -73,14 +88,15 @@ export async function conectar(nombre, comoApi = true, ip = "203.0.113.10", equi
   return conectarComo(nombre, comoApi ? await equipoDe(nombre, equipo) : null, ip);
 }
 
-// Cliente de la API con una identidad de Supabase concreta (authUid); sin ella, conexión administrativa
-export async function conectarComo(nombre, authUid, ip = "203.0.113.10") {
+// Cliente de la API con una identidad de Supabase concreta (authUid); sin ella, conexión administrativa.
+// persona: la identidad es la de una persona (claims sin is_anonymous).
+export async function conectarComo(nombre, authUid, ip = "203.0.113.10", { persona = false } = {}) {
   const c = clienteDesechable(URL_ADMIN, nombre);
   await c.connect();
   clientes.push(c);
   if (authUid) {
     await c.query(`select set_config('request.headers', $1, false)`, [JSON.stringify({ "x-forwarded-for": ip })]);
-    await comoEquipo(c, authUid);
+    await comoEquipo(c, authUid, { anonima: !persona });
   }
   c.rpc = async (fn, args = {}) => {
     const ks = Object.keys(args);
@@ -130,4 +146,15 @@ export const HUELLA = leer("scripts/huella-datos.sql");
 export async function huellaDe(sql, version, sal) {
   await sql.query("select set_config('huella.version', $1, false), set_config('huella.sal', $2, false)", [version, sal]);
   return (await sql.query(HUELLA)).rows[0].huella;
+}
+
+// Carreras: pid de una conexión y espera (hasta 5 s) a que quede detenida en un candado
+export const pidDe = async (c) => (await c.query("select pg_backend_pid() p")).rows[0].p;
+export async function esperaCandado(sql, pid) {
+  for (let i = 0; i < 100; i++) {
+    const { rows } = await sql.query("select wait_event_type from pg_stat_activity where pid = $1", [pid]);
+    if (rows[0]?.wait_event_type === "Lock") return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
 }

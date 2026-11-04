@@ -146,7 +146,7 @@ por usuario (recuerda el último) y un teclado numérico para el PIN.
    `supabase-schema.sql` → **Run**.
 2. Crea el primer administrador en el mismo SQL Editor (no se puede desde la web):
    ```sql
-   select public.crear_admin_inicial('Tu nombre', 'tu PIN de 4 a 8 dígitos');
+   select public.crear_admin_inicial('Tu nombre', 'tu PIN de 6 a 8 dígitos');
    ```
 3. **Project Settings → API**: copia la **Project URL** y la llave **anon / publishable**.
 4. Copia `.env.example` como `.env` y pon esos dos valores (`.env` no se sube a git).

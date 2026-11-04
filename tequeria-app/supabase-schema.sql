@@ -210,33 +210,57 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+--  CATÁLOGO INICIAL: carnes, bebidas, mesas y precios con los que empieza una sucursal. Es el único
+--  lugar donde se define: lo usan la primera instalación (aquí abajo) y cada sucursal nueva que se crea
+--  desde el panel de dueños (_preparar_sucursal, multinegocio paso 4).
+-- ---------------------------------------------------------------------
+create or replace function public._catalogo_inicial()
+returns jsonb language sql immutable set search_path = public as $$
+  select jsonb_build_object(
+    'carnes', '[{"id":"pastor","nombre":"Pastor"},{"id":"bistec","nombre":"Bistec"},
+                {"id":"tripa","nombre":"Tripa"},{"id":"chorizo","nombre":"Chorizo"}]'::jsonb,
+    'bebidas', '[{"id":"coca","nombre":"Coca-Cola","cantidad":24,"precio":25},
+                 {"id":"sprite","nombre":"Sprite","cantidad":12,"precio":25},
+                 {"id":"fanta","nombre":"Fanta","cantidad":12,"precio":25},
+                 {"id":"jamaica","nombre":"Agua de Jamaica","cantidad":20,"precio":20},
+                 {"id":"horchata","nombre":"Agua de Horchata","cantidad":20,"precio":20},
+                 {"id":"mineral","nombre":"Agua Mineral","cantidad":10,"precio":25},
+                 {"id":"botella","nombre":"Agua Embotellada","cantidad":30,"precio":15}]'::jsonb,
+    'mesas', 8,
+    -- precios sin carne, y por cada carne: prefijo || id de la carne
+    'precios', '{"quesa-maiz-queso":25,"quesa-queso":35,"volcan-queso":35,"costra-queso":45,"media-costra-queso":25,
+                 "bolsa-verdura":15,"tortilla-harina":10,"tortilla-maiz":10}'::jsonb,
+    'precios_por_carne', '{"taco-":20,"taco-queso-":30,"gringa-":45,"llenadora-":55,"volcan-":40,"costra-":50,
+                           "media-costra-":28}'::jsonb)
+$$;
+
+create or replace function public._precios_iniciales()
+returns jsonb language sql immutable set search_path = public as $$
+  select (c->'precios') || coalesce((select jsonb_object_agg(p.key || (k->>'id'), p.value)
+                                       from jsonb_array_elements(c->'carnes') k, jsonb_each(c->'precios_por_carne') p), '{}'::jsonb)
+  from (select public._catalogo_inicial() c) x
+$$;
+
+-- ---------------------------------------------------------------------
 --  DATOS INICIALES (solo en la primera instalación; no crea usuarios). Después, cada sucursal
---  recibe su catálogo al crearse (multinegocio, paso 4).
+--  recibe el catálogo inicial al crearse (_preparar_sucursal).
 -- ---------------------------------------------------------------------
 insert into public.carnes (id, nombre, activo, orden)
-select * from (values ('pastor','Pastor',true,0), ('bistec','Bistec',true,1),
-                      ('tripa','Tripa',true,2), ('chorizo','Chorizo',true,3)) v(id, nombre, activo, orden)
+select k->>'id', k->>'nombre', true, (o - 1)::int
+  from jsonb_array_elements(public._catalogo_inicial()->'carnes') with ordinality e(k, o)
 where not exists (select 1 from public.carnes) and to_regclass('public.sucursales') is null;
 
 insert into public.bebidas (id, nombre, cantidad, activo, precio)
-select * from (values
-  ('coca','Coca-Cola',24,true,25), ('sprite','Sprite',12,true,25), ('fanta','Fanta',12,true,25),
-  ('jamaica','Agua de Jamaica',20,true,20), ('horchata','Agua de Horchata',20,true,20),
-  ('mineral','Agua Mineral',10,true,25), ('botella','Agua Embotellada',30,true,15)) v(id, nombre, cantidad, activo, precio)
+select b->>'id', b->>'nombre', (b->>'cantidad')::int, true, (b->>'precio')::numeric
+  from jsonb_array_elements(public._catalogo_inicial()->'bebidas') b
 where not exists (select 1 from public.bebidas) and to_regclass('public.sucursales') is null;
 
 insert into public.mesas (id, estado)
-select g, 'libre' from generate_series(1, 8) g
+select g, 'libre' from generate_series(1, (public._catalogo_inicial()->>'mesas')::int) g
 where not exists (select 1 from public.mesas) and to_regclass('public.sucursales') is null;
 
 insert into public.config (nombre_negocio, precios, extras, ocultos)
-select 'La Tequería',
-  '{"quesa-maiz-queso":25,"quesa-queso":35,"volcan-queso":35,"costra-queso":45,"media-costra-queso":25,
-    "bolsa-verdura":15,"tortilla-harina":10,"tortilla-maiz":10}'::jsonb
-  || coalesce((select jsonb_object_agg(k, p) from public.carnes c,
-       lateral (values ('taco-'||c.id,20), ('taco-queso-'||c.id,30), ('gringa-'||c.id,45), ('llenadora-'||c.id,55),
-                       ('volcan-'||c.id,40), ('costra-'||c.id,50), ('media-costra-'||c.id,28)) v(k, p)), '{}'::jsonb),
-  '[]'::jsonb, '[]'::jsonb
+select 'La Tequería', public._precios_iniciales(), '[]'::jsonb, '[]'::jsonb
 where not exists (select 1 from public.config) and to_regclass('public.sucursales') is null;
 
 -- PIN de demostración o triviales en datos v2 (hash SHA-256): obligar a cambiarlos
@@ -340,7 +364,10 @@ end $$;
 
 -- Toda fila de operación pertenece a una sucursal. Las filas que aún no la tienen vienen de la
 -- instalación de una sola sucursal (actualización desde v2 o v3) y pasan a la sucursal inicial. Sin
--- valor por omisión: cada función indica la sucursal de su validador.
+-- valor por omisión: cada función indica la sucursal de su validador. La bitácora es la excepción: sus
+-- acciones de cuenta (invitar o quitar miembros, crear la cuenta) llevan cuenta y no sucursal (paso 4);
+-- las filas antiguas son las que no tienen ninguna de las dos.
+alter table public.bitacora add column if not exists cuenta_id uuid;
 do $$
 declare t text; v_unica uuid; n int; v_hay boolean;
 begin
@@ -349,14 +376,18 @@ begin
                            'cortes','gastos','cocina_hechos','sesiones','bitacora'] loop
     execute format('alter table public.%I add column if not exists sucursal_id uuid', t);
     execute format('alter table public.%I alter column sucursal_id drop default', t);
-    execute format('select exists (select 1 from public.%I where sucursal_id is null)', t) into v_hay;
+    execute format('select exists (select 1 from public.%I where sucursal_id is null%s)', t,
+                   case when t = 'bitacora' then ' and cuenta_id is null' else '' end) into v_hay;
     if v_hay then
       if n <> 1 then
         raise exception 'Multinegocio: hay filas de % sin sucursal y % sucursales; no se puede saber de cuál son.', t, n;
       end if;
-      execute format('update public.%I set sucursal_id = $1 where sucursal_id is null', t) using v_unica;
+      execute format('update public.%I set sucursal_id = $1 where sucursal_id is null%s', t,
+                     case when t = 'bitacora' then ' and cuenta_id is null' else '' end) using v_unica;
     end if;
-    execute format('alter table public.%I alter column sucursal_id set not null', t);
+    if t <> 'bitacora' then
+      execute format('alter table public.%I alter column sucursal_id set not null', t);
+    end if;
     if not exists (select 1 from pg_constraint where conname = t || '_sucursal_fk') then
       execute format('alter table public.%I add constraint %I foreign key (sucursal_id) references public.sucursales (id)',
                      t, t || '_sucursal_fk');
@@ -559,6 +590,36 @@ create constraint trigger cuenta_con_propietario after insert or update of estad
 drop trigger if exists cuenta_con_propietario on public.membresias;
 create constraint trigger cuenta_con_propietario after update or delete on public.membresias
   deferrable initially deferred for each row execute function public._cuenta_con_propietario();
+
+-- Dueños y dispositivos (paso 4). Quién creó cada cuenta (límite de cuentas por persona; nulo: la creó
+-- la migración o el proveedor).
+alter table public.cuentas add column if not exists creada_por uuid;
+create index if not exists membresias_persona_idx on public.membresias (auth_user_id);
+create index if not exists invitaciones_cuenta_idx on public.invitaciones (cuenta_id, correo) where usada_en is null;
+create index if not exists codigos_sucursal_idx on public.codigos_vinculacion (sucursal_id, vence) where usado_en is null;
+
+-- Bitácora por cuenta: toda fila dice de qué cuenta es; sucursal_id es nulo solo en las acciones de
+-- cuenta. auth_user_id es la persona (dueño) o el equipo que hizo la acción, cuando no fue un operador.
+alter table public.bitacora alter column sucursal_id drop not null;
+alter table public.bitacora add column if not exists auth_user_id uuid;
+update public.bitacora b set cuenta_id = s.cuenta_id from public.sucursales s where s.id = b.sucursal_id and b.cuenta_id is null;
+alter table public.bitacora alter column cuenta_id set not null;
+do $$
+declare r record;
+begin
+  for r in select * from (values
+    ('bitacora_cuenta_fk', 'foreign key (cuenta_id) references public.cuentas (id)'),
+    ('bitacora_sucursal_cuenta_fk', 'foreign key (cuenta_id, sucursal_id) references public.sucursales (cuenta_id, id)'),
+    ('bitacora_alcance_ck', 'check (sucursal_id is not null or accion in (''crear_cuenta'', ''aceptar_invitacion'', '
+                            '''invitar_miembro'', ''cancelar_invitacion'', ''quitar_miembro'', ''crear_invitacion_inicial''))')
+  ) as v(nombre, regla)
+  loop
+    if not exists (select 1 from pg_constraint where conname = r.nombre) then
+      execute format('alter table public.bitacora add constraint %I %s', r.nombre, r.regla);
+    end if;
+  end loop;
+end $$;
+create index if not exists bitacora_cuenta_idx on public.bitacora (cuenta_id, creado desc);
 
 -- Comprobación de la expansión: si algo no cuadra, se aborta todo el archivo
 do $$
@@ -824,13 +885,14 @@ end $$;
 
 create or replace function public._log(p_sucursal uuid, p_uid text, p_nombre text, p_accion text, p_detalle jsonb default null)
 returns void language sql set search_path = public as $$
-  insert into public.bitacora (sucursal_id, usuario_id, usuario_nombre, accion, detalle)
-  values (p_sucursal, p_uid, p_nombre, p_accion, p_detalle);
+  insert into public.bitacora (cuenta_id, sucursal_id, usuario_id, usuario_nombre, accion, detalle)
+  values ((select cuenta_id from public.sucursales where id = p_sucursal), p_sucursal, p_uid, p_nombre, p_accion, p_detalle);
 $$;
 
 -- Validador del equipo (MODELO.md §3): la identidad de Supabase de la petición (auth.uid()) debe ser
 -- un dispositivo vinculado y sin revocar, de una sucursal activa de una cuenta activa. De aquí, y
--- solo de aquí, sale la sucursal.
+-- solo de aquí, sale la sucursal. La identidad debe seguir siendo anónima: si se convirtiera en una con
+-- correo, deja de valer como equipo (y _identidad tampoco la acepta como persona).
 create or replace function public._dispositivo(
   out dispositivo_id uuid, out sucursal_id uuid, out cuenta_id uuid, out monitor_cocina boolean)
 language plpgsql stable set search_path = public as $$
@@ -841,7 +903,8 @@ begin
     from public.dispositivos d
     join public.sucursales s on s.id = d.sucursal_id
     join public.cuentas c on c.id = s.cuenta_id
-   where d.auth_user_id = auth.uid() and d.revocado_en is null and s.activa and c.estado = 'activa';
+    join auth.users a on a.id = d.auth_user_id
+   where d.auth_user_id = auth.uid() and d.revocado_en is null and s.activa and c.estado = 'activa' and a.is_anonymous;
   if not found then
     perform public._error('DISPOSITIVO', 'Este equipo no está autorizado. Pide a un dueño que lo vincule a la sucursal.');
   end if;
@@ -956,6 +1019,201 @@ begin
   end if;
   perform public._limpiar_intentos(v_clave);
   return json_build_object('ok', true, 'id', v_admin.id, 'nombre', v_admin.nombre);
+end $$;
+
+-- ---------------------------------------------------------------------
+--  PERSONAS, DUEÑOS Y VINCULACIÓN (MODELO.md §3, §3.0 y §4; multinegocio paso 4)
+-- ---------------------------------------------------------------------
+-- Secretos de un solo uso (códigos de vinculación e invitaciones): solo se guarda su hash
+create or replace function public._hash_secreto(p_tipo text, p_valor text)
+returns text language sql immutable set search_path = public, extensions as $$
+  select encode(digest(p_tipo || ':' || coalesce(p_valor, ''), 'sha256'), 'hex')
+$$;
+
+-- Código de vinculación: 8 caracteres sin los que se confunden (sin I, L, O, 0 ni 1). Se acepta con
+-- minúsculas, espacios o guiones.
+create or replace function public._normalizar_codigo(p_codigo text)
+returns text language sql immutable set search_path = public as $$
+  select upper(regexp_replace(coalesce(p_codigo, ''), '[\s-]', '', 'g'))
+$$;
+
+create or replace function public._codigo_aleatorio()
+returns text language plpgsql volatile set search_path = public, extensions as $$
+declare a constant text := 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; r text := ''; b bytea; x int;
+begin
+  while length(r) < 8 loop
+    b := gen_random_bytes(16);
+    for i in 0 .. 15 loop
+      x := get_byte(b, i);
+      -- 248 = 8 × 31: los bytes mayores se descartan para que todos los caracteres sean igual de probables
+      if x < 248 and length(r) < 8 then r := r || substr(a, x % 31 + 1, 1); end if;
+    end loop;
+  end loop;
+  return r;
+end $$;
+
+create or replace function public._token_aleatorio()
+returns text language sql volatile set search_path = public, extensions as $$
+  select encode(gen_random_bytes(32), 'hex')
+$$;
+
+create or replace function public._correo_ok(p_correo text)
+returns boolean language sql immutable set search_path = public as $$
+  select coalesce(length(p_correo) <= 254 and p_correo ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$', false)
+$$;
+
+-- Validador de personas (MODELO.md §3): sesión de Supabase de una persona, no anónima, con correo
+-- verificado, sin suspender ni borrar, y que nunca fue un equipo. No exige membresía: crear_cuenta y
+-- aceptar_invitacion la crean. Lee auth.users y no el JWT, que puede ser de antes de verificar el correo
+-- o de convertir una identidad anónima en una con correo.
+create or replace function public._identidad(out auth_user_id uuid, out correo text)
+language plpgsql stable set search_path = public as $$
+#variable_conflict use_column
+declare r record;
+begin
+  select u.id, lower(btrim(u.email)) as email into r
+    from auth.users u
+   where u.id = auth.uid() and not u.is_anonymous and u.email_confirmed_at is not null
+     and nullif(btrim(u.email), '') is not null
+     and (u.banned_until is null or u.banned_until <= public._ahora()) and u.deleted_at is null
+     and not exists (select 1 from public.dispositivos x where x.auth_user_id = u.id);
+  if not found then
+    perform public._error('IDENTIDAD', 'Entra con tu cuenta de correo verificada para administrar el negocio.');
+  end if;
+  auth_user_id := r.id; correo := r.email;
+end $$;
+
+-- Validador del panel de dueños (MODELO.md §3): la persona de _identidad, miembro de p_cuenta con uno de
+-- p_roles, y la cuenta activa. Una cuenta de la que no es miembro y una que no existe dan la misma
+-- respuesta. p_tipo: 'lectura' o 'escritura'. Una escritura toma la fila de la cuenta antes que
+-- cualquier otra (orden fijo: cuenta → lo demás) y vuelve a leer la membresía en otra sentencia: si otro
+-- dueño la quitó mientras esperaba, aquí ya se ve. Así dos bajas simultáneas se ordenan, y lo que hace un
+-- dueño al que acaban de quitar no se confirma después de su baja. En REPEATABLE READ o SERIALIZABLE la
+-- espera termina en 40001 si la otra transacción cambió los miembros: quien llama reintenta.
+create or replace function public._dueno(p_cuenta uuid, p_roles text[], p_tipo text,
+  out cuenta_id uuid, out rol text, out auth_user_id uuid, out correo text)
+language plpgsql set search_path = public as $$
+#variable_conflict use_column
+declare i record; v_rol text;
+begin
+  if p_tipo is null or p_tipo not in ('lectura', 'escritura') then
+    raise exception '_dueno: tipo de llamada no válido: %', coalesce(p_tipo, 'nulo');
+  end if;
+  if coalesce(cardinality(p_roles), 0) = 0 then raise exception '_dueno: faltan los roles'; end if;
+  select * into i from public._identidad();
+  select m.rol into v_rol from public.membresias m join public.cuentas c on c.id = m.cuenta_id
+   where m.cuenta_id = p_cuenta and m.auth_user_id = i.auth_user_id and c.estado = 'activa';
+  if v_rol is not null and p_tipo = 'escritura' then
+    perform 1 from public.cuentas c where c.id = p_cuenta for no key update;
+    v_rol := null;
+    select m.rol into v_rol from public.membresias m join public.cuentas c on c.id = m.cuenta_id
+     where m.cuenta_id = p_cuenta and m.auth_user_id = i.auth_user_id and c.estado = 'activa';
+  end if;
+  if v_rol is null then
+    perform public._error('CUENTA', 'No tienes acceso a esa cuenta.');
+  end if;
+  if not (v_rol = any (p_roles)) then
+    perform public._error('PERMISO', 'Tu papel en la cuenta no permite esta acción.');
+  end if;
+  cuenta_id := p_cuenta; rol := v_rol; auth_user_id := i.auth_user_id; correo := i.correo;
+end $$;
+
+-- Validador de la vinculación (MODELO.md §3 y §4): identidad anónima de Supabase que aún no es un equipo
+-- y un código vigente, sin usar, de una sucursal activa de una cuenta activa. Un código mal escrito,
+-- vencido, usado o inexistente cuenta como fallo de esa identidad (5 → 15/30/60 min) y de la IP (30); no
+-- se lanza como error, para que el conteo se confirme. Devuelve codigo_id nulo si el código no sirve,
+-- con la espera si hay bloqueo o los intentos que quedan. El código queda tomado hasta confirmar: dos
+-- equipos con el mismo código se ordenan y el segundo ya lo ve usado.
+create or replace function public._vinculacion(p_codigo text,
+  out codigo_id uuid, out sucursal_id uuid, out cuenta_id uuid, out monitor_cocina boolean, out aprobado_por uuid,
+  out espera int, out restantes int)
+language plpgsql set search_path = public as $$
+#variable_conflict use_column
+declare v_uid uuid := auth.uid(); v_ip text := public._ip(); v_codigo text := public._normalizar_codigo(p_codigo);
+        v_clave text; v_revocado timestamptz; r record; v_ok boolean := false;
+begin
+  if v_uid is null or not exists (select 1 from auth.users u where u.id = v_uid and u.is_anonymous) then
+    perform public._error('IDENTIDAD', 'El código se escribe en el equipo que se va a vincular, no en el panel de dueños.');
+  end if;
+  v_clave := 'vin:' || v_uid;
+  -- el contador de esta identidad ordena sus intentos; lo demás se lee después de tomarlo
+  perform public._bloquear_contador(v_clave);
+  select x.revocado_en into v_revocado from public.dispositivos x where x.auth_user_id = v_uid;
+  if found then
+    if v_revocado is null then perform public._error('VINCULADO', 'Este equipo ya está vinculado a una sucursal.'); end if;
+    perform public._error('REVOCADO', 'Este equipo fue dado de baja. Vuelve a abrir la app para vincularlo con un código nuevo.');
+  end if;
+  espera := greatest(public._espera(v_clave), coalesce(public._espera('vip:' || v_ip), 0));
+  restantes := 0;
+  if espera > 0 then return; end if;
+  if v_codigo ~ '^[A-Z0-9]{8}$' then
+    select k.id, k.sucursal_id, s.cuenta_id, k.monitor_cocina, k.creado_por into r
+      from public.codigos_vinculacion k
+      join public.sucursales s on s.id = k.sucursal_id
+      join public.cuentas c on c.id = s.cuenta_id
+     where k.codigo_hash = public._hash_secreto('codigo', v_codigo) and k.usado_en is null and k.vence > public._ahora()
+       and s.activa and c.estado = 'activa'
+       for update of k;
+    v_ok := found;
+  end if;
+  if not v_ok then
+    restantes := public._fallo_escalado(v_clave);
+    if v_ip is not null then perform public._fallo('vip:' || v_ip, 30); end if;
+    return;
+  end if;
+  codigo_id := r.id; sucursal_id := r.sucursal_id; cuenta_id := r.cuenta_id; monitor_cocina := r.monitor_cocina;
+  aprobado_por := r.creado_por;
+end $$;
+
+-- Bitácora de lo que hacen los dueños y los equipos al vincularse (sucursal nula: acción de cuenta)
+create or replace function public._log_cuenta(p_cuenta uuid, p_sucursal uuid, p_auth uuid, p_quien text, p_accion text,
+                                              p_detalle jsonb default null)
+returns void language sql set search_path = public as $$
+  insert into public.bitacora (cuenta_id, sucursal_id, auth_user_id, usuario_nombre, accion, detalle, creado)
+  values (p_cuenta, p_sucursal, p_auth, p_quien, p_accion, p_detalle, public._ahora());
+$$;
+
+-- Datos de una sucursal nueva y de su primer administrador; devuelve el código del error o nulo
+create or replace function public._revisar_alta(p_nombre text, p_zona text, p_admin_nombre text, p_admin_pin text)
+returns text language plpgsql stable set search_path = public as $$
+begin
+  if btrim(coalesce(p_nombre, '')) = '' then return 'nombre'; end if;
+  if nullif(btrim(p_zona), '') is not null and not exists (select 1 from pg_timezone_names where name = btrim(p_zona)) then
+    return 'zona';
+  end if;
+  if btrim(coalesce(p_admin_nombre, '')) = '' then return 'admin_nombre'; end if;
+  if not public._pin_formato_ok(p_admin_pin) then return 'formato'; end if;
+  if public._pin_debil(p_admin_pin) then return 'debil'; end if;
+  return null;
+end $$;
+
+-- Sucursal nueva con su configuración, su cocina y el catálogo inicial (_catalogo_inicial)
+create or replace function public._preparar_sucursal(p_cuenta uuid, p_nombre text, p_zona text)
+returns uuid language plpgsql set search_path = public as $$
+declare v_id uuid; c jsonb := public._catalogo_inicial(); v_nombre text := left(btrim(p_nombre), 80);
+        v_zona text := coalesce(nullif(btrim(p_zona), ''), 'America/Mexico_City');
+begin
+  insert into public.sucursales (cuenta_id, nombre, zona_horaria, creada)
+  values (p_cuenta, v_nombre, v_zona, public._ahora()) returning id into v_id;
+  insert into public.config (sucursal_id, nombre_negocio, precios, extras, ocultos, ajustes, zona_horaria)
+  values (v_id, v_nombre, public._precios_iniciales(), '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, v_zona);
+  insert into public.cocina_sesion (sucursal_id) values (v_id);
+  insert into public.carnes (sucursal_id, id, nombre, activo, orden)
+  select v_id, k->>'id', k->>'nombre', true, (o - 1)::int from jsonb_array_elements(c->'carnes') with ordinality e(k, o);
+  insert into public.bebidas (sucursal_id, id, nombre, cantidad, activo, precio)
+  select v_id, b->>'id', b->>'nombre', (b->>'cantidad')::int, true, (b->>'precio')::numeric from jsonb_array_elements(c->'bebidas') b;
+  insert into public.mesas (sucursal_id, id, estado) select v_id, g, 'libre' from generate_series(1, (c->>'mesas')::int) g;
+  return v_id;
+end $$;
+
+-- Administrador del personal (PIN ya revisado por quien llama)
+create or replace function public._crear_admin(p_sucursal uuid, p_nombre text, p_pin text)
+returns json language plpgsql set search_path = public as $$
+declare v_id text := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12); v_nombre text := left(btrim(p_nombre), 40);
+begin
+  insert into public.usuarios (id, sucursal_id, nombre, rol, pin_hash, politica_pin, pin_cambiado_en)
+  values (v_id, p_sucursal, v_nombre, 'admin', public._hash_pin(p_pin), 1, public._ahora());
+  return json_build_object('id', v_id, 'nombre', v_nombre, 'rol', 'admin');
 end $$;
 
 create or replace function public._ticket_json(t public.tickets, p_domicilio boolean default true)
@@ -1236,6 +1494,7 @@ begin
           public._ahora(), public._ahora() + interval '12 hours', u.version_pin)
   returning id into v_sid;
   perform public._marcar_interaccion(v_sid);
+  update public.dispositivos set ultimo_uso = public._ahora() where id = d.dispositivo_id;   -- ya tomado arriba
 
   if u.rol = 'cocinero' then
     update public.cocina_sesion set session_id = v_sid::text, dispositivo = d.dispositivo_id::text, actualizado = public._ahora()
@@ -2244,6 +2503,342 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+--  API: VINCULACIÓN DE EQUIPOS (MODELO.md §4)
+-- ---------------------------------------------------------------------
+-- La llama la app en el equipo nuevo, con su sesión anónima de Supabase y el código que generó un dueño.
+-- El código queda usado en la misma transacción que crea el equipo.
+create or replace function public.vincular_dispositivo(p_codigo text, p_nombre text)
+returns json language plpgsql security definer set search_path = public as $$
+declare v record; v_nombre text := left(btrim(coalesce(p_nombre, '')), 60); v_id uuid;
+begin
+  if v_nombre = '' then return json_build_object('ok', false, 'error', 'nombre'); end if;
+  select * into v from public._vinculacion(p_codigo);
+  if v.espera > 0 then return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v.espera); end if;
+  if v.codigo_id is null then return json_build_object('ok', false, 'error', 'codigo', 'restantes', v.restantes); end if;
+  insert into public.dispositivos (sucursal_id, auth_user_id, nombre, monitor_cocina, aprobado_por, creado)
+  values (v.sucursal_id, auth.uid(), v_nombre, v.monitor_cocina, v.aprobado_por, public._ahora()) returning id into v_id;
+  update public.codigos_vinculacion set usado_en = public._ahora(), dispositivo_id = v_id where id = v.codigo_id;
+  perform public._log_cuenta(v.cuenta_id, v.sucursal_id, auth.uid(), v_nombre, 'vincular_dispositivo',
+    jsonb_build_object('dispositivo_id', v_id, 'monitor_cocina', v.monitor_cocina, 'aprobado_por', v.aprobado_por));
+  return json_build_object('ok', true,
+    'dispositivo', json_build_object('id', v_id, 'nombre', v_nombre, 'monitorCocina', v.monitor_cocina),
+    'sucursal', (select json_build_object('id', s.id, 'nombre', s.nombre) from public.sucursales s where s.id = v.sucursal_id));
+end $$;
+
+-- ---------------------------------------------------------------------
+--  API: ALTA DE PERSONAS (_identidad; MODELO.md §3.0)
+-- ---------------------------------------------------------------------
+-- Alta de un cliente: la persona crea la cuenta, que nace activa con ella como propietaria (en la misma
+-- transacción), su primera sucursal con el catálogo inicial y el primer administrador del personal.
+-- Hasta 3 cuentas creadas por persona.
+create or replace function public.crear_cuenta(p_nombre text, p_sucursal text, p_zona_horaria text,
+                                               p_admin_nombre text, p_admin_pin text)
+returns json language plpgsql security definer set search_path = public as $$
+declare i record; v_nombre text := left(btrim(coalesce(p_nombre, '')), 80); v_sucursal text; v_err text;
+        v_cuenta uuid; v_suc uuid; v_admin json;
+begin
+  select * into i from public._identidad();
+  v_sucursal := coalesce(nullif(left(btrim(coalesce(p_sucursal, '')), 80), ''), v_nombre);
+  v_err := public._revisar_alta(v_nombre, p_zona_horaria, p_admin_nombre, p_admin_pin);
+  if v_err is not null then return json_build_object('ok', false, 'error', v_err); end if;
+  -- las altas de una misma persona van de una en una, para que el límite no se rebase con llamadas simultáneas
+  perform pg_advisory_xact_lock(hashtextextended('tequeria:alta:' || i.auth_user_id::text, 0));
+  if (select count(*) from public.cuentas where creada_por = i.auth_user_id) >= 3 then
+    return json_build_object('ok', false, 'error', 'limite');
+  end if;
+  insert into public.cuentas (nombre, estado, activada_en, creada, creada_por)
+  values (v_nombre, 'activa', public._ahora(), public._ahora(), i.auth_user_id) returning id into v_cuenta;
+  insert into public.membresias (cuenta_id, auth_user_id, rol, creada, creada_por)
+  values (v_cuenta, i.auth_user_id, 'propietario', public._ahora(), i.auth_user_id);
+  v_suc := public._preparar_sucursal(v_cuenta, v_sucursal, p_zona_horaria);
+  v_admin := public._crear_admin(v_suc, p_admin_nombre, p_admin_pin);
+  perform public._log_cuenta(v_cuenta, null, i.auth_user_id, i.correo, 'crear_cuenta', jsonb_build_object('nombre', v_nombre));
+  perform public._log_cuenta(v_cuenta, v_suc, i.auth_user_id, i.correo, 'crear_sucursal',
+    jsonb_build_object('nombre', v_sucursal, 'admin', v_admin->>'id'));
+  return json_build_object('ok', true,
+    'cuenta', json_build_object('id', v_cuenta, 'nombre', v_nombre, 'rol', 'propietario'),
+    'sucursal', json_build_object('id', v_suc, 'nombre', v_sucursal), 'admin', v_admin);
+end $$;
+
+-- Aceptar una invitación: solo con la sesión del mismo correo al que se envió, vigente y sin usar. La
+-- primera invitación de propietario activa una cuenta pendiente; una de encargado no puede ser la
+-- primera. Si la persona ya es miembro, solo puede subir de encargado a propietario, nunca bajar.
+-- Orden de bloqueo: la cuenta y después la invitación (el mismo de invitar_miembro).
+create or replace function public.aceptar_invitacion(p_clave text)
+returns json language plpgsql security definer set search_path = public as $$
+declare i record; v_hash text := public._hash_secreto('invitacion', p_clave); v_cuenta uuid; inv public.invitaciones;
+        c public.cuentas; v_rol text;
+begin
+  select * into i from public._identidad();
+  select cuenta_id into v_cuenta from public.invitaciones where token_hash = v_hash;
+  if v_cuenta is not null then
+    select * into c from public.cuentas where id = v_cuenta for no key update;
+    select * into inv from public.invitaciones
+     where token_hash = v_hash and usada_en is null and vence > public._ahora() for update;
+  end if;
+  if inv.id is null or inv.correo <> i.correo or c.estado = 'suspendida'
+     or (c.estado = 'pendiente_activacion' and inv.rol <> 'propietario') then
+    perform public._error('INVITACION', 'La invitación no es válida, ya se usó, venció o es para otro correo.');
+  end if;
+  insert into public.membresias as m (cuenta_id, auth_user_id, rol, creada, creada_por)
+  values (c.id, i.auth_user_id, inv.rol, public._ahora(), inv.creada_por)
+  on conflict (cuenta_id, auth_user_id) do update set rol = 'propietario'
+    where excluded.rol = 'propietario' and m.rol <> 'propietario';
+  select m.rol into v_rol from public.membresias m where m.cuenta_id = c.id and m.auth_user_id = i.auth_user_id;
+  update public.invitaciones set usada_en = public._ahora(), usada_por = i.auth_user_id where id = inv.id;
+  if c.estado = 'pendiente_activacion' then
+    update public.cuentas set estado = 'activa', activada_en = public._ahora() where id = c.id;
+  end if;
+  perform public._log_cuenta(c.id, null, i.auth_user_id, i.correo, 'aceptar_invitacion',
+    jsonb_build_object('invitacion', inv.id, 'rol', v_rol, 'activo_la_cuenta', c.estado = 'pendiente_activacion'));
+  return json_build_object('ok', true, 'cuenta', json_build_object('id', c.id, 'nombre', c.nombre, 'rol', v_rol));
+end $$;
+
+-- Cuentas de la persona, con su papel y sus sucursales (para elegir en el panel de dueños)
+create or replace function public.mis_cuentas()
+returns json language plpgsql stable security definer set search_path = public as $$
+declare i record;
+begin
+  select * into i from public._identidad();
+  return json_build_object('correo', i.correo, 'cuentas', coalesce((
+    select json_agg(json_build_object('id', c.id, 'nombre', c.nombre, 'estado', c.estado, 'rol', m.rol,
+             'sucursales', coalesce((select json_agg(json_build_object('id', s.id, 'nombre', s.nombre, 'activa', s.activa)
+                                                     order by s.creada, s.nombre)
+                                       from public.sucursales s where s.cuenta_id = c.id), '[]'::json))
+             order by c.nombre)
+      from public.membresias m join public.cuentas c on c.id = m.cuenta_id
+     where m.auth_user_id = i.auth_user_id), '[]'::json));
+end $$;
+
+-- ---------------------------------------------------------------------
+--  API: PANEL DE DUEÑOS (_dueno; MODELO.md §3.2). Reciben la cuenta, y la sucursal o el id que tocan, y
+--  los buscan siempre dentro de esa cuenta: lo de otra cuenta se trata como inexistente.
+-- ---------------------------------------------------------------------
+-- Propietario: sucursal nueva con el catálogo inicial y su primer administrador (hasta 20 por cuenta)
+create or replace function public.crear_sucursal(p_cuenta uuid, p_nombre text, p_zona_horaria text,
+                                                 p_admin_nombre text, p_admin_pin text)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record; v_nombre text := left(btrim(coalesce(p_nombre, '')), 80); v_err text; v_suc uuid; v_admin json;
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario'], 'escritura');
+  v_err := public._revisar_alta(v_nombre, p_zona_horaria, p_admin_nombre, p_admin_pin);
+  if v_err is not null then return json_build_object('ok', false, 'error', v_err); end if;
+  if (select count(*) from public.sucursales where cuenta_id = d.cuenta_id) >= 20 then
+    return json_build_object('ok', false, 'error', 'limite');
+  end if;
+  v_suc := public._preparar_sucursal(d.cuenta_id, v_nombre, p_zona_horaria);
+  v_admin := public._crear_admin(v_suc, p_admin_nombre, p_admin_pin);
+  perform public._log_cuenta(d.cuenta_id, v_suc, d.auth_user_id, d.correo, 'crear_sucursal',
+    jsonb_build_object('nombre', v_nombre, 'admin', v_admin->>'id'));
+  return json_build_object('ok', true, 'sucursal', json_build_object('id', v_suc, 'nombre', v_nombre), 'admin', v_admin);
+end $$;
+
+-- Propietario: administrador del personal en una sucursal de su cuenta. Sirve de rescate si nadie puede
+-- entrar como administrador (PIN olvidado o bloqueado); queda en la bitácora de la sucursal.
+create or replace function public.crear_administrador(p_cuenta uuid, p_sucursal uuid, p_nombre text, p_pin text)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record; v_suc uuid; v_admin json;
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario'], 'escritura');
+  select s.id into v_suc from public.sucursales s where s.id = p_sucursal and s.cuenta_id = d.cuenta_id;
+  if v_suc is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
+  if btrim(coalesce(p_nombre, '')) = '' then return json_build_object('ok', false, 'error', 'nombre'); end if;
+  if not public._pin_formato_ok(p_pin) then return json_build_object('ok', false, 'error', 'formato'); end if;
+  if public._pin_debil(p_pin) then return json_build_object('ok', false, 'error', 'debil'); end if;
+  v_admin := public._crear_admin(v_suc, p_nombre, p_pin);
+  perform public._log_cuenta(d.cuenta_id, v_suc, d.auth_user_id, d.correo, 'crear_administrador',
+    jsonb_build_object('id', v_admin->>'id', 'nombre', v_admin->>'nombre'));
+  return json_build_object('ok', true, 'admin', v_admin);
+end $$;
+
+-- Propietario: invitación por correo (vence en 7 días). Devuelve el token una sola vez, para armar el
+-- enlace; solo se guarda su hash. Una invitación vigente por correo: la anterior vence al crear otra.
+create or replace function public.invitar_miembro(p_cuenta uuid, p_correo text, p_rol text)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record; v_correo text := lower(btrim(coalesce(p_correo, ''))); v_token text; v_id uuid;
+        v_vence timestamptz := public._ahora() + interval '7 days';
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario'], 'escritura');
+  if not public._correo_ok(v_correo) then return json_build_object('ok', false, 'error', 'correo'); end if;
+  if p_rol is null or p_rol not in ('propietario', 'encargado') then return json_build_object('ok', false, 'error', 'rol'); end if;
+  if exists (select 1 from public.membresias m join auth.users u on u.id = m.auth_user_id
+              where m.cuenta_id = d.cuenta_id and lower(btrim(u.email)) = v_correo) then
+    return json_build_object('ok', false, 'error', 'ya_miembro');
+  end if;
+  update public.invitaciones set vence = public._ahora()
+   where cuenta_id = d.cuenta_id and correo = v_correo and usada_en is null and vence > public._ahora();
+  if (select count(*) from public.invitaciones where cuenta_id = d.cuenta_id and usada_en is null and vence > public._ahora()) >= 30 then
+    return json_build_object('ok', false, 'error', 'limite');
+  end if;
+  v_token := public._token_aleatorio();
+  insert into public.invitaciones (cuenta_id, correo, rol, token_hash, vence, creada, creada_por)
+  values (d.cuenta_id, v_correo, p_rol, public._hash_secreto('invitacion', v_token), v_vence, public._ahora(), d.auth_user_id)
+  returning id into v_id;
+  perform public._log_cuenta(d.cuenta_id, null, d.auth_user_id, d.correo, 'invitar_miembro',
+    jsonb_build_object('invitacion', v_id, 'correo', v_correo, 'rol', p_rol));
+  return json_build_object('ok', true, 'token', v_token,
+    'invitacion', json_build_object('id', v_id, 'correo', v_correo, 'rol', p_rol, 'vence', v_vence));
+end $$;
+
+-- Propietario: cancelar una invitación que aún no se usa
+create or replace function public.cancelar_invitacion(p_cuenta uuid, p_invitacion uuid)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record; v_correo text;
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario'], 'escritura');
+  update public.invitaciones set vence = public._ahora()
+   where id = p_invitacion and cuenta_id = d.cuenta_id and usada_en is null and vence > public._ahora()
+  returning correo into v_correo;
+  if v_correo is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
+  perform public._log_cuenta(d.cuenta_id, null, d.auth_user_id, d.correo, 'cancelar_invitacion',
+    jsonb_build_object('invitacion', p_invitacion, 'correo', v_correo));
+  return json_build_object('ok', true);
+end $$;
+
+-- Propietario: quitar a un miembro (también a sí mismo). Nunca al último propietario: la cuenta activa
+-- conserva al menos uno (además lo comprueba el invariante al confirmar). Las invitaciones y los códigos
+-- que dejó pendientes ya no sirven.
+create or replace function public.quitar_miembro(p_cuenta uuid, p_miembro uuid)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record; v_rol text; v_correo text;
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario'], 'escritura');
+  select m.rol into v_rol from public.membresias m where m.cuenta_id = d.cuenta_id and m.auth_user_id = p_miembro for update;
+  if v_rol is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
+  if v_rol = 'propietario' and not exists (select 1 from public.membresias m where m.cuenta_id = d.cuenta_id
+                                             and m.rol = 'propietario' and m.auth_user_id <> p_miembro) then
+    return json_build_object('ok', false, 'error', 'ultimo_propietario');
+  end if;
+  select lower(u.email) into v_correo from auth.users u where u.id = p_miembro;
+  delete from public.membresias where cuenta_id = d.cuenta_id and auth_user_id = p_miembro;
+  update public.invitaciones set vence = public._ahora()
+   where cuenta_id = d.cuenta_id and creada_por = p_miembro and usada_en is null and vence > public._ahora();
+  update public.codigos_vinculacion k set vence = public._ahora()
+    from public.sucursales s
+   where s.id = k.sucursal_id and s.cuenta_id = d.cuenta_id and k.creado_por = p_miembro
+     and k.usado_en is null and k.vence > public._ahora();
+  perform public._log_cuenta(d.cuenta_id, null, d.auth_user_id, d.correo, 'quitar_miembro',
+    jsonb_build_object('miembro', p_miembro, 'correo', v_correo, 'rol', v_rol));
+  return json_build_object('ok', true, 'propio', p_miembro = d.auth_user_id);
+end $$;
+
+-- Propietario o encargado: miembros e invitaciones vigentes de la cuenta
+create or replace function public.listar_miembros(p_cuenta uuid)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record;
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario', 'encargado'], 'lectura');
+  return json_build_object('ok', true,
+    'miembros', coalesce((
+      select json_agg(json_build_object('id', m.auth_user_id, 'correo', lower(u.email), 'rol', m.rol, 'desde', m.creada,
+                                        'yo', m.auth_user_id = d.auth_user_id) order by m.rol desc, lower(u.email))
+        from public.membresias m left join auth.users u on u.id = m.auth_user_id
+       where m.cuenta_id = d.cuenta_id), '[]'::json),
+    'invitaciones', coalesce((
+      select json_agg(json_build_object('id', v.id, 'correo', v.correo, 'rol', v.rol, 'vence', v.vence) order by v.creada)
+        from public.invitaciones v
+       where v.cuenta_id = d.cuenta_id and v.usada_en is null and v.vence > public._ahora()), '[]'::json));
+end $$;
+
+-- Propietario o encargado: código de un solo uso para vincular un equipo a una sucursal de su cuenta.
+-- 8 caracteres, vence en 10 minutos, se guarda como hash; hasta 10 vigentes por sucursal. p_monitor: el
+-- equipo será monitor dedicado de cocina (MODELO.md §5.4).
+create or replace function public.generar_codigo(p_cuenta uuid, p_sucursal uuid, p_monitor boolean default false)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record; v_suc uuid; v_codigo text; v_id uuid; v_monitor boolean := coalesce(p_monitor, false);
+        v_vence timestamptz := public._ahora() + interval '10 minutes';
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario', 'encargado'], 'escritura');
+  select s.id into v_suc from public.sucursales s where s.id = p_sucursal and s.cuenta_id = d.cuenta_id and s.activa;
+  if v_suc is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
+  delete from public.codigos_vinculacion
+   where sucursal_id = v_suc and usado_en is null and vence < public._ahora() - interval '1 day';
+  if (select count(*) from public.codigos_vinculacion
+       where sucursal_id = v_suc and usado_en is null and vence > public._ahora()) >= 10 then
+    return json_build_object('ok', false, 'error', 'limite');
+  end if;
+  for k in 1 .. 5 loop
+    v_codigo := public._codigo_aleatorio();
+    insert into public.codigos_vinculacion (sucursal_id, codigo_hash, monitor_cocina, creado_por, creado, vence)
+    values (v_suc, public._hash_secreto('codigo', v_codigo), v_monitor, d.auth_user_id, public._ahora(), v_vence)
+    on conflict (codigo_hash) do nothing
+    returning id into v_id;
+    exit when v_id is not null;
+  end loop;
+  if v_id is null then raise exception 'No se pudo generar un código; inténtalo de nuevo.'; end if;
+  perform public._log_cuenta(d.cuenta_id, v_suc, d.auth_user_id, d.correo, 'generar_codigo',
+    jsonb_build_object('codigo_id', v_id, 'monitor_cocina', v_monitor));
+  return json_build_object('ok', true, 'codigo', v_codigo, 'vence', v_vence, 'monitorCocina', v_monitor);
+end $$;
+
+-- Propietario o encargado: equipos de su cuenta (o de una de sus sucursales), con quién los aprobó y su
+-- última actividad
+create or replace function public.listar_dispositivos(p_cuenta uuid, p_sucursal uuid default null)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record;
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario', 'encargado'], 'lectura');
+  if p_sucursal is not null and not exists (select 1 from public.sucursales s where s.id = p_sucursal and s.cuenta_id = d.cuenta_id) then
+    return json_build_object('ok', false, 'error', 'no_existe');
+  end if;
+  return json_build_object('ok', true, 'dispositivos', coalesce((
+    select json_agg(json_build_object(
+             'id', x.id, 'nombre', x.nombre, 'sucursal', json_build_object('id', s.id, 'nombre', s.nombre),
+             'monitorCocina', x.monitor_cocina, 'creado', x.creado, 'ultimoUso', x.ultimo_uso,
+             'aprobadoPor', (select lower(u.email) from auth.users u where u.id = x.aprobado_por),
+             'revocadoEn', x.revocado_en,
+             'revocadoPor', (select lower(u.email) from auth.users u where u.id = x.revocado_por))
+           order by x.revocado_en is not null, s.nombre, x.nombre)
+      from public.dispositivos x join public.sucursales s on s.id = x.sucursal_id
+     where s.cuenta_id = d.cuenta_id and (p_sucursal is null or s.id = p_sucursal)), '[]'::json));
+end $$;
+
+-- Propietario o encargado: dar de baja un equipo. Desde ese momento _dispositivo (y con él _contexto) lo
+-- rechaza en todas las funciones; sus sesiones de operador terminan y suelta la cocina si la tenía.
+create or replace function public.revocar_dispositivo(p_cuenta uuid, p_dispositivo uuid)
+returns json language plpgsql security definer set search_path = public as $$
+declare d record; x record;
+begin
+  select * into d from public._dueno(p_cuenta, array['propietario', 'encargado'], 'escritura');
+  select q.id, q.sucursal_id, q.nombre, q.revocado_en into x
+    from public.dispositivos q join public.sucursales s on s.id = q.sucursal_id
+   where q.id = p_dispositivo and s.cuenta_id = d.cuenta_id
+     for update of q;
+  if x.id is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
+  if x.revocado_en is not null then return json_build_object('ok', true, 'yaRevocado', true); end if;
+  update public.dispositivos set revocado_en = public._ahora(), revocado_por = d.auth_user_id where id = x.id;
+  update public.sesiones set revocada = true, motivo_fin = 'equipo_revocado'
+   where sucursal_id = x.sucursal_id and dispositivo_id = x.id and not revocada;
+  update public.cocina_sesion set session_id = null where sucursal_id = x.sucursal_id and dispositivo = x.id::text;
+  perform public._log_cuenta(d.cuenta_id, x.sucursal_id, d.auth_user_id, d.correo, 'revocar_dispositivo',
+    jsonb_build_object('dispositivo_id', x.id, 'nombre', x.nombre));
+  return json_build_object('ok', true, 'yaRevocado', false);
+end $$;
+
+-- Invitación del primer propietario de una cuenta pendiente de activación (MODELO.md §3.0). NO se expone
+-- a la API: la ejecuta el proveedor en el SQL Editor y envía el enlace al dueño:
+--   select public.crear_invitacion_inicial('<id de la cuenta>', 'dueno@correo.com');
+-- Devuelve el token (solo se guarda su hash). Las invitaciones anteriores sin usar de esa cuenta vencen.
+create or replace function public.crear_invitacion_inicial(p_cuenta uuid, p_correo text, p_dias int default 7)
+returns text language plpgsql security definer set search_path = public as $$
+declare c public.cuentas; v_correo text := lower(btrim(coalesce(p_correo, ''))); v_token text := public._token_aleatorio();
+begin
+  select * into c from public.cuentas where id = p_cuenta for no key update;
+  if not found then raise exception 'La cuenta no existe.'; end if;
+  if c.estado <> 'pendiente_activacion' then
+    raise exception 'La cuenta ya está activa: sus propietarios invitan desde el panel de dueños.';
+  end if;
+  if not public._correo_ok(v_correo) then raise exception 'Escribe un correo válido.'; end if;
+  if p_dias is null or p_dias not between 1 and 30 then raise exception 'La invitación debe vencer en 1 a 30 días.'; end if;
+  update public.invitaciones set vence = public._ahora() where cuenta_id = c.id and usada_en is null and vence > public._ahora();
+  insert into public.invitaciones (cuenta_id, correo, rol, token_hash, vence, creada)
+  values (c.id, v_correo, 'propietario', public._hash_secreto('invitacion', v_token),
+          public._ahora() + make_interval(days => p_dias), public._ahora());
+  perform public._log_cuenta(c.id, null, null, 'proveedor', 'crear_invitacion_inicial', jsonb_build_object('correo', v_correo));
+  return v_token;
+end $$;
+
+-- ---------------------------------------------------------------------
 --  TIEMPO REAL: aviso por Broadcast (sin datos) en lugar de postgres_changes
 -- ---------------------------------------------------------------------
 do $$
@@ -2365,7 +2960,14 @@ begin
              'mover_tickets','archivar_tickets','marcar_hecho','_cuenta_con_propietario',
              '_usa_cobro_id_heredado','_siguiente_folio','_minutos_bloqueo','_espera_operador','_fallo_operador',
              '_limpiar_operador','_espera_equipo','_fallo_equipo','_fallo_escalado','desbloquear','restablecer_acceso',
-             '_marcar_interaccion','_bloquear_equipo','_bloquear_operador','_bloquear_contador')
+             '_marcar_interaccion','_bloquear_equipo','_bloquear_operador','_bloquear_contador',
+             -- paso 4: dueños y dispositivos
+             '_catalogo_inicial','_precios_iniciales','_hash_secreto','_normalizar_codigo','_codigo_aleatorio',
+             '_token_aleatorio','_correo_ok','_identidad','_dueno','_vinculacion','_log_cuenta','_revisar_alta',
+             '_preparar_sucursal','_crear_admin','crear_invitacion_inicial',
+             'vincular_dispositivo','crear_cuenta','aceptar_invitacion','mis_cuentas','crear_sucursal',
+             'crear_administrador','invitar_miembro','cancelar_invitacion','quitar_miembro','listar_miembros',
+             'generar_codigo','listar_dispositivos','revocar_dispositivo')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;
@@ -2391,7 +2993,14 @@ grant execute on function
   public.cobrar(text, text, text[], text, numeric, numeric, boolean), public.anular_cobro(text, text, text),
   public.marcar_recibido(text, text[]), public.no_cobrar(text, text, text[], text, boolean),
   public.fijar_ajuste(text, text, jsonb), public.mover_tickets(text, jsonb, text),
-  public.archivar_tickets(text, text[]), public.marcar_hecho(text, text, text, boolean)
+  public.archivar_tickets(text, text[]), public.marcar_hecho(text, text, text, boolean),
+  -- paso 4: vinculación (identidad anónima), alta de personas y panel de dueños (personas con correo)
+  public.vincular_dispositivo(text, text),
+  public.crear_cuenta(text, text, text, text, text), public.aceptar_invitacion(text), public.mis_cuentas(),
+  public.crear_sucursal(uuid, text, text, text, text), public.crear_administrador(uuid, uuid, text, text),
+  public.invitar_miembro(uuid, text, text), public.cancelar_invitacion(uuid, uuid), public.quitar_miembro(uuid, uuid),
+  public.listar_miembros(uuid), public.generar_codigo(uuid, uuid, boolean), public.listar_dispositivos(uuid, uuid),
+  public.revocar_dispositivo(uuid, uuid)
 to authenticated;
 
 commit;

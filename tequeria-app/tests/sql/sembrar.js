@@ -1,6 +1,8 @@
-// Siembra las cuentas de tests/fixtures/multinegocio.js en una base con el esquema, como lo hará el
-// panel de dueños (paso 4): cuenta activa con sus dueños, y por sucursal su configuración, catálogo,
-// mesas, personal (con PIN) y equipos vinculados. Cada llamada usa su propia copia de las fixtures.
+// Siembra las cuentas de tests/fixtures/multinegocio.js en una base con el esquema, con SQL directo para
+// que cada sucursal tenga exactamente el catálogo de la fixture: cuenta activa con sus dueños, y por
+// sucursal su configuración, catálogo, mesas, personal (con PIN) y equipos vinculados. El alta real
+// (crear_cuenta, generar_codigo, vincular_dispositivo…) se prueba en tests/sql/duenos.test.js.
+// Cada llamada usa su propia copia de las fixtures.
 import { randomBytes } from "node:crypto";
 import { crearCuentas } from "../fixtures/multinegocio.js";
 import { vincularDePrueba } from "./util.js";
@@ -10,9 +12,11 @@ export async function sembrar(sql, cuentas = crearCuentas()) {
   for (const c of cuentas) {
     await sql.query("begin");
     const cuenta = (await sql.query("insert into public.cuentas (nombre) values ($1) returning id", [c.nombre])).rows[0].id;
+    const duenos = {};
     for (const d of c.duenos) {
       const u = (await sql.query("insert into auth.users (email, email_confirmed_at) values ($1, now()) returning id", [d.correo])).rows[0].id;
       await sql.query("insert into public.membresias (cuenta_id, auth_user_id, rol) values ($1, $2, $3)", [cuenta, u, d.rol]);
+      duenos[d.rol] = { authUid: u, correo: d.correo };
     }
     await sql.query("update public.cuentas set estado = 'activa', activada_en = now() where id = $1", [cuenta]);
     await sql.query("commit");
@@ -42,7 +46,7 @@ export async function sembrar(sql, cuentas = crearCuentas()) {
       for (const d of s.dispositivos) {
         equipos[d.monitorCocina ? "cocina" : "caja"] = await vincularDePrueba(sql, { sucursal: id, nombre: d.nombre, monitor: d.monitorCocina });
       }
-      res[s.clave] = { id, cuenta, sucursal: s, personal, equipos };
+      res[s.clave] = { id, cuenta, sucursal: s, personal, equipos, duenos };
     }
   }
   return res;

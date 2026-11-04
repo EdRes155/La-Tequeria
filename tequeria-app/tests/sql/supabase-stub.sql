@@ -36,8 +36,12 @@ create table if not exists auth.users (
   id uuid primary key default gen_random_uuid(),
   email text,
   is_anonymous boolean not null default false,
-  email_confirmed_at timestamptz
+  email_confirmed_at timestamptz,
+  banned_until timestamptz,
+  deleted_at timestamptz
 );
+alter table auth.users add column if not exists banned_until timestamptz;
+alter table auth.users add column if not exists deleted_at timestamptz;
 create or replace function auth.uid() returns uuid language sql stable as $$
   select nullif(coalesce(current_setting('request.jwt.claim.sub', true),
                          nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'), '')::uuid

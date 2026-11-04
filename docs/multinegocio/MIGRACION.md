@@ -102,15 +102,19 @@ Implementado en la sección «MULTINEGOCIO» de `supabase-schema.sql`, que se pu
   existe); `tickets.folio_periodo` y `folios`, que parten del folio más alto que ya existe.
 - Invariante de propietario (MODELO.md §3.0) con disparadores diferidos que **escriben** la fila de la
   cuenta, probado con bajas simultáneas en READ COMMITTED, REPEATABLE READ y SERIALIZABLE.
-- Se dejan para el paso que las usa: las columnas de seguridad de `sesiones` y `usuarios` (paso 3) y
-  `bitacora.cuenta_id` (paso 4, acciones de cuenta).
+- Con el paso que las usa (implementadas): las columnas de seguridad de `sesiones` y `usuarios` (paso
+  3); `bitacora.cuenta_id` (de la sucursal de cada fila), `bitacora.auth_user_id`, `sucursal_id` nulo
+  solo en acciones de cuenta (`bitacora_alcance_ck`) y `cuentas.creada_por` (paso 4).
 
 ### 4.2 Cuenta y sucursal inicial
 
 - Crear la cuenta «La Tequería» y su sucursal, con la zona horaria y la retención actuales.
 - La cuenta nace en `pendiente_activacion` (MODELO.md §3.0): no tiene propietario.
-- Dejar una invitación de propietario para el correo del dueño. Al aceptarla, la cuenta pasa a
-  `activa` en la misma transacción. Mientras tanto nadie puede generar códigos ni vincular equipos.
+- Dejar una invitación de propietario para el correo del dueño, en el SQL Editor (implementado):
+  `select public.crear_invitacion_inicial('<id de la cuenta>', '<correo del dueño>');`. Devuelve el
+  token una sola vez; con él se arma el enlace. Al aceptarla (`aceptar_invitacion`, con la sesión de ese
+  mismo correo verificado), la cuenta pasa a `activa` en la misma transacción. Mientras tanto nadie
+  puede generar códigos ni vincular equipos.
 
 ### 4.3 Rellenar
 
@@ -123,7 +127,7 @@ Implementado en la sección «MULTINEGOCIO» de `supabase-schema.sql`, que se pu
 | `intentos` | No se migran contadores: se registra en la bitácora cualquier bloqueo vigente y se empieza de cero con las tablas nuevas |
 | `sesiones` | Se revocan todas las que no tienen equipo (`motivo_fin = 'sin_equipo'`): hay que volver a entrar desde un equipo vinculado. `expira` pasa a ser `vence_absoluta` y `ultimo_uso` se retira (implementado) |
 | `usuarios` | `politica_pin = 0` (heredada): al entrar desde un dispositivo vinculado, el PIN anterior solo sirve para elegir uno nuevo de 6 a 8 dígitos (implementado) |
-| `bitacora` | `cuenta_id` y `sucursal_id` de la inicial |
+| `bitacora` | `sucursal_id` de la inicial y `cuenta_id` de su sucursal (implementado) |
 
 ### 4.4 Validar dentro de la transacción
 
@@ -158,6 +162,10 @@ Implementado (paso 2) en `supabase-schema.sql`:
 
 ## 5. Cambio en producción (ventana acordada)
 
+Antes de la ventana, en Supabase Auth: inicio de sesión anónimo activado y protegido (CAPTCHA o límite
+por IP), inicio con correo con confirmación obligatoria (o con Google) y la expiración del JWT acordada
+(MODELO.md §4).
+
 1. Fuera del horario de servicio, con el personal avisado.
 2. Comprobar que no haya mesas abiertas, comandas en cocina ni cuentas por cobrar. Lo ideal es hacer
    el corte del día antes.
@@ -167,8 +175,10 @@ Implementado (paso 2) en `supabase-schema.sql`:
    compararla: `node scripts/huella.mjs comparar antes.json despues.json --permitir abierto.sesiones_vigentes`.
    Debe salir igual. Si no, se aplica la recuperación (§6) antes de abrir. Va aquí porque todo lo que
    sigue cambia datos a propósito.
-6. El dueño acepta su invitación (la cuenta pasa a `activa`) y genera los códigos para vincular la
-   caja y la cocina. Va antes de publicar porque sin cuenta activa no hay códigos ni equipos.
+6. El proveedor crea la invitación inicial (§4.2); el dueño la acepta (`aceptar_invitacion`; la cuenta
+   pasa a `activa`) y genera los códigos (`generar_codigo`, con monitor dedicado para la cocina si lo
+   es) para vincular la caja y la cocina. Va antes de publicar porque sin cuenta activa no hay códigos
+   ni equipos.
 7. Publicar la app nueva y vincular los equipos.
 8. Cada persona del personal entra con su PIN anterior desde un dispositivo vinculado y elige uno
    nuevo de 6 a 8 dígitos.
@@ -176,7 +186,9 @@ Implementado (paso 2) en `supabase-schema.sql`:
    - una comanda, un cobro y el monitor;
    - tomar otra huella y compararla con la del paso 5. Solo pueden aparecer estas diferencias, cada
      una explicada por los pasos 6 a 9:
-     - como «sobran»: la comanda y el cobro de la prueba y sus entradas de bitácora;
+     - como «sobran»: la comanda y el cobro de la prueba, y las entradas de bitácora de la invitación
+       inicial, la activación, los códigos, la vinculación, los cambios de PIN y el cobro. Las de
+       cuenta no tienen sucursal y la huella no las cuenta como filas sin sucursal;
      - como «distintas»: los usuarios que eligieron PIN nuevo, la cocina activa si entró la cocina
        y la mesa de la comanda si fue para comer aquí;
      - en el resumen: los conteos y totales de esa comanda y ese cobro, la comanda en cocina y las

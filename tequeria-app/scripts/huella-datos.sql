@@ -32,7 +32,7 @@ par as (
               else (left(version, 0) || 'huella: huella.version debe ser origen o destino, y huella.sal tener 16 caracteres o más')::boolean end
 ),
 nuevas as (
-  select array['sucursal_id', 'cuenta_id', 'folio_periodo', 'estado_cobro', 'politica_pin', 'pin_cambiado_en', 'version_pin'] as cols
+  select array['sucursal_id', 'cuenta_id', 'folio_periodo', 'estado_cobro', 'politica_pin', 'pin_cambiado_en', 'version_pin', 'auth_user_id'] as cols
 ),
 t as (
   select x.id, x.cobro_id, x.corte_id, x.mesa_id, x.total, x.reenvio, x.folio, x.archivado_cocina, to_jsonb(x) as j,
@@ -129,7 +129,8 @@ select jsonb_build_object(
                              where not exists (select 1 from public.usuarios u where u.id = s.usuario_id))
     )
   ),
-  -- Solo en destino: filas que quedaron sin sucursal (debe ser 0 en todas)
+  -- Solo en destino: filas que quedaron sin sucursal (debe ser 0 en todas). En la bitácora no cuentan las
+  -- acciones de cuenta (invitar o quitar miembros, activar la cuenta…), que llevan cuenta y no sucursal.
   'sin_sucursal', case when par.version = 'destino' then (
     select jsonb_object_agg(e, n) from (
       select e, count(*) filter (where f->>'sucursal_id' is null) n from (
@@ -145,6 +146,7 @@ select jsonb_build_object(
         union all select 'cocina_hechos', to_jsonb(x) from public.cocina_hechos x
         union all select 'sesiones', to_jsonb(x) from public.sesiones x
         union all select 'bitacora', to_jsonb(x) from public.bitacora x
+                   where to_jsonb(x) ->> 'sucursal_id' is not null or to_jsonb(x) ->> 'cuenta_id' is null
       ) z group by e) y) end,
   'entidades', (select jsonb_object_agg(e, firmas) from entidades)
 ) as huella

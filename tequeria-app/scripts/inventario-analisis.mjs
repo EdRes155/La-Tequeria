@@ -16,8 +16,13 @@ export function directo(f, tablas, funciones) {
   // _contexto(p_token, roles | null, 'tipo'): roles exigidos y tipo de llamada (MODELO.md §3.2)
   const ctx = cuerpo.match(/_contexto\(\s*p_token\s*,\s*(null|array\[([^\]]*)\])\s*,\s*'(\w+)'/);
   const roles = ctx?.[2]?.replace(/'/g, "").replace(/\s+/g, " ");
-  const acceso = !f.api ? (f.nombre === "crear_admin_inicial" ? "Solo SQL Editor" : "Interna")
+  // _dueno(p_cuenta, roles, 'tipo'): panel de dueños (MODELO.md §3.2)
+  const dueno = cuerpo.match(/_dueno\(\s*p_cuenta\s*,\s*array\[([^\]]*)\]\s*,\s*'(\w+)'/);
+  const acceso = !f.api ? (SOLO_SQL_EDITOR.includes(f.nombre) ? "Solo SQL Editor" : "Interna")
     : ctx ? `Sesión: ${roles || "cualquier rol"} · ${ctx[3]}`
+    : dueno ? `Dueño: ${dueno[1].replace(/'/g, "").replace(/\s+/g, " ")} · ${dueno[2]}`
+    : /\b_identidad\(\)/.test(cuerpo) ? "Persona con correo verificado"
+    : /\b_vinculacion\(/.test(cuerpo) ? "Identidad anónima con código de vinculación"
     : /\b_dispositivo\(\)/.test(cuerpo) ? "Equipo vinculado, sin operador"
     : /\bp_token\b/.test(f.args) ? "Token propio (sin revisar rol)"
     : "Sin sesión";
@@ -46,11 +51,19 @@ export function directo(f, tablas, funciones) {
   return { lee, escribe, llama, acceso, marcas, sesion: /\b_(?:sesion|contexto|dispositivo)\(/.test(cuerpo) };
 }
 
+// Funciones que no se exponen a la API y ejecuta el proveedor desde el SQL Editor
+export const SOLO_SQL_EDITOR = ["crear_admin_inicial", "crear_invitacion_inicial"];
+
 // Contexto decidido a mano para funciones cuyo papel no se deduce de lo que leen o escriben
 export const CONTEXTO_REVISADO = {
   _dispositivo: "Es el validador del equipo: de aquí sale la sucursal (auth.uid() → dispositivo sin revocar)",
   _contexto: "Es el validador de la operación: equipo y sesión del operador de esa sucursal y ese equipo",
   _cuenta_con_propietario: "Cuenta de la fila: invariante de propietario (MODELO.md §3.0)",
+  _identidad: "Es el validador de personas: auth.uid() con correo verificado, no anónima y que nunca fue un equipo",
+  _dueno: "Es el validador del panel de dueños: membresía en la cuenta que recibe, con su rol",
+  _vinculacion: "Es el validador de la vinculación: identidad anónima sin equipo y código vigente; la sucursal sale del código",
+  _preparar_sucursal: "Crea la sucursal en la cuenta que recibe (ya validada por _identidad o _dueno)",
+  _log_cuenta: "Recibe la cuenta (y la sucursal, si la hay) de quien la llama",
 };
 
 // Agrega lo que hacen las funciones que llama, de forma transitiva: un ayudante que no toca tablas
@@ -90,8 +103,11 @@ export function conDependencias(lista) {
     const tocaDatos = c.lee.length || c.escribe.length;
     const contexto = CONTEXTO_REVISADO[f.nombre] ? `${CONTEXTO_REVISADO[f.nombre]} (revisado)`
       : f.acceso.startsWith("Sesión") || f.acceso.startsWith("Token") ? "Sucursal de la sesión operativa"
+      : f.acceso.startsWith("Dueño") ? "Cuenta elegida en el panel (membresía comprobada); sucursal e ids dentro de ella"
+      : f.acceso === "Persona con correo verificado" ? "Ninguno al entrar: crea la cuenta o la membresía, o lista las suyas"
+      : f.acceso.startsWith("Identidad anónima") ? "Sucursal del código de vinculación"
       : f.acceso.startsWith("Equipo") || f.acceso === "Sin sesión" ? "Sucursal del dispositivo vinculado"
-      : f.acceso === "Solo SQL Editor" ? "Se reemplaza por el registro del dueño"
+      : f.acceso === "Solo SQL Editor" ? "La que indica el proveedor (parámetro)"
       : f.resultado === "trigger" && f.marcas.some((m) => m.startsWith("aviso en tiempo real")) ? "Sucursal de la fila (canal privado por sucursal)"
       : f.resultado === "trigger" ? "La fila que lo dispara"
       : c.sesion ? "Sucursal de la sesión (resuelve la sesión)"
