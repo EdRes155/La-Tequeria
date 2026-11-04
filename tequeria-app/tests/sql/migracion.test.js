@@ -129,7 +129,10 @@ d("multinegocio: migración desde el esquema de producción", () => {
     expect(compararHuellas(origen, await huellaDe(sql, "destino", sal), { permitir }).iguales).toBe(true);
   });
 
-  it("la API funciona desde un equipo vinculado y sus filas nuevas quedan en la sucursal, con su folio", async () => {
+  it("la API funciona desde un equipo vinculado y la prueba de humo solo deja las diferencias esperadas", async () => {
+    // como en MIGRACION.md §5: la huella «después» se compara antes de la prueba de humo (primera prueba);
+    // aquí se toma la de partida de la prueba de humo para verificar después sus diferencias una por una
+    const antesDeHumo = await huellaDe(sql, "destino", sal);
     const api = await conectar("tq_migracion");   // activa la cuenta con un propietario de prueba y vincula un equipo
     const login = await api.rpc("login", { p_id: "b2c3d4e5f6a1", p_pin: "571936" });
     expect(login.ok).toBe(true);
@@ -143,9 +146,22 @@ d("multinegocio: migración desde el esquema de producción", () => {
       .toEqual({ sucursal_id: s, estado_cobro: "cobrado", cobro_id: "cobro-nuevo-0001", folio_periodo: "continuo", folio: 9 });
     expect((await uno("select sucursal_id from public.cobros where id = 'cobro-nuevo-0001'")).sucursal_id).toBe(s);
     expect(await uno("select ultimo::int from public.folios")).toEqual({ ultimo: 9 });
-    // la nueva fila no es una diferencia inesperada: es la única que sobra
-    const r = compararHuellas(origen, await huellaDe(sql, "destino", sal), { permitir });
-    expect(r.entidades.tickets).toEqual({ faltan: [], sobran: ["t-nuevo-0001"], distintas: [] });
+    // solo sobran la comanda, el cobro y su entrada de bitácora; nada falta ni cambia
+    const r = compararHuellas(antesDeHumo, await huellaDe(sql, "destino", sal));
+    const bitacora = (await sql.query("select id::text from public.bitacora where accion = 'cobro' and detalle->>'cobro' = 'cobro-nuevo-0001'")).rows.map((x) => x.id);
+    expect(r.entidades).toEqual({
+      bitacora: { faltan: [], sobran: bitacora, distintas: [] },
+      cobros: { faltan: [], sobran: ["cobro-nuevo-0001"], distintas: [] },
+      tickets: { faltan: [], sobran: ["t-nuevo-0001"], distintas: [] },
+    });
+    expect(bitacora).toHaveLength(1);
+    // en el resumen, además, la comanda está en cocina y quien entró tiene una sesión abierta
+    expect(r.resumen.map((x) => x.ruta)).toEqual([
+      "abierto.en_cocina", "abierto.sesiones_vigentes",
+      "cobros.cobrado_valido", "cobros.por_metodo.efectivo", "tablas.bitacora", "tablas.cobros", "tablas.tickets",
+      "ventas.folio_maximo", "ventas.por_estado_cobro.cobrado", "ventas.tickets_sin_reenvio", "ventas.total_periodo_abierto",
+      "ventas.total_vendido",
+    ]);
   });
 
   it("las tablas y funciones internas no son accesibles desde la app", async () => {

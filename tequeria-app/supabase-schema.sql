@@ -1368,7 +1368,9 @@ declare s record; v_n int; v_ids text[];
 begin
   select * into s from public._contexto(p_token, array['cocinero', 'admin']);
   if p_ids is null or cardinality(p_ids) = 0 then return 0; end if;
-  v_ids := array(select distinct x from unnest(p_ids[1:300]) x);
+  -- una lista más larga se rechaza entera: recortarla dejaría sin validar lo que sobra
+  if cardinality(p_ids) > 300 then perform public._error('DATOS', 'Demasiadas comandas a la vez (máximo 300).'); end if;
+  v_ids := array(select distinct x from unnest(p_ids) x);
   if (select count(*) from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids)) <> cardinality(v_ids) then
     perform public._error('TICKET', 'Alguna comanda ya no existe.');
   end if;
@@ -1414,7 +1416,8 @@ returns int language plpgsql security definer set search_path = public as $$
 declare s record; v_n int; v_ids text[];
 begin
   select * into s from public._contexto(p_token, array['cocinero', 'admin']);
-  if p_ids is null or cardinality(p_ids) = 0 or cardinality(p_ids) > 300 then return 0; end if;
+  if p_ids is null or cardinality(p_ids) = 0 then return 0; end if;
+  if cardinality(p_ids) > 300 then perform public._error('DATOS', 'Demasiadas comandas a la vez (máximo 300).'); end if;
   v_ids := array(select distinct x from unnest(p_ids) x);
   perform 1 from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids) order by id for update;
   if (select count(*) from public.tickets where sucursal_id = s.sucursal_id and id = any (v_ids)) <> cardinality(v_ids) then

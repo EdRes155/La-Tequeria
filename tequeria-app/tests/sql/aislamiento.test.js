@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "node:crypto";
 import { URL_ADMIN, ESQUEMA, STUB, crearBase, conectarComo, cerrarTodo, falla } from "./util.js";
-import { MATRIZ, casosDe, revisarMatriz } from "./matriz-aislamiento.js";
+import { MATRIZ, PASO_ACTUAL, casosDe, revisarMatriz, pasoDe, pendienteDeclarado } from "./matriz-aislamiento.js";
 import { sembrar } from "./sembrar.js";
 
 describe("guardia de la matriz (sin base)", () => {
@@ -25,7 +25,17 @@ describe("guardia de la matriz (sin base)", () => {
     expect(revisarMatriz(externas, { ...matriz, "nueva_api()": {} }).sinCasos).toEqual(["nueva_api()"]);
   });
   it("pide pasar a firma completa una función futura que ya existe", () => {
-    expect(revisarMatriz([...externas, "desbloquear(text, text)"], { ...matriz, desbloquear: { futura: true, casos: ["x"] } }).futurasQueYaExisten).toEqual(["desbloquear"]);
+    expect(revisarMatriz([...externas, "desbloquear(text, text)"], { ...matriz, desbloquear: { futura: 3, casos: ["x"] } }).futurasQueYaExisten).toEqual(["desbloquear"]);
+  });
+  it("una función futura debe declarar el paso en que llega", () => {
+    expect(revisarMatriz(externas, { ...matriz, nueva: { futura: true, casos: ["x"] } }).futuraSinPaso).toEqual(["nueva"]);
+  });
+  it("un pendiente declarado para un paso ya terminado hace fallar la guardia", () => {
+    const m = { ...matriz, "login(text, text, text)": { casos: ["a (paso 2)", "b (paso 3)"] }, vieja: { futura: 2, casos: ["c"] } };
+    expect(revisarMatriz(externas, m, 2).pasoVencido).toEqual(["login(text, text, text): a (paso 2)", "vieja: c"]);
+    expect(pendienteDeclarado({}, "b (paso 3)", 2)).toBe(true);
+    expect(pendienteDeclarado({}, "sin paso", 2)).toBe(false);
+    expect(pasoDe({ futura: 4 }, "d (paso 5)")).toBe(5);
   });
 });
 
@@ -247,7 +257,7 @@ d("matriz de aislamiento entre sucursales", () => {
         and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
       order by 1`)).rows.map((r) => r.firma);
     expect(externas.length).toBeGreaterThan(30);
-    expect(revisarMatriz(externas)).toEqual({ faltan: [], sobran: [], sinCasos: [], futurasQueYaExisten: [] });
+    expect(revisarMatriz(externas)).toEqual({ faltan: [], sobran: [], sinCasos: [], futurasQueYaExisten: [], futuraSinPaso: [], pasoVencido: [] });
     expect(externas.filter((f) => !RECETAS[f])).toEqual([]);
     // anon (sin sesión de Supabase) no ejecuta ninguna
     expect((await sql.query(`select count(*)::int n from pg_proc p where p.pronamespace = 'public'::regnamespace
@@ -307,8 +317,25 @@ d("matriz de aislamiento entre sucursales", () => {
     },
   };
 
+  // Una lista de 300 referencias propias y, en la posición 301, un id ajeno o uno inexistente
+  const mas300 = (fn, campo) => async () => {
+    const lista = (ultimo) => [...Array(300).fill(A.t.llevar), ultimo];
+    const ajeno = await intentar(A.con.cocina, fn, { p_token: A.tok.cocinero, [campo]: lista(B.t.llevar) });
+    const inexistente = await intentar(A.con.cocina, fn, { p_token: A.tok.cocinero, [campo]: lista(NO_EXISTE) });
+    expect(ajeno.error).toBe("DATOS");
+    expect({ error: ajeno.error, hint: ajeno.hint }).toEqual({ error: inexistente.error, hint: inexistente.hint });
+    // con 300 sí se procesa
+    expect((await intentar(A.con.cocina, fn, { p_token: A.tok.cocinero, [campo]: Array(300).fill(A.t.llevar) })).error).toBeUndefined();
+  };
+
   // Casos propios de cada función
   const CASOS = {
+    "marcar_recibido(text, text[])": {
+      "una lista de más de 300 se rechaza entera, aunque el id ajeno o inexistente llegue en la posición 301": mas300("marcar_recibido", "p_ids"),
+    },
+    "archivar_tickets(text, text[])": {
+      "una lista de más de 300 se rechaza entera, aunque el id ajeno o inexistente llegue en la posición 301": mas300("archivar_tickets", "p_ids"),
+    },
     "usuarios_login()": {
       "solo lista el personal de la sucursal del dispositivo": async () => {
         const r = await A.con.caja.rpc("usuarios_login");
@@ -425,8 +452,11 @@ d("matriz de aislamiento entre sucursales", () => {
     },
   };
 
+  // Solo puede quedar pendiente lo declarado para un paso posterior (matriz-aislamiento.js); cualquier otro
+  // caso sin prueba falla aquí y en su propia prueba.
+  const sinPrueba = [];
   for (const [firma, f] of Object.entries(MATRIZ)) {
-    describe(firma + (f.futura ? " (nueva)" : ""), () => {
+    describe(firma + (f.futura ? ` (nueva, paso ${f.futura})` : ""), () => {
       const r = RECETAS[firma];
       if (!f.futura) {
         it("la receta es válida: la llamada propia funciona", async () => {
@@ -435,10 +465,17 @@ d("matriz de aislamiento entre sucursales", () => {
         });
       }
       for (const texto of casosDe(f)) {
-        const prueba = f.futura || /\(paso \d\)$/.test(texto) ? null : (GENERICOS[texto]?.(firma, r) || CASOS[firma]?.[texto]);
+        const prueba = f.futura ? null : (GENERICOS[texto]?.(firma, r) || CASOS[firma]?.[texto]);
         if (prueba) it(texto, prueba);
-        else it.todo(texto);
+        else if (pendienteDeclarado(f, texto)) it.todo(`${texto} — pendiente del paso ${pasoDe(f, texto)}`);
+        else {
+          sinPrueba.push(`${firma}: ${texto}`);
+          it(texto, () => { throw new Error(`Caso del paso ${PASO_ACTUAL} sin prueba: agrégala en CASOS o GENERICOS.`); });
+        }
       }
     });
   }
+  it("todos los casos que no se declararon para un paso posterior tienen prueba", () => {
+    expect(sinPrueba).toEqual([]);
+  });
 });

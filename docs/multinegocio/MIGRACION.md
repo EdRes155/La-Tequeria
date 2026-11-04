@@ -161,16 +161,28 @@ Implementado (paso 2) en `supabase-schema.sql`:
 1. Fuera del horario de servicio, con el personal avisado.
 2. Comprobar que no haya mesas abiertas, comandas en cocina ni cuentas por cobrar. Lo ideal es hacer
    el corte del día antes.
-3. Tomar la copia y la huella «antes», y anotar la hora del cambio (T).
+3. Tomar la copia y la huella «antes» (versión `origen`), y anotar la hora del cambio (T).
 4. Aplicar la migración (una transacción con validación).
-5. El dueño acepta su invitación (la cuenta pasa a `activa`) y genera los códigos para vincular la
+5. **Antes de cualquier otra operación**, tomar la huella «después» (versión `destino`, la misma sal) y
+   compararla: `node scripts/huella.mjs comparar antes.json despues.json --permitir abierto.sesiones_vigentes`.
+   Debe salir igual. Si no, se aplica la recuperación (§6) antes de abrir. Va aquí porque todo lo que
+   sigue cambia datos a propósito.
+6. El dueño acepta su invitación (la cuenta pasa a `activa`) y genera los códigos para vincular la
    caja y la cocina. Va antes de publicar porque sin cuenta activa no hay códigos ni equipos.
-6. Publicar la app nueva y vincular los equipos.
-7. Cada persona del personal entra con su PIN anterior desde un dispositivo vinculado y elige uno
+7. Publicar la app nueva y vincular los equipos.
+8. Cada persona del personal entra con su PIN anterior desde un dispositivo vinculado y elige uno
    nuevo de 6 a 8 dígitos.
-8. Prueba de humo:
+9. Prueba de humo:
    - una comanda, un cobro y el monitor;
-   - la huella «después» coincide;
+   - tomar otra huella y compararla con la del paso 5. Solo pueden aparecer estas diferencias, cada
+     una explicada por los pasos 6 a 9:
+     - como «sobran»: la comanda y el cobro de la prueba y sus entradas de bitácora;
+     - como «distintas»: los usuarios que eligieron PIN nuevo, la cocina activa si entró la cocina
+       y la mesa de la comanda si fue para comer aquí;
+     - en el resumen: los conteos y totales de esa comanda y ese cobro, la comanda en cocina y las
+       sesiones del personal que entró.
+     Cualquier otra diferencia se investiga antes de seguir (`tests/sql/migracion.test.js` comprueba
+     esta lista con una prueba de humo);
    - se revisan los avisos de seguridad de Supabase.
 
 ## 6. Recuperación
