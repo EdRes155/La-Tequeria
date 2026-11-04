@@ -232,6 +232,15 @@ interbloqueo (lo cubre una prueba).
 - `ultima_interaccion` solo la actualizan las funciones marcadas como interacción (§3.2), dentro de
   la misma transacción que la acción. Lecturas, latidos, `marcar_recibido`, el polling y el tiempo
   real no la tocan.
+- **PIN pendiente de renovación** (heredado, o puesto por un administrador): la sesión solo sirve para
+  `cambiar_pin`, `desbloquear` y `logout`; todo lo demás, incluidas las lecturas, responde
+  `CAMBIAR_PIN`. Ese PIN tampoco autoriza operaciones administrativas: la reautenticación responde
+  `pin_vencido`.
+- **Versión de la credencial:** `usuarios.version_pin` sube con cada cambio o restablecimiento del PIN;
+  cada sesión guarda la versión con la que se abrió y `_contexto` la compara en cada operación. Una
+  sesión abierta con el PIN anterior deja de servir aunque se haya creado mientras el PIN cambiaba.
+  Además, `login`, `cambiar_pin`, `restablecer_pin` y `desbloquear` toman la fila de la persona, así que
+  un inicio con el PIN anterior espera al cambio en curso y luego ve el PIN nuevo.
 - `desbloquear(p_token, p_pin)`:
   - verifica el PIN vigente del mismo operador y actualiza `ultima_interaccion`;
   - no cambia `vence_absoluta`;
@@ -274,7 +283,10 @@ Reglas de aplicación (del plan):
 - **Al entrar o desbloquear bien** (ya vencido el bloqueo) se reinician los fallos y la escalada de
   ese operador.
 - **Implementado (paso 3):** `intentos_operador`, `intentos_dispositivo` y, para la reautenticación y la
-  IP, `intentos` con su nivel de escalada. Un acierto de reautenticación (ya vencido el bloqueo) reinicia
+  IP, `intentos` con su nivel de escalada. Comprobar el bloqueo, verificar el PIN y registrar el fallo
+  o reiniciar el contador ocurren con las filas tomadas y siempre en el mismo orden (equipo, persona,
+  contador): un acierto que llega mientras se registra el quinto fallo espera y ve el bloqueo. Reiniciar
+  pone el contador en cero en lugar de borrarlo. Un acierto de reautenticación (ya vencido el bloqueo) reinicia
   también su escalada. La IP conserva su umbral alto de 30 fallos como barrera adicional. Las respuestas
   de bloqueo dicen el motivo (`operador`, `equipo` o `red`) y la espera en segundos.
 - **Restablecer el acceso:** un administrador de la misma sucursal puede hacerlo con

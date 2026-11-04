@@ -428,6 +428,12 @@ update public.sesiones set revocada = true, motivo_fin = 'sin_equipo' where disp
 alter table public.usuarios add column if not exists politica_pin smallint not null default 0;
 alter table public.usuarios add column if not exists pin_cambiado_en timestamptz;
 
+-- Versión de la credencial (PIN) de cada persona: sube con cada cambio o restablecimiento del PIN. Cada
+-- sesión guarda la versión con la que se abrió y _contexto la compara en cada operación: una sesión
+-- abierta con un PIN anterior deja de servir, aunque se haya creado mientras el PIN cambiaba.
+alter table public.usuarios add column if not exists version_pin int not null default 0;
+alter table public.sesiones add column if not exists version_pin int;
+
 -- Referencias compuestas: impiden que una fila apunte a otra sucursal. Diferidas: se comprueban al
 -- confirmar, así que no importa el orden de las sentencias dentro de una función. La de tickets → cobros
 -- se agrega en la contracción del estado de cobro (al final del archivo).
@@ -702,7 +708,7 @@ end $$;
 
 create or replace function public._limpiar_intentos(p_clave text)
 returns void language sql set search_path = public as $$
-  delete from public.intentos where clave = p_clave;
+  update public.intentos set fallos = 0, nivel = 0, bloqueado_hasta = null, ultimo = public._ahora() where clave = p_clave;
 $$;
 
 -- Minutos de bloqueo según el nivel de la escalada (MODELO.md §6): 15, 30 y después 60
@@ -740,10 +746,38 @@ begin
   return 4 - r.fallos;
 end $$;
 
+-- Reiniciar (no borrar) el contador: la fila sigue existiendo, así que quien espera su candado la vuelve
+-- a leer en lugar de encontrarla desaparecida
 create or replace function public._limpiar_operador(p_sucursal uuid, p_usuario text)
 returns void language sql set search_path = public as $$
-  delete from public.intentos_operador where sucursal_id = p_sucursal and usuario_id = p_usuario;
+  update public.intentos_operador set fallos = 0, nivel = 0, bloqueado_hasta = null, ultimo = public._ahora()
+   where sucursal_id = p_sucursal and usuario_id = p_usuario;
 $$;
+
+-- Protección de concurrencia de los accesos por PIN. Comprobar el bloqueo, verificar el PIN y
+-- registrar el fallo o reiniciar el contador ocurren con estas filas tomadas, siempre en este orden
+-- (así no se forman interbloqueos): 1. el equipo, 2. la persona, 3. su contador. Un acierto que llega
+-- mientras se registra el quinto fallo espera a que termine y ve el bloqueo.
+create or replace function public._bloquear_equipo(p_sucursal uuid, p_dispositivo uuid)
+returns void language plpgsql set search_path = public as $$
+begin
+  perform 1 from public.dispositivos where sucursal_id = p_sucursal and id = p_dispositivo for update;
+end $$;
+
+create or replace function public._bloquear_operador(p_sucursal uuid, p_usuario text)
+returns void language plpgsql set search_path = public as $$
+begin
+  insert into public.intentos_operador (sucursal_id, usuario_id, fallos, nivel, ultimo)
+  values (p_sucursal, p_usuario, 0, 0, public._ahora()) on conflict (sucursal_id, usuario_id) do nothing;
+  perform 1 from public.intentos_operador where sucursal_id = p_sucursal and usuario_id = p_usuario for update;
+end $$;
+
+create or replace function public._bloquear_contador(p_clave text)
+returns void language plpgsql set search_path = public as $$
+begin
+  insert into public.intentos (clave, fallos, nivel, ultimo) values (p_clave, 0, 0, public._ahora()) on conflict (clave) do nothing;
+  perform 1 from public.intentos where clave = p_clave for update;
+end $$;
 
 -- Equipo: 30 fallos de PIN de cualquier operador en una ventana móvil de 15 minutos bloquean los
 -- accesos por PIN en ese equipo durante 15 minutos. Los intentos rechazados por el bloqueo no se
@@ -816,10 +850,17 @@ end $$;
 
 -- Marca la interacción explícita de una sesión (ver sesiones_actividad)
 create or replace function public._marcar_interaccion(p_sesion uuid)
-returns void language sql set search_path = public as $$
-  insert into public.sesiones_actividad (sesion_id, ultima_interaccion) values (p_sesion, public._ahora())
-  on conflict (sesion_id) do update set ultima_interaccion = excluded.ultima_interaccion;
-$$;
+returns void language plpgsql set search_path = public as $$
+begin
+  -- nunca espera: si otra petición de la misma sesión la está marcando en este momento, esa deja la hora
+  if exists (select 1 from public.sesiones_actividad where sesion_id = p_sesion) then
+    update public.sesiones_actividad set ultima_interaccion = public._ahora()
+     where sesion_id = (select a.sesion_id from public.sesiones_actividad a where a.sesion_id = p_sesion for update skip locked);
+  else
+    insert into public.sesiones_actividad (sesion_id, ultima_interaccion) values (p_sesion, public._ahora())
+    on conflict (sesion_id) do nothing;
+  end if;
+end $$;
 
 -- Validador de la operación de sucursal (MODELO.md §3 y §5): el equipo (_dispositivo) y una sesión de
 -- operador de ESA sucursal y ESE equipo, dentro de su máximo absoluto de 12 h. Con p_roles, además exige
@@ -832,6 +873,9 @@ $$;
 --   sesion       cambiar el PIN propio: no lo renueva y exige sesión activa;
 --   desbloqueo, salida  desbloquear y cerrar sesión: se permiten con la sesión bloqueada.
 -- Tras 15 minutos sin interacción la sesión queda bloqueada: lo demás responde BLOQUEO_INACTIVIDAD.
+-- Con el PIN pendiente de renovación (heredado o puesto por un administrador) la sesión solo sirve para
+-- cambiarlo, desbloquear o salir: todo lo demás, incluidas las lecturas, responde CAMBIAR_PIN.
+-- La sesión deja de servir si la credencial cambió después de abrirla (version_pin).
 create or replace function public._contexto(p_token text, p_roles text[], p_tipo text,
   out sucursal_id uuid, out cuenta_id uuid, out dispositivo_id uuid, out monitor_cocina boolean,
   out sid uuid, out uid text, out nombre text, out rol text, out cambiar_pin boolean, out solo_cocina boolean)
@@ -847,13 +891,14 @@ begin
     perform public._error('SESION', 'Tu sesión no es válida. Vuelve a entrar.');
   end if;
   select se.id, coalesce(a.ultima_interaccion, se.creada) as ultima_interaccion, u.id as uid, u.nombre, u.rol,
-         u.debe_cambiar_pin into r
+         coalesce(u.debe_cambiar_pin, false) or coalesce(u.politica_pin, 0) < 1 as pendiente into r
     from public.sesiones se
     join public.usuarios u on u.sucursal_id = se.sucursal_id and u.id = se.usuario_id
     left join public.sesiones_actividad a on a.sesion_id = se.id
    where se.token_hash = encode(digest(p_token, 'sha256'), 'hex')
      and se.sucursal_id = d.sucursal_id and se.dispositivo_id = d.dispositivo_id
-     and not se.revocada and se.vence_absoluta > public._ahora();
+     and not se.revocada and se.vence_absoluta > public._ahora()
+     and se.version_pin = u.version_pin;
   if not found then
     perform public._error('SESION', 'Tu sesión terminó. Vuelve a entrar.');
   end if;
@@ -867,20 +912,18 @@ begin
       perform public._error('BLOQUEO_INACTIVIDAD', 'Por inactividad, escribe tu PIN para continuar.');
     end if;
   end if;
-  if p_roles is not null then
-    if not (r.rol = any (p_roles)) then
-      perform public._error('PERMISO', 'Tu usuario no tiene permiso para esta acción.');
-    end if;
-    if coalesce(r.debe_cambiar_pin, false) then
-      perform public._error('CAMBIAR_PIN', 'Primero cambia tu PIN.');
-    end if;
+  if r.pendiente and p_tipo not in ('sesion', 'desbloqueo', 'salida') then
+    perform public._error('CAMBIAR_PIN', 'Primero cambia tu PIN.');
+  end if;
+  if p_roles is not null and not (r.rol = any (p_roles)) then
+    perform public._error('PERMISO', 'Tu usuario no tiene permiso para esta acción.');
   end if;
   if p_tipo = 'interaccion' then
     perform public._marcar_interaccion(r.id);
   end if;
   sucursal_id := d.sucursal_id; cuenta_id := d.cuenta_id; dispositivo_id := d.dispositivo_id;
   monitor_cocina := d.monitor_cocina; sid := r.id; uid := r.uid; nombre := r.nombre; rol := r.rol;
-  cambiar_pin := coalesce(r.debe_cambiar_pin, false);
+  cambiar_pin := r.pendiente;
 end $$;
 
 -- Reautenticación: comprueba el PIN de un administrador DE LA SUCURSAL. Sus fallos cuentan para la
@@ -888,24 +931,30 @@ end $$;
 -- Si p_uid se indica, solo vale el PIN de ese administrador.
 create or replace function public._verificar_admin(p_sucursal uuid, p_dispositivo uuid, p_pin text, p_sid uuid, p_uid text default null)
 returns json language plpgsql set search_path = public as $$
-declare v_ip text := public._ip(); v_espera int; v_admin record; v_rest int;
+declare v_ip text := public._ip(); v_espera int; v_admin record; v_rest int; v_clave text := 's:' || p_sid;
 begin
-  v_espera := greatest(public._espera('s:' || p_sid), public._espera_equipo(p_dispositivo),
-                       coalesce(public._espera('ip:' || v_ip), 0));
+  perform public._bloquear_equipo(p_sucursal, p_dispositivo);
+  perform public._bloquear_contador(v_clave);
+  v_espera := greatest(public._espera(v_clave), public._espera_equipo(p_dispositivo), coalesce(public._espera('ip:' || v_ip), 0));
   if v_espera > 0 then
     return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v_espera);
   end if;
-  select u.id, u.nombre into v_admin from public.usuarios u
+  select u.id, u.nombre, (coalesce(u.politica_pin, 0) >= 1 and not coalesce(u.debe_cambiar_pin, false)) as vigente
+    into v_admin from public.usuarios u
    where u.sucursal_id = p_sucursal and u.rol = 'admin' and (p_uid is null or u.id = p_uid)
      and public._pin_ok(u.pin_hash, p_pin, u.id)
-   limit 1;
+   order by 3 desc limit 1;
   if v_admin.id is null then
-    v_rest := public._fallo_escalado('s:' || p_sid);
+    v_rest := public._fallo_escalado(v_clave);
     perform public._fallo_equipo(p_sucursal, p_dispositivo);
     if v_ip is not null then perform public._fallo('ip:' || v_ip, 30); end if;
     return json_build_object('ok', false, 'error', 'pin', 'restantes', v_rest);
   end if;
-  perform public._limpiar_intentos('s:' || p_sid);
+  -- un PIN pendiente de renovación sirve para cambiarlo, nunca para autorizar
+  if not v_admin.vigente then
+    return json_build_object('ok', false, 'error', 'pin_vencido');
+  end if;
+  perform public._limpiar_intentos(v_clave);
   return json_build_object('ok', true, 'id', v_admin.id, 'nombre', v_admin.nombre);
 end $$;
 
@@ -1136,14 +1185,17 @@ declare
   v_token text; v_sid uuid; v_rest int; v_cambiar boolean;
 begin
   select * into d from public._dispositivo();
+  perform public._bloquear_equipo(d.sucursal_id, d.dispositivo_id);
   v_espera := public._espera_equipo(d.dispositivo_id);
   if v_espera > 0 then return json_build_object('ok', false, 'error', 'bloqueado', 'motivo', 'equipo', 'espera', v_espera); end if;
   v_espera := coalesce(public._espera('ip:' || v_ip), 0);
   if v_espera > 0 then return json_build_object('ok', false, 'error', 'bloqueado', 'motivo', 'red', 'espera', v_espera); end if;
 
-  -- un usuario de otra sucursal es, para este equipo, uno que no existe
-  select * into u from public.usuarios where sucursal_id = d.sucursal_id and id = p_id;
+  -- un usuario de otra sucursal es, para este equipo, uno que no existe. La fila de la persona queda
+  -- tomada: un cambio de PIN en curso termina antes, y aquí se ve el PIN nuevo.
+  select * into u from public.usuarios where sucursal_id = d.sucursal_id and id = p_id for no key update;
   if u.id is not null then
+    perform public._bloquear_operador(d.sucursal_id, u.id);
     v_espera := public._espera_operador(d.sucursal_id, u.id);
     if v_espera > 0 then return json_build_object('ok', false, 'error', 'bloqueado', 'motivo', 'operador', 'espera', v_espera); end if;
   end if;
@@ -1179,9 +1231,9 @@ begin
 
   -- máximo absoluto de 12 h: nada lo renueva
   v_token := encode(gen_random_bytes(32), 'hex');
-  insert into public.sesiones (token_hash, sucursal_id, dispositivo_id, usuario_id, dispositivo, creada, vence_absoluta)
+  insert into public.sesiones (token_hash, sucursal_id, dispositivo_id, usuario_id, dispositivo, creada, vence_absoluta, version_pin)
   values (encode(digest(v_token, 'sha256'), 'hex'), d.sucursal_id, d.dispositivo_id, u.id, left(p_dispositivo, 64),
-          public._ahora(), public._ahora() + interval '12 hours')
+          public._ahora(), public._ahora() + interval '12 hours', u.version_pin)
   returning id into v_sid;
   perform public._marcar_interaccion(v_sid);
 
@@ -1215,12 +1267,14 @@ end $$;
 -- Cambiar el PIN propio: el PIN actual cuenta como un intento del operador y del equipo
 create or replace function public.cambiar_pin(p_token text, p_pin_actual text, p_pin_nuevo text)
 returns json language plpgsql security definer set search_path = public as $$
-declare s record; u public.usuarios; v_espera int; v_rest int;
+declare s record; u public.usuarios; v_espera int; v_rest int; v_version int;
 begin
   select * into s from public._contexto(p_token, null, 'sesion');
-  v_espera := greatest(public._espera_operador(s.sucursal_id, s.uid), public._espera_equipo(s.dispositivo_id));
+  perform public._bloquear_equipo(s.sucursal_id, s.dispositivo_id);
+  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = s.uid for no key update;
+  perform public._bloquear_operador(s.sucursal_id, u.id);
+  v_espera := greatest(public._espera_operador(s.sucursal_id, u.id), public._espera_equipo(s.dispositivo_id));
   if v_espera > 0 then return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v_espera); end if;
-  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = s.uid;
   if not public._pin_ok(u.pin_hash, p_pin_actual, u.id) then
     v_rest := public._fallo_operador(s.sucursal_id, u.id);
     perform public._fallo_equipo(s.sucursal_id, s.dispositivo_id);
@@ -1233,9 +1287,13 @@ begin
     return json_build_object('ok', false, 'error', 'debil');
   end if;
   perform public._limpiar_operador(s.sucursal_id, u.id);
+  -- nueva versión de la credencial: las demás sesiones dejan de servir, incluida cualquiera que se esté
+  -- abriendo ahora con el PIN anterior; esta sesión sigue con la versión nueva
   update public.usuarios set pin_hash = public._hash_pin(p_pin_nuevo), debe_cambiar_pin = false, politica_pin = 1,
-         pin_cambiado_en = public._ahora()
-   where sucursal_id = s.sucursal_id and id = u.id;
+         pin_cambiado_en = public._ahora(), version_pin = version_pin + 1
+   where sucursal_id = s.sucursal_id and id = u.id
+  returning version_pin into v_version;
+  update public.sesiones set version_pin = v_version where sucursal_id = s.sucursal_id and id = s.sid;
   update public.sesiones set revocada = true, motivo_fin = 'cambio_pin'
    where sucursal_id = s.sucursal_id and usuario_id = u.id and id <> s.sid and not revocada;
   perform public._log(s.sucursal_id, s.uid, s.nombre, 'cambiar_pin');
@@ -1249,9 +1307,11 @@ returns json language plpgsql security definer set search_path = public as $$
 declare s record; u public.usuarios; v_espera int; v_rest int; v_ip text := public._ip();
 begin
   select * into s from public._contexto(p_token, null, 'desbloqueo');
-  v_espera := greatest(public._espera_operador(s.sucursal_id, s.uid), public._espera_equipo(s.dispositivo_id));
+  perform public._bloquear_equipo(s.sucursal_id, s.dispositivo_id);
+  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = s.uid for no key update;
+  perform public._bloquear_operador(s.sucursal_id, u.id);
+  v_espera := greatest(public._espera_operador(s.sucursal_id, u.id), public._espera_equipo(s.dispositivo_id));
   if v_espera > 0 then return json_build_object('ok', false, 'error', 'bloqueado', 'espera', v_espera); end if;
-  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = s.uid;
   if not public._pin_ok(u.pin_hash, p_pin, u.id) then
     v_rest := public._fallo_operador(s.sucursal_id, u.id);
     perform public._fallo_equipo(s.sucursal_id, s.dispositivo_id);
@@ -2113,19 +2173,24 @@ end $$;
 
 create or replace function public.restablecer_pin(p_token text, p_admin_pin text, p_id text, p_pin_nuevo text)
 returns json language plpgsql security definer set search_path = public as $$
-declare s record; v_auth json; u public.usuarios;
+declare s record; v_auth json; u public.usuarios; v_version int;
 begin
   select * into s from public._contexto(p_token, array['admin'], 'interaccion');
   v_auth := public._verificar_admin(s.sucursal_id, s.dispositivo_id, p_admin_pin, s.sid, s.uid);
   if not (v_auth->>'ok')::boolean then return v_auth; end if;
-  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = p_id;
+  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = p_id for no key update;
   if u.id is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
   if not public._pin_formato_ok(p_pin_nuevo) then return json_build_object('ok', false, 'error', 'formato'); end if;
   if public._pin_debil(p_pin_nuevo) then return json_build_object('ok', false, 'error', 'debil'); end if;
-  -- El usuario deberá elegir su propio PIN al entrar
+  -- El usuario deberá elegir su propio PIN al entrar. Nueva versión de la credencial: sus sesiones dejan
+  -- de servir, incluida cualquiera que se esté abriendo ahora con el PIN anterior.
   update public.usuarios set pin_hash = public._hash_pin(p_pin_nuevo), debe_cambiar_pin = (u.id <> s.uid),
-         politica_pin = 1, pin_cambiado_en = public._ahora()
-   where sucursal_id = s.sucursal_id and id = u.id;
+         politica_pin = 1, pin_cambiado_en = public._ahora(), version_pin = version_pin + 1
+   where sucursal_id = s.sucursal_id and id = u.id
+  returning version_pin into v_version;
+  if u.id = s.uid then
+    update public.sesiones set version_pin = v_version where sucursal_id = s.sucursal_id and id = s.sid;
+  end if;
   update public.sesiones set revocada = true, motivo_fin = 'pin_restablecido'
    where sucursal_id = s.sucursal_id and usuario_id = u.id and id <> s.sid and not revocada;
   perform public._limpiar_operador(s.sucursal_id, u.id);
@@ -2142,8 +2207,9 @@ begin
   select * into s from public._contexto(p_token, array['admin'], 'interaccion');
   v_auth := public._verificar_admin(s.sucursal_id, s.dispositivo_id, p_admin_pin, s.sid, s.uid);
   if not (v_auth->>'ok')::boolean then return v_auth; end if;
-  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = p_id;
+  select * into u from public.usuarios where sucursal_id = s.sucursal_id and id = p_id for no key update;
   if u.id is null then return json_build_object('ok', false, 'error', 'no_existe'); end if;
+  perform public._bloquear_operador(s.sucursal_id, u.id);
   v_espera := public._espera_operador(s.sucursal_id, u.id);
   perform public._limpiar_operador(s.sucursal_id, u.id);
   perform public._log(s.sucursal_id, s.uid, s.nombre, 'restablecer_acceso',
@@ -2299,7 +2365,7 @@ begin
              'mover_tickets','archivar_tickets','marcar_hecho','_cuenta_con_propietario',
              '_usa_cobro_id_heredado','_siguiente_folio','_minutos_bloqueo','_espera_operador','_fallo_operador',
              '_limpiar_operador','_espera_equipo','_fallo_equipo','_fallo_escalado','desbloquear','restablecer_acceso',
-             '_marcar_interaccion')
+             '_marcar_interaccion','_bloquear_equipo','_bloquear_operador','_bloquear_contador')
   loop
     execute format('revoke all on function %s from public, anon, authenticated', f.sig);
   end loop;
