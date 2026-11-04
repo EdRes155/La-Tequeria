@@ -17,12 +17,12 @@ describe("inventario: dependencias indirectas", () => {
   const r = analizar([
     fn("_ahora_local", "select now() at time zone (select zona from public.config where id = 1)"),
     fn("_fecha", "select to_char(_ahora_local(), 'YYYY-MM-DD')"),
-    fn("_sesion", "update public.sesiones set ultimo_uso = now(); select * from public.usuarios"),
-    fn("_exigir", "perform public._sesion(p_token); perform _error('x', 'y')"),
+    fn("_dispositivo", "update public.sesiones set creada = now(); select * from public.usuarios"),
+    fn("_contexto", "perform public._dispositivo(); perform _error('x', 'y')"),
     fn("_error", "raise exception 'x'"),
     fn("_ciclo_a", "perform _ciclo_b()"),
     fn("_ciclo_b", "perform _ciclo_a(); select 1 from public.bebidas"),
-    fn("vender", "perform _exigir(p_token, array['mesero']); perform _fecha(); insert into public.bebidas values (1)",
+    fn("vender", "perform _contexto(p_token, array['mesero'], 'interaccion'); perform _fecha(); insert into public.bebidas values (1)",
       { api: true, args: "p_token text" }),
     fn("_no_es_llamada", "select 1 -- _fecha() solo en un comentario\n; select 'x_fecha(1)'"),
   ]);
@@ -35,17 +35,17 @@ describe("inventario: dependencias indirectas", () => {
   });
 
   it("la validación de sesión cuenta como lectura y escritura indirecta", () => {
-    expect(r._exigir.leeIndirecto).toEqual(["usuarios"]);
-    expect(r._exigir.escribeIndirecto).toEqual(["sesiones"]);
-    expect(r._exigir.contexto).toMatch(/sesión/);
+    expect(r._contexto.leeIndirecto).toEqual(["usuarios"]);
+    expect(r._contexto.escribeIndirecto).toEqual(["sesiones"]);
+    expect(r._contexto.contexto).toMatch(/sesión/);
   });
 
   it("la API suma lo directo y lo de toda la cadena, sin repetir", () => {
     expect(r.vender.escribe).toEqual(["bebidas"]);
     expect(r.vender.leeIndirecto).toEqual(["config", "usuarios"]);
     expect(r.vender.escribeIndirecto).toEqual(["sesiones"]);
-    expect(r.vender.llama).toEqual(["_exigir", "_fecha"]);
-    expect(r.vender.acceso).toBe("Sesión: mesero");
+    expect(r.vender.llama).toEqual(["_contexto", "_fecha"]);
+    expect(r.vender.acceso).toBe("Sesión: mesero · interaccion");
   });
 
   it("solo es «Ninguno» si no toca datos ni directa ni indirectamente", () => {

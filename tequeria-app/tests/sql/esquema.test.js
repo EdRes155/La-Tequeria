@@ -43,11 +43,11 @@ d("instalación nueva", () => {
   });
 
   it("el primer administrador solo se crea desde el SQL Editor y una sola vez", async () => {
-    const e = await falla(api.rpc("crear_admin_inicial", { p_nombre: "X", p_pin: "8642" }));
+    const e = await falla(api.rpc("crear_admin_inicial", { p_nombre: "X", p_pin: "864213" }));
     expect(e.message).toMatch(/permission denied/);
     const sql = await conectar(base, false);
     expect((await falla(sql.query("select public.crear_admin_inicial('Ana', '1234')"))).message).toMatch(/trivial/);
-    await sql.query("select public.crear_admin_inicial('Ana', '8642')");
+    await sql.query("select public.crear_admin_inicial('Ana', '864213')");
     expect((await falla(sql.query("select public.crear_admin_inicial('Otra', '9753')"))).message).toMatch(/Ya existe/);
     const r = await api.rpc("usuarios_login");
     expect(r.hayAdmin).toBe(true);
@@ -73,7 +73,7 @@ d("actualización desde v2", () => {
     expect((await falla(api.query("delete from public.tickets"))).message).toMatch(/permission denied/);
     expect((await falla(api.rpc("es_admin_pin", { p_pin: "1234" }))).message).toMatch(/does not exist/);
     expect((await falla(api.rpc("cambiar_estado_ticket", { p_token: "x", p_id: "x", p_estado: "listo" }))).message).toMatch(/does not exist/);
-    expect((await falla(api.rpc("_contexto", { p_token: "x" }))).message).toMatch(/permission denied/);
+    expect((await falla(api.query("select public._contexto('x', null, 'lectura')"))).message).toMatch(/permission denied/);
     expect((await falla(api.rpc("estado", { p_token: "0".repeat(64) }))).message).toBe("SESION");
     const anon = await conectar(base, false);
     await anon.query("set role anon");
@@ -99,8 +99,9 @@ d("actualización desde v2", () => {
     expect(r.debeCambiarPin).toBe(true);
     const e = await falla(api.rpc("fijar_precio", { p_token: r.token, p_clave: "taco-pastor", p_precio: 21 }));
     expect(e.message).toBe("CAMBIAR_PIN");
-    expect((await api.rpc("cambiar_pin", { p_token: r.token, p_pin_actual: "1234", p_pin_nuevo: "4444" })).error).toBe("debil");
-    expect((await api.rpc("cambiar_pin", { p_token: r.token, p_pin_actual: "1234", p_pin_nuevo: "7391" })).ok).toBe(true);
+    expect((await api.rpc("cambiar_pin", { p_token: r.token, p_pin_actual: "1234", p_pin_nuevo: "444444" })).error).toBe("debil");
+    expect((await api.rpc("cambiar_pin", { p_token: r.token, p_pin_actual: "1234", p_pin_nuevo: "7391" })).error).toBe("formato");
+    expect((await api.rpc("cambiar_pin", { p_token: r.token, p_pin_actual: "1234", p_pin_nuevo: "739154" })).ok).toBe(true);
     await api.rpc("fijar_precio", { p_token: r.token, p_clave: "taco-pastor", p_precio: 21.5 });
     const est = await api.rpc("estado", { p_token: r.token });
     expect(est.precios["taco-pastor"]).toBe(21.5);
@@ -121,15 +122,21 @@ d("actualización desde v2", () => {
     for (let i = 0; i < 5; i++) expect((await otra.rpc("login", { p_id: "u2", p_pin: "0000" })).error).toBe("pin");
     const r = await otra.rpc("login", { p_id: "u2", p_pin: "1111" });
     expect(r.error).toBe("bloqueado");
-    expect(r.espera).toBeGreaterThan(200);
-    await sql.query("update intentos set bloqueado_hasta = now() - interval '1 second' where clave like 'u:%:u2'");
+    expect(r).toMatchObject({ motivo: "operador", espera: 900 });
+    await sql.query("update intentos_operador set bloqueado_hasta = now() - interval '1 second' where usuario_id = 'u2'");
     expect((await otra.rpc("login", { p_id: "u2", p_pin: "1111" })).ok).toBe(true);
   });
 
-  it("limita los fallos por IP aunque se cambie de usuario", async () => {
-    const ip = await conectar(base, true, "192.0.2.99");
-    for (let i = 0; i < 30; i++) await ip.rpc("login", { p_id: "nadie-" + i, p_pin: "0000" });
-    expect((await ip.rpc("login", { p_id: "u3", p_pin: "8642" })).error).toBe("bloqueado");
+  it("limita también los fallos por IP, repartidos entre equipos y usuarios", async () => {
+    // dos equipos con 15 fallos cada uno: ninguno llega a su límite de 30, pero la IP sí
+    for (const eq of ["ip-1", "ip-2"]) {
+      const c = await conectar(base, true, "192.0.2.99", eq);
+      for (let i = 0; i < 15; i++) await c.rpc("login", { p_id: "nadie-" + i, p_pin: "0000" });
+    }
+    const tercero = await conectar(base, true, "192.0.2.99", "ip-3");
+    expect(await tercero.rpc("login", { p_id: "u2", p_pin: "1111" })).toMatchObject({ error: "bloqueado", motivo: "red" });
+    const otraRed = await conectar(base, true, "198.51.100.200", "ip-4");
+    expect((await otraRed.rpc("login", { p_id: "u2", p_pin: "1111" })).ok).toBe(true);
   });
 });
 
@@ -138,14 +145,14 @@ d("operación", () => {
   beforeAll(async () => {
     base = await crearBase("tq_op", [STUB, ESQUEMA]);
     sql = await conectar(base, false);
-    await sql.query("select public.crear_admin_inicial('Admin', '8642')");
+    await sql.query("select public.crear_admin_inicial('Admin', '864213')");
     api = await conectar(base);
     const { rows } = await sql.query("select id from usuarios");
-    admin = await entrar(api, rows[0].id, "8642");
-    const m = await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "8642", p_nombre: "Mesero", p_pin: "5173", p_rol: "mesero" });
-    const k = await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "8642", p_nombre: "Cocina", p_pin: "6284", p_rol: "cocinero" });
-    mesero = await entrar(api, m.usuario.id, "5173");
-    cocina = await entrar(api, k.usuario.id, "6284", "tablet-1");
+    admin = await entrar(api, rows[0].id, "864213");
+    const m = await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "864213", p_nombre: "Mesero", p_pin: "517384", p_rol: "mesero" });
+    const k = await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "864213", p_nombre: "Cocina", p_pin: "628417", p_rol: "cocinero" });
+    mesero = await entrar(api, m.usuario.id, "517384");
+    cocina = await entrar(api, k.usuario.id, "628417", "tablet-1");
     await sql.query("update bebidas set cantidad = 3 where id = 'coca'");
   });
 
@@ -309,7 +316,7 @@ d("operación", () => {
 
     // sin cobrar no se libera; el cierre sin cobro pide motivo y PIN de administrador
     expect((await falla(api.rpc("liberar_mesa", { p_token: mesero, p_mesa_id: 7 }))).message).toBe("POR_COBRAR");
-    const nc = { p_token: mesero, p_admin_pin: "8642", p_tickets: [t1.id], p_motivo: "El cliente se fue", p_liberar_mesa: true };
+    const nc = { p_token: mesero, p_admin_pin: "864213", p_tickets: [t1.id], p_motivo: "El cliente se fue", p_liberar_mesa: true };
     expect((await falla(api.rpc("no_cobrar", { ...nc, p_motivo: " " }))).message).toBe("DATOS");
     expect((await api.rpc("no_cobrar", { ...nc, p_admin_pin: "0000" })).error).toBe("pin");
     expect(await api.rpc("no_cobrar", nc)).toMatchObject({ ok: true, mesaLiberada: true, total: 40 });
@@ -356,9 +363,9 @@ d("operación", () => {
     // A hace el corte dentro de una transacción; B envía una comanda mientras tanto
     const a = await conectar(base), b = await conectar(base);
     await a.query("begin");
-    const corte = await a.rpc("hacer_corte", { p_token: cocina, p_admin_pin: "8642" });
+    const corte = await a.rpc("hacer_corte", { p_token: cocina, p_admin_pin: "864213" });
     await b.rpc("enviar_comanda", { p_token: mesero, p_ticket: ticket("durante-corte-1") });
-    const segundo = b.rpc("hacer_corte", { p_token: admin, p_admin_pin: "8642" }); // espera al primero
+    const segundo = b.rpc("hacer_corte", { p_token: admin, p_admin_pin: "864213" }); // espera al primero
     await a.query("commit");
     const corte2 = await segundo;
 
@@ -387,11 +394,11 @@ d("operación", () => {
   it("solo una cocina activa; la otra entra cuando la primera deja de latir", async () => {
     const { rows } = await sql.query("select id from usuarios where rol = 'cocinero'");
     const tablet2 = await conectar(base, true, undefined, "tablet-2");
-    const otra = await tablet2.rpc("login", { p_id: rows[0].id, p_pin: "6284" });
+    const otra = await tablet2.rpc("login", { p_id: rows[0].id, p_pin: "628417" });
     expect(otra.error).toBe("cocina_ocupada");
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);
     await sql.query("update cocina_sesion set actualizado = now() - interval '1 minute'");
-    const t2 = await entrar(tablet2, rows[0].id, "6284");
+    const t2 = await entrar(tablet2, rows[0].id, "628417");
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(false);
     expect(await tablet2.rpc("latido_cocina", { p_token: t2 })).toBe(true);
     // el token de un equipo no sirve desde otro
@@ -403,7 +410,7 @@ d("operación", () => {
     await api.rpc("fijar_ajuste", { p_token: admin, p_clave: "variasCocinas", p_valor: "true" });
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);   // libera la exclusividad
     const tablet3 = await conectar(base, true, undefined, "tablet-3");
-    const pantalla2 = await entrar(tablet3, rows[0].id, "6284");
+    const pantalla2 = await entrar(tablet3, rows[0].id, "628417");
     const de = (tk) => (tk === pantalla2 ? tablet3 : api);   // cada token se usa desde su equipo
     expect(await tablet3.rpc("latido_cocina", { p_token: pantalla2 })).toBe(true);
     expect(await api.rpc("latido_cocina", { p_token: cocina })).toBe(true);
@@ -453,16 +460,16 @@ d("operación", () => {
 
   it("protege al último administrador y a uno mismo", async () => {
     const { rows } = await sql.query("select id from usuarios where rol = 'admin'");
-    expect((await api.rpc("eliminar_usuario", { p_token: admin, p_admin_pin: "8642", p_id: rows[0].id })).error).toBe("propio");
-    expect((await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "8642", p_nombre: "X", p_pin: "5173", p_rol: "jefe" })).error).toBe("rol");
-    expect((await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "9999", p_nombre: "X", p_pin: "5173", p_rol: "admin" })).error).toBe("pin");
-    const otro = await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "8642", p_nombre: "Admin 2", p_pin: "3917", p_rol: "admin" });
-    const t2 = await entrar(api, otro.usuario.id, "3917");
+    expect((await api.rpc("eliminar_usuario", { p_token: admin, p_admin_pin: "864213", p_id: rows[0].id })).error).toBe("propio");
+    expect((await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "864213", p_nombre: "X", p_pin: "517384", p_rol: "jefe" })).error).toBe("rol");
+    expect((await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "9999", p_nombre: "X", p_pin: "517384", p_rol: "admin" })).error).toBe("pin");
+    const otro = await api.rpc("crear_usuario", { p_token: admin, p_admin_pin: "864213", p_nombre: "Admin 2", p_pin: "391746", p_rol: "admin" });
+    const t2 = await entrar(api, otro.usuario.id, "391746");
     // Dos administradores intentan borrarse mutuamente a la vez: debe quedar uno
     const a = await conectar(base), b = await conectar(base);
     const [r1, r2] = await Promise.all([
-      a.rpc("eliminar_usuario", { p_token: admin, p_admin_pin: "8642", p_id: otro.usuario.id }),
-      b.rpc("eliminar_usuario", { p_token: t2, p_admin_pin: "3917", p_id: rows[0].id }).catch((e) => ({ error: e.message })),
+      a.rpc("eliminar_usuario", { p_token: admin, p_admin_pin: "864213", p_id: otro.usuario.id }),
+      b.rpc("eliminar_usuario", { p_token: t2, p_admin_pin: "391746", p_id: rows[0].id }).catch((e) => ({ error: e.message })),
     ]);
     const { rows: quedan } = await sql.query("select count(*)::int n from usuarios where rol = 'admin'");
     expect(quedan[0].n).toBe(1);
@@ -479,7 +486,7 @@ d("operación", () => {
 
   it("al cerrar sesión el token deja de servir", async () => {
     const { rows } = await sql.query("select id from usuarios where rol = 'mesero'");
-    const t = await entrar(api, rows[0].id, "5173");
+    const t = await entrar(api, rows[0].id, "517384");
     await api.rpc("logout", { p_token: t });
     expect((await falla(api.rpc("estado", { p_token: t }))).message).toBe("SESION");
   });

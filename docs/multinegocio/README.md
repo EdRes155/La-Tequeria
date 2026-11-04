@@ -10,6 +10,7 @@ sucursal.
 | Entorno de pruebas reproducible, separado de producción | PostgreSQL 16 desechable, local o en la CI (sección siguiente) | Listo |
 | Modelo de cuenta, sucursal, membresía, dispositivo y sesión, con el contexto de cada función | [MODELO.md](MODELO.md): un validador por tipo de llamada y estado de cuenta pendiente de activación | Diseño listo; paso 1 del núcleo implementado (abajo) |
 | Núcleo, paso 1: cuentas, sucursales y `sucursal_id` | Sección «MULTINEGOCIO» de `tequeria-app/supabase-schema.sql`; `tests/sql/migracion.test.js` | Implementado y ensayado sobre la instantánea de producción; no aplicado en producción |
+| Núcleo, paso 3: política de seguridad del personal | `_contexto` con tipo de llamada, contadores, `desbloquear` y `restablecer_acceso` en `supabase-schema.sql`; `tests/sql/reloj.test.js` | Implementado y probado con reloj controlado en el servidor; la parte de la interfaz va con el cliente (paso 6) |
 | Núcleo, paso 2: validadores y funciones por sucursal | `_dispositivo` y `_contexto` en `supabase-schema.sql`; matriz en `tests/sql/aislamiento.test.js` | Implementado: las 37 funciones de la API prueban sus casos de aislamiento con las dos cuentas; solo quedan pendientes los declarados para pasos posteriores. Desde aquí el esquema exige equipos vinculados y ya no sirve con la app publicada (ver MIGRACION.md) |
 | Fixtures de La Tequería y «Taquería Piloto B» | `tequeria-app/tests/fixtures/multinegocio.js`, validadas por `tests/fixtures.test.js` | Listas; se siembran cuando exista el modelo |
 | Matriz de aislamiento en la CI | `tequeria-app/tests/sql/aislamiento.test.js`: una receta por función y casos genéricos (token de otra sucursal, otro equipo, equipo revocado, id ajeno igual que inexistente, listas mezcladas, id repetido, PIN ajeno) más los propios; la guardia exige caso y receta para cada firma ejecutable desde fuera, y solo admite pendientes declarados para un paso posterior al actual (`PASO_ACTUAL` en `matriz-aislamiento.js`) | Activa: todos los casos del paso 2 probados; los pendientes son de funciones o casos declarados para los pasos 3, 4 y 5 |
@@ -56,6 +57,6 @@ llegar a esos pasos.
    - cómo obtener la copia de producción;
    - la ventana del cambio;
    - el correo del dueño para la invitación inicial.
-2. **Núcleo, paso 3** ([MODELO.md §9](MODELO.md#9-orden-sugerido-para-implementar-paso-3-del-plan)):
-   política de seguridad (PIN de 6 a 8 dígitos, contadores por operador y por equipo, sesión de 12 h e
-   inactividad con el monitor como excepción), con el reloj controlado.
+2. **Núcleo, paso 4** ([MODELO.md §9](MODELO.md#9-orden-sugerido-para-implementar-paso-3-del-plan)):
+   dispositivos y dueños: códigos de vinculación, `vincular_dispositivo`, revocación, cuentas,
+   invitaciones y membresías, con los validadores `_vinculacion`, `_identidad` y `_dueno`.

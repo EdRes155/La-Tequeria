@@ -53,7 +53,7 @@ d("adaptador remoto contra el esquema real", () => {
     await sql.connect();
     await sql.query(fs.readFileSync(path.join(raiz, "tests/sql/supabase-stub.sql"), "utf8"));
     await sql.query(fs.readFileSync(path.join(raiz, "supabase-schema.sql"), "utf8"));
-    await sql.query("select public.crear_admin_inicial('Ana', '8642')");
+    await sql.query("select public.crear_admin_inicial('Ana', '864213')");
     await activarCuentas(sql);
     const { authUid } = await vincularDePrueba(sql, { nombre: "caja" });
     await sql.end();
@@ -75,13 +75,13 @@ d("adaptador remoto contra el esquema real", () => {
     const p = await api.pantallaLogin();
     const ana = p.usuarios[0];
     expect((await api.entrar(ana.id, "1111")).error).toBe("pin");
-    const r = await api.entrar(ana.id, "8642");
+    const r = await api.entrar(ana.id, "864213");
     expect(r).toMatchObject({ ok: true, usuario: { nombre: "Ana", rol: "admin" }, debeCambiarPin: false });
     expect(api.sesionGuardada().usuario.nombre).toBe("Ana");
 
     const a = api.acciones;
-    await a.crearUsuario("8642", "Luis", "5173", "mesero");
-    const malPin = await a.crearUsuario("0000", "X", "5173", "mesero").catch((e) => e);
+    await a.crearUsuario("864213", "Luis", "517384", "mesero");
+    const malPin = await a.crearUsuario("0000", "X", "517384", "mesero").catch((e) => e);
     expect(malPin).toBeInstanceOf(ErrorApi);
     expect(malPin.codigo).toBe("pin");
 
@@ -105,7 +105,7 @@ d("adaptador remoto contra el esquema real", () => {
     expect(est.periodo).toMatchObject({ count: 1, total: 71 });
     expect(est.cocina.map((t) => t.id).sort()).toEqual(["remoto-envio-1", "remoto-reenvio-1"]);
 
-    const corte = await a.corte("8642");
+    const corte = await a.corte("864213");
     expect(corte.corte).toMatchObject({ tickets: 1, total: 71, autorizo: "Ana" });
     const parcial = await api.cargar(["historial", "cocina"]);
     expect(parcial.historial).toEqual([]);

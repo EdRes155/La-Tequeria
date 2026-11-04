@@ -1,8 +1,8 @@
 # Modelo multinegocio: cuenta, sucursal, membresía, dispositivo y sesión
 
-Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. Los pasos 1 y 2 del
-§9 (tablas, `sucursal_id`, validadores `_dispositivo` y `_contexto` y todas las funciones por sucursal)
-están implementados en `supabase-schema.sql`; lo demás es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
+Primer entregable del [plan multinegocio](../../PLAN-MULTINEGOCIO.md), versión 2.2. Los pasos 1 a 3 del
+§9 (tablas, `sucursal_id`, validadores `_dispositivo` y `_contexto`, todas las funciones por sucursal y la
+política de seguridad del personal) están implementados en `supabase-schema.sql`; lo demás es diseño. La lista de tablas, funciones, candados y claves que hay que cubrir está en el
 [inventario](INVENTARIO.md), generado del código.
 
 ## 1. Entidades nuevas
@@ -117,11 +117,11 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
 - **Auxiliares internas** (`_fecha`, `_valorar_items`, `_ticket_json`…): reciben `sucursal_id` como
   parámetro explícito de quien las llama. El [inventario](INVENTARIO.md) marca cuáles dependen de la
   sucursal directamente y cuáles a través de otras.
-- **Implementado (paso 2):** `_dispositivo()` y `_contexto(p_token, p_roles)`; sustituyen a `_sesion` y
-  `_exigir`. Sin `p_roles`, `_contexto` acepta cualquier rol (lectura, latido, salir, cambiar PIN); con
-  ellos exige el rol y que el PIN ya se haya cambiado. El tipo de llamada (`p_tipo`, para la inactividad
-  y el monitor) llega con la política de sesión (paso 3); `_vinculacion`, `_identidad` y `_dueno`, con
-  las funciones que los usan (paso 4).
+- **Implementado (pasos 2 y 3):** `_dispositivo()` y `_contexto(p_token, p_roles, p_tipo)`; sustituyen
+  a `_sesion` y `_exigir`. Sin `p_roles`, `_contexto` acepta cualquier rol; con ellos exige el rol y que
+  el PIN ya se haya cambiado. `p_tipo` es obligatorio y dice qué es la llamada (§3.2 y §5):
+  `interaccion`, `lectura`, `automatica`, `latido`, `sesion`, `desbloqueo` o `salida`. `_vinculacion`,
+  `_identidad` y `_dueno` llegan con las funciones que los usan (paso 4).
 - **La API solo la ejecuta `authenticated`**: los equipos entran con una sesión anónima de Supabase, que
   tiene ese rol. `anon` no ejecuta ninguna función.
 
@@ -211,7 +211,14 @@ registra. El mesero verá «Enviado» hasta que alguien desbloquee la cocina con
 ### 5.1 Campos
 
 `sesiones`: `id`, `token_hash`, `sucursal_id`, `dispositivo_id`, `usuario_id`, `creada`,
-`vence_absoluta` (= `creada + 12 h`), `ultima_interaccion`, `revocada`, `motivo_fin`.
+`vence_absoluta` (= `creada + 12 h`), `revocada`, `motivo_fin` (`salida`, `cambio_pin`,
+`pin_restablecido`, `sin_equipo`).
+
+`ultima_interaccion` vive en `sesiones_actividad` (una fila por sesión, **sin** referencia a
+`sesiones`). Así marcar la interacción no bloquea la fila de la sesión, y revocar o borrar sesiones de
+otro operador (cambio o restablecimiento de PIN, baja de un usuario) nunca espera a una operación en
+curso. Con la marca en la propia fila, dos administradores que se daban de baja a la vez llegaban a un
+interbloqueo (lo cubre una prueba).
 
 ### 5.2 Estados
 
@@ -266,6 +273,10 @@ Reglas de aplicación (del plan):
   - los intentos rechazados no alargan el bloqueo ni suben la escalada.
 - **Al entrar o desbloquear bien** (ya vencido el bloqueo) se reinician los fallos y la escalada de
   ese operador.
+- **Implementado (paso 3):** `intentos_operador`, `intentos_dispositivo` y, para la reautenticación y la
+  IP, `intentos` con su nivel de escalada. Un acierto de reautenticación (ya vencido el bloqueo) reinicia
+  también su escalada. La IP conserva su umbral alto de 30 fallos como barrera adicional. Las respuestas
+  de bloqueo dicen el motivo (`operador`, `equipo` o `red`) y la espera en segundos.
 - **Restablecer el acceso:** un administrador de la misma sucursal puede hacerlo con
   `restablecer_acceso`, y queda en la bitácora.
 - **Límite del dispositivo:** conserva su ventana aunque otro usuario entre bien. Aplica al acceso
@@ -311,8 +322,12 @@ Reglas de aplicación (del plan):
    candado del corte por sucursal; folio desde `folios`; contracción del estado de cobro. La matriz de
    aislamiento (`tests/sql/aislamiento.test.js`) prueba cada función con las dos cuentas de las fixtures:
    solo quedan pendientes los casos de funciones de los pasos 3 y 4.
-3. **Política de seguridad:** PIN de 6 a 8 dígitos, contadores, sesión de 12 h e inactividad, con
-   reloj controlado.
+3. **Política de seguridad** (hecho): PIN de 6 a 8 dígitos no triviales y transición de los heredados;
+   contadores por operador (escalada 15/30/60), por equipo (30 en 15 min) y de reautenticación; sesión
+   de 12 h e inactividad de 15 min con el tipo de llamada; `desbloquear` y `restablecer_acceso`;
+   excepción del monitor. Pruebas con reloj controlado en `tests/sql/reloj.test.js`. Falta su parte en
+   la interfaz (validación del PIN en pantalla y pantalla de desbloqueo), que va con el cliente (paso 6).
 4. **Dispositivos y dueños:** vinculación, revocación, membresías y registro.
 5. **Tiempo real privado y claves del navegador por sucursal.**
-6. **Cliente:** panel de dueños, vinculación, pantalla de desbloqueo y borradores por autor.
+6. **Cliente:** panel de dueños, vinculación, pantalla de desbloqueo, validación del PIN de 6 a 8
+   dígitos en la interfaz (también en el modo local) y borradores por autor.

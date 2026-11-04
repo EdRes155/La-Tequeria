@@ -13,16 +13,17 @@
 // pendientes. Las pruebas están en tests/sql/aislamiento.test.js.
 
 // Último paso del núcleo terminado (docs/multinegocio/MODELO.md §9)
-export const PASO_ACTUAL = 2;
+export const PASO_ACTUAL = 3;
 
 export const MATRIZ = {
   "usuarios_login()": { dispositivo: true, casos: ["solo lista el personal de la sucursal del dispositivo"] },
   "login(text, text, text)": { dispositivo: true, ids: true, casos: [
     "un usuario de otra sucursal no entra en este equipo",
     "los fallos en otra sucursal no bloquean al operador",
-    "los fallos cuentan también por equipo (paso 3)",
+    "los fallos cuentan también por equipo",
   ] },
   "logout(text)": { sesion: true },
+  "desbloquear(text, text)": { sesion: true, casos: ["no reinicia las 12 horas", "el PIN de otro operador no desbloquea"] },
   "cambiar_pin(text, text, text)": { sesion: true },
   "estado(text, text[])": { sesion: true, casos: ["todas las partes devuelven solo datos de su sucursal", "el folio y los resúmenes son los de su sucursal"] },
   "latido_cocina(text)": { sesion: true, casos: ["la cocina activa es por sucursal"] },
@@ -61,14 +62,13 @@ export const MATRIZ = {
   "crear_usuario(text, text, text, text, text)": { sesion: true, pin: true },
   "eliminar_usuario(text, text, text)": { sesion: true, ids: true, pin: true },
   "restablecer_pin(text, text, text, text)": { sesion: true, ids: true, pin: true },
+  "restablecer_acceso(text, text, text)": { sesion: true, ids: true, pin: true, casos: ["solo un administrador de la misma sucursal; queda en bitácora"] },
   // funciones nuevas del plan (al crearlas, la entrada pasa a su firma completa)
   vincular_dispositivo: { futura: 4, casos: [
     "un código vencido, ya usado o de otra cuenta se rechaza",
     "una identidad que ya es un dispositivo vigente no se vincula otra vez",
     "una identidad de persona (no anónima) no se vincula como equipo",
   ] },
-  desbloquear: { futura: 3, sesion: true, casos: ["no reinicia las 12 horas", "el PIN de otro operador no desbloquea"] },
-  restablecer_acceso: { futura: 3, sesion: true, ids: true, casos: ["solo un administrador de la misma sucursal; queda en bitácora"] },
   crear_cuenta: { futura: 4, identidad: true, casos: ["la cuenta nace activa con quien la crea como propietario, en la misma transacción"] },
   aceptar_invitacion: { futura: 4, identidad: true, casos: [
     "una invitación de otra cuenta, vencida, ya usada o para otro correo no da acceso",

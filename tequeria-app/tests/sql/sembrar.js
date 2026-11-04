@@ -34,8 +34,8 @@ export async function sembrar(sql, cuentas = crearCuentas()) {
       const personal = {};
       for (const p of s.personal) {
         const uid = randomBytes(6).toString("hex");
-        await sql.query("insert into public.usuarios (id, sucursal_id, nombre, rol, pin_hash) values ($1, $2, $3, $4, public._hash_pin($5))",
-          [uid, id, p.nombre, p.rol, p.pin]);
+        await sql.query(`insert into public.usuarios (id, sucursal_id, nombre, rol, pin_hash, politica_pin, pin_cambiado_en)
+          values ($1, $2, $3, $4, public._hash_pin($5), 1, now())`, [uid, id, p.nombre, p.rol, p.pin]);
         personal[p.rol] = { id: uid, nombre: p.nombre, pin: p.pin };
       }
       const equipos = {};

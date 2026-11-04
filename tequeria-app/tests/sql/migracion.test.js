@@ -2,7 +2,7 @@
 // de cobro), ensayada sobre una copia exacta del esquema de producción con datos sintéticos (nunca contra
 // producción).
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { URL_ADMIN, STUB, ESQUEMA, leer, crearBase, conectar, cerrarTodo, falla, huellaDe } from "./util.js";
 import { compararHuellas } from "../../scripts/huella.mjs";
 import { huellaEsquema } from "../../scripts/huella-esquema.mjs";
@@ -135,7 +135,10 @@ d("multinegocio: migración desde el esquema de producción", () => {
     const antesDeHumo = await huellaDe(sql, "destino", sal);
     const api = await conectar("tq_migracion");   // activa la cuenta con un propietario de prueba y vincula un equipo
     const login = await api.rpc("login", { p_id: "b2c3d4e5f6a1", p_pin: "571936" });
-    expect(login.ok).toBe(true);
+    // PIN heredado (de antes de la política): solo sirve para elegir uno nuevo (MIGRACION.md §5, paso 8)
+    expect(login).toMatchObject({ ok: true, debeCambiarPin: true });
+    expect((await falla(api.rpc("enviar_comanda", { p_token: login.token, p_ticket: { id: "t-antes-de-cambiar" } }))).message).toBe("CAMBIAR_PIN");
+    expect((await api.rpc("cambiar_pin", { p_token: login.token, p_pin_actual: "571936", p_pin_nuevo: "640217" })).ok).toBe(true);
     const t = { id: "t-nuevo-0001", tipo: "llevar", esExtra: false, cuenta: "junta", extras: [],
       ordenes: [{ id: "o1", nombre: "Orden 1", prep: "con-todo", items: [{ key: "taco-pastor", cantidad: 2, nombre: "x", precio: 1 }] }] };
     await api.rpc("enviar_comanda", { p_token: login.token, p_ticket: t });
@@ -146,15 +149,19 @@ d("multinegocio: migración desde el esquema de producción", () => {
       .toEqual({ sucursal_id: s, estado_cobro: "cobrado", cobro_id: "cobro-nuevo-0001", folio_periodo: "continuo", folio: 9 });
     expect((await uno("select sucursal_id from public.cobros where id = 'cobro-nuevo-0001'")).sucursal_id).toBe(s);
     expect(await uno("select ultimo::int from public.folios")).toEqual({ ultimo: 9 });
-    // solo sobran la comanda, el cobro y su entrada de bitácora; nada falta ni cambia
+    // sobran la comanda, el cobro y sus entradas de bitácora (cambio de PIN y cobro); cambia solo el
+    // usuario que eligió PIN nuevo; nada falta
     const r = compararHuellas(antesDeHumo, await huellaDe(sql, "destino", sal));
-    const bitacora = (await sql.query("select id::text from public.bitacora where accion = 'cobro' and detalle->>'cobro' = 'cobro-nuevo-0001'")).rows.map((x) => x.id);
+    const bitacora = (await sql.query(`select id::text from public.bitacora
+      where (accion = 'cobro' and detalle->>'cobro' = 'cobro-nuevo-0001') or (accion = 'cambiar_pin' and usuario_id = 'b2c3d4e5f6a1') order by id`)).rows.map((x) => x.id);
+    const llaveUsuario = "u:" + createHash("md5").update(sal + "b2c3d4e5f6a1").digest("hex").slice(0, 16);
     expect(r.entidades).toEqual({
       bitacora: { faltan: [], sobran: bitacora, distintas: [] },
       cobros: { faltan: [], sobran: ["cobro-nuevo-0001"], distintas: [] },
       tickets: { faltan: [], sobran: ["t-nuevo-0001"], distintas: [] },
+      usuarios: { faltan: [], sobran: [], distintas: [llaveUsuario] },
     });
-    expect(bitacora).toHaveLength(1);
+    expect(bitacora).toHaveLength(2);
     // en el resumen, además, la comanda está en cocina y quien entró tiene una sesión abierta
     expect(r.resumen.map((x) => x.ruta)).toEqual([
       "abierto.en_cocina", "abierto.sesiones_vigentes",
@@ -167,10 +174,11 @@ d("multinegocio: migración desde el esquema de producción", () => {
   it("las tablas y funciones internas no son accesibles desde la app", async () => {
     const api = await conectar("tq_migracion");
     for (const t of ["cuentas", "sucursales", "membresias", "invitaciones", "dispositivos", "codigos_vinculacion",
-                     "folios", "intentos_operador", "intentos_dispositivo"]) {
+                     "folios", "intentos_operador", "intentos_dispositivo", "sesiones_actividad"]) {
       expect((await falla(api.query(`select * from public.${t}`))).message).toMatch(/permission denied/);
     }
-    for (const f of ["_contexto('x')", "_dispositivo()", "_siguiente_folio(gen_random_uuid())"]) {
+    for (const f of ["_contexto('x', null, 'lectura')", "_dispositivo()", "_siguiente_folio(gen_random_uuid())",
+                     "_fallo_operador(gen_random_uuid(), 'x')", "_marcar_interaccion(gen_random_uuid())"]) {
       expect((await falla(api.query(`select public.${f}`))).message).toMatch(/permission denied/);
     }
   });

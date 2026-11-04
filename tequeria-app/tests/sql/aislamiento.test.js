@@ -59,6 +59,7 @@ const RECETAS = {
     id: { con: (X, v) => ({ p_id: v.id, p_pin: v.pin }), ajeno: (Y) => Y.per.mesero, inexistente: { id: NO_EXISTE, pin: "918273" } },
   },
   "logout(text)": { rol: "mesero", args: () => ({}) },
+  "desbloquear(text, text)": { rol: "mesero", args: (X) => ({ p_pin: X.per.mesero.pin }) },
   "cambiar_pin(text, text, text)": { rol: "mesero", args: (X) => ({ p_pin_actual: X.per.mesero.pin, p_pin_nuevo: "583920" }) },
   "estado(text, text[])": { rol: "admin", args: () => ({}) },
   "latido_cocina(text)": { rol: "cocinero", args: () => ({}) },
@@ -165,6 +166,10 @@ const RECETAS = {
     rol: "admin", args: (X) => ({ p_admin_pin: X.per.admin.pin, p_nombre: "Nuevo", p_pin: "583920", p_rol: "mesero" }), pin: true,
   },
   "eliminar_usuario(text, text, text)": {
+    rol: "admin", args: (X) => ({ p_admin_pin: X.per.admin.pin, p_id: X.per.mesero.id }),
+    id: { con: (X, v) => ({ p_id: v }), ajeno: (Y) => Y.per.mesero.id, inexistente: NO_EXISTE }, pin: true,
+  },
+  "restablecer_acceso(text, text, text)": {
     rol: "admin", args: (X) => ({ p_admin_pin: X.per.admin.pin, p_id: X.per.mesero.id }),
     id: { con: (X, v) => ({ p_id: v }), ajeno: (Y) => Y.per.mesero.id, inexistente: NO_EXISTE }, pin: true,
   },
@@ -348,6 +353,18 @@ d("matriz de aislamiento entre sucursales", () => {
         const res = await intentar(A.con.caja, "login", { p_id: B.per.mesero.id, p_pin: B.per.mesero.pin });
         expect(res.ok).toMatchObject({ ok: false, error: "pin" });
       },
+      "los fallos cuentan también por equipo": async () => {
+        // 30 fallos en la caja de A (dentro de una transacción que se deshace): la caja queda bloqueada para
+        // cualquiera; el monitor de A, no
+        await A.con.caja.query("begin");
+        try {
+          for (let i = 0; i < 30; i++) await A.con.caja.rpc("login", { p_id: "nadie-" + i, p_pin: "000000" });
+          expect(await A.con.caja.rpc("login", { p_id: A.per.mesero.id, p_pin: A.per.mesero.pin }))
+            .toMatchObject({ ok: false, error: "bloqueado", motivo: "equipo" });
+        } finally { await A.con.caja.query("rollback"); }
+        const r = await intentar(A.con.cocina, "login", { p_id: A.per.mesero.id, p_pin: A.per.mesero.pin });
+        expect(r.ok).toMatchObject({ ok: true });
+      },
       "los fallos en otra sucursal no bloquean al operador": async () => {
         for (let i = 0; i < 6; i++) await A.con.caja.rpc("login", { p_id: B.per.mesero.id, p_pin: "000000" });
         const r = await B.con.caja.rpc("login", { p_id: B.per.mesero.id, p_pin: B.per.mesero.pin });
@@ -375,6 +392,37 @@ d("matriz de aislamiento entre sucursales", () => {
         const total = (X) => 3 * X.sem.sucursal.precios["taco-pastor"];
         expect(ea.periodo).toMatchObject({ count: 3, total: total(A), gastos: 100, porCobrarCount: 2 });
         expect(eb.periodo).toMatchObject({ count: 3, total: total(B), gastos: 100, porCobrarCount: 2 });
+      },
+    },
+    "desbloquear(text, text)": {
+      "no reinicia las 12 horas": async () => {
+        const vence = async (c) => (await c.query("select vence_absoluta v from public.sesiones where token_hash = encode(extensions.digest($1, 'sha256'), 'hex')",
+          [A.tok.mesero])).rows[0].v;
+        const antes = await vence(sql);
+        await A.con.caja.query("begin");
+        try {
+          expect(await A.con.caja.rpc("desbloquear", { p_token: A.tok.mesero, p_pin: A.per.mesero.pin })).toEqual({ ok: true });
+          await A.con.caja.query("reset role");
+          expect(await vence(A.con.caja)).toEqual(antes);
+        } finally { await A.con.caja.query("rollback"); }
+      },
+      "el PIN de otro operador no desbloquea": async () => {
+        const r = await intentar(A.con.caja, "desbloquear", { p_token: A.tok.mesero, p_pin: A.per.admin.pin });
+        expect(r.ok).toMatchObject({ ok: false, error: "pin" });
+      },
+    },
+    "restablecer_acceso(text, text, text)": {
+      "solo un administrador de la misma sucursal; queda en bitácora": async () => {
+        const mesero = await intentar(A.con.caja, "restablecer_acceso", { p_token: A.tok.mesero, p_admin_pin: A.per.admin.pin, p_id: A.per.cocinero.id });
+        expect(mesero.error).toBe("PERMISO");
+        await A.con.caja.query("begin");
+        try {
+          expect(await A.con.caja.rpc("restablecer_acceso", { p_token: A.tok.admin, p_admin_pin: A.per.admin.pin, p_id: A.per.mesero.id }))
+            .toMatchObject({ ok: true });
+          await A.con.caja.query("reset role");
+          const { rows } = await A.con.caja.query("select sucursal_id, usuario_id from public.bitacora where accion = 'restablecer_acceso'");
+          expect(rows).toEqual([{ sucursal_id: A.id, usuario_id: A.per.admin.id }]);
+        } finally { await A.con.caja.query("rollback"); }
       },
     },
     "latido_cocina(text)": {

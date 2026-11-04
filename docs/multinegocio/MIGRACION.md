@@ -121,8 +121,8 @@ Implementado en la sección «MULTINEGOCIO» de `supabase-schema.sql`, que se pu
 | `folios` | Periodo `continuo` con `ultimo = max(folio)`; `tickets.folio_periodo = 'continuo'` |
 | `config`, `cocina_sesion` | La fila `id = 1` pasa a ser la de la sucursal inicial; su llave pasa a ser `sucursal_id` |
 | `intentos` | No se migran contadores: se registra en la bitácora cualquier bloqueo vigente y se empieza de cero con las tablas nuevas |
-| `sesiones` | Se revocan todas las que no tienen equipo (implementado): hay que volver a entrar desde un equipo vinculado |
-| `usuarios` | `politica_pin = 0` (heredada): al entrar desde un dispositivo vinculado, el PIN anterior solo sirve para elegir uno nuevo de 6 a 8 dígitos |
+| `sesiones` | Se revocan todas las que no tienen equipo (`motivo_fin = 'sin_equipo'`): hay que volver a entrar desde un equipo vinculado. `expira` pasa a ser `vence_absoluta` y `ultimo_uso` se retira (implementado) |
+| `usuarios` | `politica_pin = 0` (heredada): al entrar desde un dispositivo vinculado, el PIN anterior solo sirve para elegir uno nuevo de 6 a 8 dígitos (implementado) |
 | `bitacora` | `cuenta_id` y `sucursal_id` de la inicial |
 
 ### 4.4 Validar dentro de la transacción

@@ -13,10 +13,11 @@ export function directo(f, tablas, funciones) {
   ]);
   const lee = toca(/(?:from|join)\s+public\.(\w+)/gi).filter((t) => !escribe.includes(t) || /select[\s\S]*from\s+public\./i.test(cuerpo));
   const llama = unicos([...funciones].filter((n) => n !== f.nombre && new RegExp(`(?:^|[^\\w.])(?:public\\.)?${n}\\s*\\(`).test(cuerpo)));
-  const roles = (cuerpo.match(/_(?:exigir|contexto)\(\s*p_token\s*,\s*array\[([^\]]*)\]/) || [])[1];
+  // _contexto(p_token, roles | null, 'tipo'): roles exigidos y tipo de llamada (MODELO.md §3.2)
+  const ctx = cuerpo.match(/_contexto\(\s*p_token\s*,\s*(null|array\[([^\]]*)\])\s*,\s*'(\w+)'/);
+  const roles = ctx?.[2]?.replace(/'/g, "").replace(/\s+/g, " ");
   const acceso = !f.api ? (f.nombre === "crear_admin_inicial" ? "Solo SQL Editor" : "Interna")
-    : roles ? `Sesión: ${roles.replace(/'/g, "").replace(/\s+/g, " ")}`
-    : /_(?:sesion|contexto)\(\s*p_token\s*\)/.test(cuerpo) ? "Sesión: cualquier rol"
+    : ctx ? `Sesión: ${roles || "cualquier rol"} · ${ctx[3]}`
     : /\b_dispositivo\(\)/.test(cuerpo) ? "Equipo vinculado, sin operador"
     : /\bp_token\b/.test(f.args) ? "Token propio (sin revisar rol)"
     : "Sin sesión";
