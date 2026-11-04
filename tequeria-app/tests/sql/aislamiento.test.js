@@ -367,6 +367,16 @@ d("matriz de aislamiento entre sucursales", () => {
         (c) => c.query("update public.dispositivos set revocado_en = now() where id = $1", [A.equipoId[eq]]));
       expect(res.error).toBe("DISPOSITIVO");
     },
+    "rechaza un equipo suspendido o borrado en Supabase Auth": (firma, r) => async () => {
+      // el JWT de la identidad sigue siendo válido: la regla se revisa en auth.users en cada llamada
+      const X = r.id?.desde === "B" ? B : A, eq = r.sinSesion ? "caja" : equipoDe(r), uid = X.sem.equipos[eq].authUid;
+      const conAuth = (cambio) => (c) => c.query(`update auth.users set ${cambio} where id = $1`, [uid]);
+      for (const cambio of ["banned_until = now() + interval '1 hour'", "deleted_at = now()"]) {
+        expect([cambio, (await intentar(X.con[eq], nombreDe(firma), argsDe(r, X), conAuth(cambio))).error]).toEqual([cambio, "DISPOSITIVO"]);
+      }
+      // una suspensión que ya terminó no lo impide
+      sinError(await intentar(X.con[eq], nombreDe(firma), argsDe(r, X), conAuth("banned_until = now() - interval '1 minute'")));
+    },
     "rechaza una identidad sin dispositivo vinculado": (firma, r) => async () => {
       expect((await intentar(sinEquipo, nombreDe(firma), argsDe(r, A))).error).toBe("DISPOSITIVO");
     },
@@ -648,6 +658,15 @@ d("matriz de aislamiento entre sucursales", () => {
         // revocado tampoco: la recuperación es una identidad nueva con otro código
         expect(await intentar(A.con.caja, fn, args, (c) => c.query("update public.dispositivos set revocado_en = now() where id = $1",
           [A.equipoId.caja]))).toMatchObject({ error: "REVOCADO" });
+      },
+      "una identidad suspendida o borrada en Supabase Auth no se vincula": async () => {
+        const fn = "vincular_dispositivo", args = { p_codigo: A.codigo, p_nombre: "Caja nueva" };
+        const conAuth = (cambio) => (c) => c.query(`update auth.users set ${cambio} where id = $1`, [A.anonimo]);
+        for (const cambio of ["banned_until = now() + interval '1 hour'", "deleted_at = now()"]) {
+          const res = await intentar(A.con.anonimo, fn, args, conAuth(cambio));
+          expect([cambio, res.error]).toEqual([cambio, "IDENTIDAD"]);
+        }
+        expect((await intentar(A.con.anonimo, fn, args, conAuth("banned_until = now() - interval '1 minute'"))).ok).toMatchObject({ ok: true });
       },
       "una identidad de persona (no anónima) no se vincula como equipo": async () => {
         const fn = "vincular_dispositivo", args = { p_codigo: A.codigo, p_nombre: "Mi celular" };

@@ -185,6 +185,132 @@ d("dueños y dispositivos", () => {
     expect((await falla(listar())).message).toBe("IDENTIDAD");
   });
 
+  // --- Identidades suspendidas o borradas en Supabase Auth ---------------------------------------------
+  // Su JWT sigue siendo válido hasta que vence: la regla se revisa en auth.users en cada llamada.
+  async function equipoConSesion() {
+    const { p, cuenta, sucursal, admin } = await cuentaNueva();
+    const eq = await anonimo();
+    expect((await vincular(eq, await codigo(p, cuenta, sucursal))).ok).toBe(true);
+    const token = (await eq.con.rpc("login", { p_id: admin.id, p_pin: PIN })).token;
+    return { p, cuenta, sucursal, admin, eq, token };
+  }
+  const sinAcceso = async (eq, token, adminId) => {
+    for (const [fn, args] of [["usuarios_login", {}], ["login", { p_id: adminId, p_pin: PIN }], ["estado", { p_token: token, p_partes: ["mesas"] }]]) {
+      expect([fn, (await falla(eq.con.rpc(fn, args))).message]).toEqual([fn, "DISPOSITIVO"]);
+    }
+  };
+
+  it("un equipo suspendido en Supabase Auth (banned_until) no se vincula ni opera mientras dure la suspensión", async () => {
+    const { p, cuenta, sucursal, eq, token, admin } = await equipoConSesion();
+    // vincular: la identidad suspendida no usa el código, y el código sigue sirviendo para otra
+    const susp = await anonimo();
+    const cod = await codigo(p, cuenta, sucursal);
+    await sql.query("update auth.users set banned_until = $2 where id = $1", [susp.uid, new Date(reloj.ahora.getTime() + 5 * 60e3).toISOString()]);
+    expect((await falla(vincular(susp, cod))).message).toBe("IDENTIDAD");
+    // operar: el equipo ya vinculado pierde el acceso
+    await sql.query("update auth.users set banned_until = $2 where id = $1", [eq.uid, new Date(reloj.ahora.getTime() + 5 * 60e3).toISOString()]);
+    await sinAcceso(eq, token, admin.id);
+    // al terminar la suspensión, los dos vuelven a servir (la sesión sigue dentro de sus 15 minutos)
+    await reloj.avanzar({ minutos: 5 });
+    expect((await eq.con.rpc("estado", { p_token: token, p_partes: ["mesas"] })).mesas).toHaveLength(8);
+    expect((await vincular(susp, cod)).ok).toBe(true);
+  });
+
+  it("un equipo borrado en Supabase Auth (deleted_at) no se vincula ni opera", async () => {
+    const { p, cuenta, sucursal, eq, token, admin } = await equipoConSesion();
+    const borrada = await anonimo();
+    const cod = await codigo(p, cuenta, sucursal);
+    await sql.query("update auth.users set deleted_at = now() where id = $1", [borrada.uid]);
+    expect((await falla(vincular(borrada, cod))).message).toBe("IDENTIDAD");
+    await sql.query("update auth.users set deleted_at = now() where id = $1", [eq.uid]);
+    await sinAcceso(eq, token, admin.id);
+    // el código no se gastó
+    expect((await vincular(await anonimo(), cod)).ok).toBe(true);
+  });
+
+  // --- Límites con escrituras simultáneas ----------------------------------------------------------------
+  // Partiendo de uno menos que el límite, dos llamadas a la vez. La segunda espera a la primera y, al
+  // seguir, ve lo que la primera confirmó: en READ COMMITTED responde «limite»; en REPEATABLE READ y
+  // SERIALIZABLE falla con 40001 y, al reintentarla en una transacción nueva (como hará la app), «limite».
+  async function simultaneas(nivel, [ca, cb], llamar) {
+    const pidB = await pidDe(cb);
+    await ca.query(`begin isolation level ${nivel}`);
+    await cb.query(`begin isolation level ${nivel}`);
+    try {
+      await cb.query("select 1");   // la fotografía de la segunda es de antes de la primera
+      const r1 = await llamar(ca, 1);
+      const p2 = llamar(cb, 2).then((ok) => ({ ok }), (e) => ({ error: e.code }));
+      expect(await esperaCandado(sql, pidB)).toBe(true);
+      await ca.query("commit");
+      const r2 = await p2;
+      await cb.query(r2.error ? "rollback" : "commit");
+      // quien llama reintenta un 40001 en una transacción nueva, con el mismo aislamiento
+      let r3;
+      if (r2.error === "40001") {
+        await cb.query(`begin isolation level ${nivel}`);
+        r3 = await llamar(cb, 2);
+        await cb.query("commit");
+      }
+      return { r1, r2, r3 };
+    } finally {
+      await ca.query("rollback").catch(() => {});
+      await cb.query("rollback").catch(() => {});
+    }
+  }
+  const esperado = (nivel) => (nivel === "read committed"
+    ? { r2: { ok: { ok: false, error: "limite" } }, r3: undefined }
+    : { r2: { error: "40001" }, r3: { ok: false, error: "limite" } });
+  const dosConexiones = async (q) => [q.con, await conectarComo(BASE, q.uid, ip(), { persona: true })];
+
+  for (const nivel of ["read committed", "repeatable read", "serializable"]) {
+    describe(`límites con dos llamadas simultáneas (${nivel})`, () => {
+      it("sucursales por cuenta (20)", async () => {
+        const { p, cuenta } = await cuentaNueva();
+        await sql.query("insert into public.sucursales (cuenta_id, nombre) select $1, 'Relleno ' || g from generate_series(1, 18) g", [cuenta]);
+        const r = await simultaneas(nivel, await dosConexiones(p), (c, i) => c.rpc("crear_sucursal",
+          { p_cuenta: cuenta, p_nombre: "Nueva " + i, p_zona_horaria: null, p_admin_nombre: "Admin", p_admin_pin: PIN }));
+        expect(r.r1.ok).toBe(true);
+        expect({ r2: r.r2, r3: r.r3 }).toEqual(esperado(nivel));
+        expect((await sql.query("select count(*)::int n from public.sucursales where cuenta_id = $1", [cuenta])).rows[0].n).toBe(20);
+      });
+
+      it("invitaciones vigentes por cuenta (30)", async () => {
+        const { p, cuenta } = await cuentaNueva();
+        await sql.query(`insert into public.invitaciones (cuenta_id, correo, rol, token_hash, vence)
+          select $1, 'relleno-' || g || '@ejemplo.invalid', 'encargado', md5(random()::text || g), public._ahora() + interval '1 day'
+          from generate_series(1, 29) g`, [cuenta]);
+        const r = await simultaneas(nivel, await dosConexiones(p), (c, i) => c.rpc("invitar_miembro",
+          { p_cuenta: cuenta, p_correo: `simultanea-${i}@ejemplo.invalid`, p_rol: "encargado" }));
+        expect(r.r1.ok).toBe(true);
+        expect({ r2: r.r2, r3: r.r3 }).toEqual(esperado(nivel));
+        expect((await sql.query("select count(*)::int n from public.invitaciones where cuenta_id = $1 and usada_en is null and vence > public._ahora()",
+          [cuenta])).rows[0].n).toBe(30);
+      });
+
+      it("códigos vigentes por sucursal (10)", async () => {
+        const { p, cuenta, sucursal } = await cuentaNueva();
+        await sql.query(`insert into public.codigos_vinculacion (sucursal_id, codigo_hash, creado_por, creado, vence)
+          select $1, md5(random()::text || g), $2, public._ahora(), public._ahora() + interval '10 minutes' from generate_series(1, 9) g`, [sucursal, p.uid]);
+        const r = await simultaneas(nivel, await dosConexiones(p), (c) => c.rpc("generar_codigo", { p_cuenta: cuenta, p_sucursal: sucursal, p_monitor: false }));
+        expect(r.r1.ok).toBe(true);
+        expect({ r2: r.r2, r3: r.r3 }).toEqual(esperado(nivel));
+        expect((await sql.query("select count(*)::int n from public.codigos_vinculacion where sucursal_id = $1 and usado_en is null and vence > public._ahora()",
+          [sucursal])).rows[0].n).toBe(10);
+      });
+
+      it("cuentas creadas por persona (3)", async () => {
+        const q = await persona();
+        const alta = (c, i) => c.rpc("crear_cuenta", { p_nombre: "Cuenta " + i, p_sucursal: null, p_zona_horaria: null, p_admin_nombre: "Admin", p_admin_pin: PIN });
+        expect((await alta(q.con, "a")).ok).toBe(true);
+        expect((await alta(q.con, "b")).ok).toBe(true);
+        const r = await simultaneas(nivel, await dosConexiones(q), alta);
+        expect(r.r1.ok).toBe(true);
+        expect({ r2: r.r2, r3: r.r3 }).toEqual(esperado(nivel));
+        expect((await sql.query("select count(*)::int n from public.cuentas where creada_por = $1", [q.uid])).rows[0].n).toBe(3);
+      });
+    });
+  }
+
   // --- Cuentas e invitaciones ---------------------------------------------------------------------------
   it("hasta 3 cuentas por persona, también con altas simultáneas", async () => {
     const p = await persona();
@@ -217,14 +343,32 @@ d("dueños y dispositivos", () => {
     expect((await falla(q.con.rpc("aceptar_invitacion", { p_clave: inv2.token }))).message).toBe("INVITACION");
   });
 
-  it("aceptar una invitación puede subir de encargado a propietario, nunca bajar", async () => {
+  it("cambiar el rol de un miembro con la API: se quita y se vuelve a invitar con el rol nuevo", async () => {
+    const { p, cuenta } = await cuentaNueva();
+    const q = await persona();
+    const invitar = (rol) => p.con.rpc("invitar_miembro", { p_cuenta: cuenta, p_correo: q.correo, p_rol: rol });
+    const aceptar = async (inv) => (await q.con.rpc("aceptar_invitacion", { p_clave: inv.token })).cuenta.rol;
+    expect(await aceptar(await invitar("encargado"))).toBe("encargado");
+    // a quien ya es miembro no se le invita otra vez: no hay un «cambiar rol» directo
+    expect(await invitar("propietario")).toEqual({ ok: false, error: "ya_miembro" });
+    // subir: quitar e invitar como propietario
+    expect((await p.con.rpc("quitar_miembro", { p_cuenta: cuenta, p_miembro: q.uid })).ok).toBe(true);
+    expect(await aceptar(await invitar("propietario"))).toBe("propietario");
+    // bajar: igual, mientras quede otro propietario
+    expect((await p.con.rpc("quitar_miembro", { p_cuenta: cuenta, p_miembro: q.uid })).ok).toBe(true);
+    expect(await aceptar(await invitar("encargado"))).toBe("encargado");
+    expect(await propietarios(cuenta)).toEqual([p.uid]);
+  });
+
+  it("salvaguarda: si alguien ya es miembro y acepta otra invitación hecha fuera de la API, su rol puede subir pero no bajar", async () => {
+    // La API no crea este caso (invitar_miembro responde ya_miembro y una invitación nueva anula la anterior):
+    // las invitaciones se insertan con SQL para comprobar la regla de aceptar_invitacion por sí sola.
     const { p, cuenta } = await cuentaNueva();
     const q = await persona();
     const inv = await p.con.rpc("invitar_miembro", { p_cuenta: cuenta, p_correo: q.correo, p_rol: "encargado" });
     await q.con.rpc("aceptar_invitacion", { p_clave: inv.token });
-    // invitaciones hechas a mano (la app no invita a quien ya es miembro)
     const aMano = (clave, rol) => sql.query(`insert into public.invitaciones (cuenta_id, correo, rol, token_hash, vence)
-      values ($1, $2, $3, public._hash_secreto('invitacion', $4), now() + interval '1 day')`, [cuenta, q.correo, rol, clave]);
+      values ($1, $2, $3, public._hash_secreto('invitacion', $4), public._ahora() + interval '1 day')`, [cuenta, q.correo, rol, clave]);
     await aMano("subir", "propietario");
     expect((await q.con.rpc("aceptar_invitacion", { p_clave: "subir" })).cuenta.rol).toBe("propietario");
     await aMano("bajar", "encargado");

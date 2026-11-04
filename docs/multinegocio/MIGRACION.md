@@ -104,7 +104,8 @@ Implementado en la sección «MULTINEGOCIO» de `supabase-schema.sql`, que se pu
   cuenta, probado con bajas simultáneas en READ COMMITTED, REPEATABLE READ y SERIALIZABLE.
 - Con el paso que las usa (implementadas): las columnas de seguridad de `sesiones` y `usuarios` (paso
   3); `bitacora.cuenta_id` (de la sucursal de cada fila), `bitacora.auth_user_id`, `sucursal_id` nulo
-  solo en acciones de cuenta (`bitacora_alcance_ck`) y `cuentas.creada_por` (paso 4).
+  solo en acciones de cuenta (`bitacora_alcance_ck`), `cuentas.creada_por`, `cuentas.revision` y la
+  tabla `cuentas_por_persona` (paso 4).
 
 ### 4.2 Cuenta y sucursal inicial
 

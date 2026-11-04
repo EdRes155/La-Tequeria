@@ -70,6 +70,7 @@ export const MATRIZ = {
     "un código vencido, ya usado o de otra cuenta se rechaza",
     "una identidad que ya es un dispositivo vigente no se vincula otra vez",
     "una identidad de persona (no anónima) no se vincula como equipo",
+    "una identidad suspendida o borrada en Supabase Auth no se vincula",
   ] },
   // Alta de personas
   "crear_cuenta(text, text, text, text, text)": { identidad: true, casos: ["la cuenta nace activa con quien la crea como propietario, en la misma transacción"] },
@@ -99,9 +100,10 @@ export const MATRIZ = {
 };
 
 export const casosDe = (f) => [
-  ...(f.dispositivo ? ["rechaza una identidad sin dispositivo vinculado", "rechaza un dispositivo revocado"] : []),
+  ...(f.dispositivo ? ["rechaza una identidad sin dispositivo vinculado", "rechaza un dispositivo revocado",
+    "rechaza un equipo suspendido o borrado en Supabase Auth"] : []),
   ...(f.sesion ? ["rechaza el token de una sesión de otra sucursal", "rechaza el token usado desde otro dispositivo",
-    "rechaza un dispositivo revocado"] : []),
+    "rechaza un dispositivo revocado", "rechaza un equipo suspendido o borrado en Supabase Auth"] : []),
   ...(f.identidad || f.dueno ? ["rechaza una identidad anónima o la de un equipo", "rechaza una persona sin correo verificado"] : []),
   ...(f.dueno ? ["rechaza a una persona sin membresía en esa cuenta", "una sucursal o un id de otra cuenta se trata como inexistente"] : []),
   ...(f.ids ? ["trata un id de otra sucursal como inexistente"] : []),

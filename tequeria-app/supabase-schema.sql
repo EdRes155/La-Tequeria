@@ -594,6 +594,23 @@ create constraint trigger cuenta_con_propietario after update or delete on publi
 -- Dueños y dispositivos (paso 4). Quién creó cada cuenta (límite de cuentas por persona; nulo: la creó
 -- la migración o el proveedor).
 alter table public.cuentas add column if not exists creada_por uuid;
+-- Sube con cada escritura de dueños (_dueno, escritura). Que escriban la fila de la cuenta, y no solo la
+-- bloqueen, hace que dos escrituras simultáneas choquen también en REPEATABLE READ y SERIALIZABLE (la
+-- segunda falla con 40001 y se reintenta). Con solo el bloqueo, la segunda esperaba y luego comprobaba los
+-- límites (sucursales, invitaciones, códigos) con su fotografía anterior.
+alter table public.cuentas add column if not exists revision bigint not null default 0;
+
+-- Cuentas creadas por cada persona (límite de crear_cuenta). Se comprueba y se suma en la misma sentencia,
+-- sobre esta fila: dos altas simultáneas de la misma persona chocan aquí (en READ COMMITTED la segunda
+-- espera y vuelve a leer; en REPEATABLE READ o SERIALIZABLE falla con 40001).
+create table if not exists public.cuentas_por_persona (
+  auth_user_id uuid primary key references auth.users (id) on delete cascade,
+  creadas int not null default 0 constraint cuentas_por_persona_ck check (creadas >= 0)
+);
+insert into public.cuentas_por_persona (auth_user_id, creadas)
+select creada_por, count(*) from public.cuentas c
+ where creada_por is not null and exists (select 1 from auth.users u where u.id = c.creada_por) group by 1
+on conflict (auth_user_id) do update set creadas = greatest(public.cuentas_por_persona.creadas, excluded.creadas);
 create index if not exists membresias_persona_idx on public.membresias (auth_user_id);
 create index if not exists invitaciones_cuenta_idx on public.invitaciones (cuenta_id, correo) where usada_en is null;
 create index if not exists codigos_sucursal_idx on public.codigos_vinculacion (sucursal_id, vence) where usado_en is null;
@@ -889,10 +906,22 @@ returns void language sql set search_path = public as $$
   values ((select cuenta_id from public.sucursales where id = p_sucursal), p_sucursal, p_uid, p_nombre, p_accion, p_detalle);
 $$;
 
+-- Identidad de Supabase Auth que se puede usar: existe, es anónima (equipo) o no (persona) según se pida, y
+-- no está suspendida (banned_until) ni borrada (deleted_at). La comparten los tres validadores que leen
+-- auth.users (_dispositivo, _vinculacion e _identidad): el JWT de una identidad suspendida o borrada sigue
+-- siendo válido hasta que vence, así que la regla se revisa en cada llamada.
+create or replace function public._auth_vigente(p_uid uuid, p_anonima boolean)
+returns boolean language sql stable set search_path = public as $$
+  select exists (select 1 from auth.users u
+                  where u.id = p_uid and u.is_anonymous = p_anonima
+                    and (u.banned_until is null or u.banned_until <= public._ahora()) and u.deleted_at is null)
+$$;
+
 -- Validador del equipo (MODELO.md §3): la identidad de Supabase de la petición (auth.uid()) debe ser
 -- un dispositivo vinculado y sin revocar, de una sucursal activa de una cuenta activa. De aquí, y
--- solo de aquí, sale la sucursal. La identidad debe seguir siendo anónima: si se convirtiera en una con
--- correo, deja de valer como equipo (y _identidad tampoco la acepta como persona).
+-- solo de aquí, sale la sucursal. La identidad debe seguir siendo anónima y estar vigente en Supabase
+-- Auth (_auth_vigente): si se convierte en una con correo, se suspende o se borra, deja de valer como
+-- equipo (y _identidad tampoco la acepta como persona).
 create or replace function public._dispositivo(
   out dispositivo_id uuid, out sucursal_id uuid, out cuenta_id uuid, out monitor_cocina boolean)
 language plpgsql stable set search_path = public as $$
@@ -903,8 +932,8 @@ begin
     from public.dispositivos d
     join public.sucursales s on s.id = d.sucursal_id
     join public.cuentas c on c.id = s.cuenta_id
-    join auth.users a on a.id = d.auth_user_id
-   where d.auth_user_id = auth.uid() and d.revocado_en is null and s.activa and c.estado = 'activa' and a.is_anonymous;
+   where d.auth_user_id = auth.uid() and d.revocado_en is null and s.activa and c.estado = 'activa'
+     and public._auth_vigente(d.auth_user_id, true);
   if not found then
     perform public._error('DISPOSITIVO', 'Este equipo no está autorizado. Pide a un dueño que lo vincule a la sucursal.');
   end if;
@@ -1073,9 +1102,8 @@ declare r record;
 begin
   select u.id, lower(btrim(u.email)) as email into r
     from auth.users u
-   where u.id = auth.uid() and not u.is_anonymous and u.email_confirmed_at is not null
+   where u.id = auth.uid() and public._auth_vigente(u.id, false) and u.email_confirmed_at is not null
      and nullif(btrim(u.email), '') is not null
-     and (u.banned_until is null or u.banned_until <= public._ahora()) and u.deleted_at is null
      and not exists (select 1 from public.dispositivos x where x.auth_user_id = u.id);
   if not found then
     perform public._error('IDENTIDAD', 'Entra con tu cuenta de correo verificada para administrar el negocio.');
@@ -1085,11 +1113,14 @@ end $$;
 
 -- Validador del panel de dueños (MODELO.md §3): la persona de _identidad, miembro de p_cuenta con uno de
 -- p_roles, y la cuenta activa. Una cuenta de la que no es miembro y una que no existe dan la misma
--- respuesta. p_tipo: 'lectura' o 'escritura'. Una escritura toma la fila de la cuenta antes que
--- cualquier otra (orden fijo: cuenta → lo demás) y vuelve a leer la membresía en otra sentencia: si otro
--- dueño la quitó mientras esperaba, aquí ya se ve. Así dos bajas simultáneas se ordenan, y lo que hace un
--- dueño al que acaban de quitar no se confirma después de su baja. En REPEATABLE READ o SERIALIZABLE la
--- espera termina en 40001 si la otra transacción cambió los miembros: quien llama reintenta.
+-- respuesta. p_tipo: 'lectura' o 'escritura'. Una escritura ESCRIBE la fila de la cuenta (revision)
+-- antes que cualquier otra (orden fijo: cuenta → lo demás) y vuelve a leer la membresía en otra
+-- sentencia: si otro dueño la quitó mientras esperaba, aquí ya se ve. Así las escrituras de una cuenta se
+-- ordenan: dos bajas simultáneas no la dejan sin propietario, lo que hace un dueño al que acaban de quitar
+-- no se confirma después de su baja, y los límites (sucursales, invitaciones, códigos) se comprueban con
+-- lo último confirmado. En READ COMMITTED la segunda espera y vuelve a leer; en REPEATABLE READ o
+-- SERIALIZABLE falla con 40001 (escribir, y no solo bloquear, provoca ese conflicto) y quien llama
+-- reintenta en una transacción nueva.
 create or replace function public._dueno(p_cuenta uuid, p_roles text[], p_tipo text,
   out cuenta_id uuid, out rol text, out auth_user_id uuid, out correo text)
 language plpgsql set search_path = public as $$
@@ -1104,7 +1135,7 @@ begin
   select m.rol into v_rol from public.membresias m join public.cuentas c on c.id = m.cuenta_id
    where m.cuenta_id = p_cuenta and m.auth_user_id = i.auth_user_id and c.estado = 'activa';
   if v_rol is not null and p_tipo = 'escritura' then
-    perform 1 from public.cuentas c where c.id = p_cuenta for no key update;
+    update public.cuentas c set revision = c.revision + 1 where c.id = p_cuenta;
     v_rol := null;
     select m.rol into v_rol from public.membresias m join public.cuentas c on c.id = m.cuenta_id
      where m.cuenta_id = p_cuenta and m.auth_user_id = i.auth_user_id and c.estado = 'activa';
@@ -1132,7 +1163,7 @@ language plpgsql set search_path = public as $$
 declare v_uid uuid := auth.uid(); v_ip text := public._ip(); v_codigo text := public._normalizar_codigo(p_codigo);
         v_clave text; v_revocado timestamptz; r record; v_ok boolean := false;
 begin
-  if v_uid is null or not exists (select 1 from auth.users u where u.id = v_uid and u.is_anonymous) then
+  if v_uid is null or not public._auth_vigente(v_uid, true) then
     perform public._error('IDENTIDAD', 'El código se escribe en el equipo que se va a vincular, no en el panel de dueños.');
   end if;
   v_clave := 'vin:' || v_uid;
@@ -2530,22 +2561,23 @@ end $$;
 -- ---------------------------------------------------------------------
 -- Alta de un cliente: la persona crea la cuenta, que nace activa con ella como propietaria (en la misma
 -- transacción), su primera sucursal con el catálogo inicial y el primer administrador del personal.
--- Hasta 3 cuentas creadas por persona.
+-- Hasta 3 cuentas creadas por persona (cuentas_por_persona).
 create or replace function public.crear_cuenta(p_nombre text, p_sucursal text, p_zona_horaria text,
                                                p_admin_nombre text, p_admin_pin text)
 returns json language plpgsql security definer set search_path = public as $$
 declare i record; v_nombre text := left(btrim(coalesce(p_nombre, '')), 80); v_sucursal text; v_err text;
-        v_cuenta uuid; v_suc uuid; v_admin json;
+        v_cuenta uuid; v_suc uuid; v_admin json; v_n int;
 begin
   select * into i from public._identidad();
   v_sucursal := coalesce(nullif(left(btrim(coalesce(p_sucursal, '')), 80), ''), v_nombre);
   v_err := public._revisar_alta(v_nombre, p_zona_horaria, p_admin_nombre, p_admin_pin);
   if v_err is not null then return json_build_object('ok', false, 'error', v_err); end if;
-  -- las altas de una misma persona van de una en una, para que el límite no se rebase con llamadas simultáneas
-  perform pg_advisory_xact_lock(hashtextextended('tequeria:alta:' || i.auth_user_id::text, 0));
-  if (select count(*) from public.cuentas where creada_por = i.auth_user_id) >= 3 then
-    return json_build_object('ok', false, 'error', 'limite');
-  end if;
+  -- límite de 3: se comprueba y se suma en una sola sentencia sobre la fila de la persona, así dos altas
+  -- simultáneas chocan aquí y la segunda ve la primera (o falla con 40001 en REPEATABLE READ)
+  insert into public.cuentas_por_persona as x (auth_user_id, creadas) values (i.auth_user_id, 1)
+  on conflict (auth_user_id) do update set creadas = x.creadas + 1 where x.creadas < 3
+  returning creadas into v_n;
+  if v_n is null then return json_build_object('ok', false, 'error', 'limite'); end if;
   insert into public.cuentas (nombre, estado, activada_en, creada, creada_por)
   values (v_nombre, 'activa', public._ahora(), public._ahora(), i.auth_user_id) returning id into v_cuenta;
   insert into public.membresias (cuenta_id, auth_user_id, rol, creada, creada_por)
@@ -2919,7 +2951,8 @@ begin
   foreach t in array array['config','carnes','bebidas','usuarios','mesas','tickets','cortes','gastos',
                            'cocina_sesion','sesiones','intentos','bitacora','cobros','cocina_hechos',
                            'cuentas','sucursales','membresias','invitaciones','dispositivos','codigos_vinculacion',
-                           'folios','intentos_operador','intentos_dispositivo','sesiones_actividad'] loop
+                           'folios','intentos_operador','intentos_dispositivo','sesiones_actividad',
+                           'cuentas_por_persona'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists rw_all on public.%I', t);
     execute format('drop policy if exists usuarios_sel on public.%I', t);
@@ -2963,7 +2996,7 @@ begin
              '_marcar_interaccion','_bloquear_equipo','_bloquear_operador','_bloquear_contador',
              -- paso 4: dueños y dispositivos
              '_catalogo_inicial','_precios_iniciales','_hash_secreto','_normalizar_codigo','_codigo_aleatorio',
-             '_token_aleatorio','_correo_ok','_identidad','_dueno','_vinculacion','_log_cuenta','_revisar_alta',
+             '_token_aleatorio','_correo_ok','_identidad','_dueno','_vinculacion','_log_cuenta','_revisar_alta','_auth_vigente',
              '_preparar_sucursal','_crear_admin','crear_invitacion_inicial',
              'vincular_dispositivo','crear_cuenta','aceptar_invitacion','mis_cuentas','crear_sucursal',
              'crear_administrador','invitar_miembro','cancelar_invitacion','quitar_miembro','listar_miembros',

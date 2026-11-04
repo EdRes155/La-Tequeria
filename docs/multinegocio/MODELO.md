@@ -124,13 +124,19 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
   el PIN ya se haya cambiado. `p_tipo` es obligatorio y dice qué es la llamada (§3.2 y §5):
   `interaccion`, `lectura`, `automatica`, `latido`, `sesion`, `desbloqueo` o `salida`.
 - **Implementado (paso 4):**
-  - `_identidad()` lee `auth.users` y no el JWT, que puede ser de antes de verificar el correo o de
-    convertir la identidad. `_dispositivo()` exige además que la identidad del equipo siga siendo
-    anónima: si se convierte en una con correo, deja de servir como equipo y tampoco entra como persona.
-  - `_dueno(p_cuenta, p_roles, p_tipo)`: una **escritura** toma la fila de la cuenta antes que cualquier
-    otra (orden fijo: cuenta → lo demás) y vuelve a leer la membresía en otra sentencia. Si otro dueño
-    la quitó mientras esperaba, se rechaza: lo que hace un dueño al que acaban de quitar no se confirma
-    después de su baja. Cuenta ajena e inexistente dan la misma respuesta (`CUENTA`); un rol
+  - **Identidad vigente en Supabase Auth** (`_auth_vigente`): los tres validadores que leen
+    `auth.users` (`_dispositivo`, `_vinculacion` e `_identidad`) exigen que la identidad exista, sea
+    anónima (equipo) o no (persona) según el caso, y no esté suspendida (`banned_until` futuro) ni
+    borrada (`deleted_at`). Se revisa en cada llamada y no en el JWT, que sigue siendo válido hasta que
+    vence y puede ser de antes de verificar el correo, de convertir la identidad, de suspenderla o de
+    borrarla. Un equipo cuya identidad se convierte en una con correo deja de servir como equipo y
+    tampoco entra como persona.
+  - `_dueno(p_cuenta, p_roles, p_tipo)`: una **escritura** escribe la fila de la cuenta
+    (`cuentas.revision`) antes que cualquier otra (orden fijo: cuenta → lo demás) y vuelve a leer la
+    membresía en otra sentencia. Si otro dueño la quitó mientras esperaba, se rechaza: lo que hace un
+    dueño al que acaban de quitar no se confirma después de su baja. Escribir, y no solo bloquear, es
+    lo que hace que dos escrituras de la misma cuenta choquen también en REPEATABLE READ y SERIALIZABLE
+    (§3.3, «Límites»). Cuenta ajena e inexistente dan la misma respuesta (`CUENTA`); un rol
     insuficiente, `PERMISO`.
   - `_vinculacion(p_codigo)` cuenta los fallos (§4) y los **devuelve** en lugar de lanzarlos, para que
     el conteo se confirme.
@@ -151,9 +157,9 @@ exigir en ese momento y nada menos. Todos son internos (sin permiso para `anon` 
   COMMITTED la segunda transacción espera y vuelve a leer; en REPEATABLE READ y SERIALIZABLE falla por
   actualización concurrente (código `40001`). Una función no puede reintentarse a sí misma (su
   fotografía de los datos no cambia), así que reintenta **quien la llama** (la app, paso 6); PostgREST
-  usa READ COMMITTED. Además, las escrituras de dueños toman la fila de la cuenta al empezar (`_dueno`),
-  así que se ordenan entre sí, y `quitar_miembro` responde `ultimo_propietario` antes de llegar al
-  invariante (que sigue como respaldo).
+  usa READ COMMITTED. Además, las escrituras de dueños escriben la fila de la cuenta al empezar
+  (`_dueno`), así que se ordenan entre sí, y `quitar_miembro` responde `ultimo_propietario` antes de
+  llegar al invariante (que sigue como respaldo).
 - **Invitación inicial:** la del propietario de una cuenta pendiente la crea el proveedor desde el
   servidor (SQL Editor o un script de alta), nunca la app:
   `select public.crear_invitacion_inicial('<id de la cuenta>', '<correo>');` (implementado; sin permiso
@@ -209,8 +215,8 @@ errores de datos vuelven como `{ok: false, error}`; los de identidad o permiso s
 
 | Función | Qué hace | Límites y respuestas propias |
 |---|---|---|
-| `crear_cuenta(nombre, sucursal, zona, admin_nombre, admin_pin)` | La cuenta nace `activa` con quien la crea como propietario, en la misma transacción; su primera sucursal con el catálogo inicial y el primer administrador del personal | 3 cuentas creadas por persona (sus altas van de una en una); `nombre`, `zona`, `admin_nombre`, `formato`, `debil`, `limite` |
-| `aceptar_invitacion(clave)` | Crea la membresía; la primera de propietario activa una cuenta pendiente. Si ya es miembro, puede subir de encargado a propietario, nunca bajar | `INVITACION`, igual para inexistente, vencida, usada, de otro correo, cuenta suspendida o de encargado en una cuenta pendiente |
+| `crear_cuenta(nombre, sucursal, zona, admin_nombre, admin_pin)` | La cuenta nace `activa` con quien la crea como propietario, en la misma transacción; su primera sucursal con el catálogo inicial y el primer administrador del personal | 3 cuentas creadas por persona (`cuentas_por_persona`); `nombre`, `zona`, `admin_nombre`, `formato`, `debil`, `limite` |
+| `aceptar_invitacion(clave)` | Crea la membresía; la primera de propietario activa una cuenta pendiente. Salvaguarda: si la persona ya fuera miembro, su rol puede subir pero nunca bajar (la API no llega a ese caso; ver «Cambiar el rol») | `INVITACION`, igual para inexistente, vencida, usada, de otro correo, cuenta suspendida o de encargado en una cuenta pendiente |
 | `mis_cuentas()` | Cuentas de la persona, con su rol y sus sucursales | — |
 | `crear_sucursal(cuenta, nombre, zona, admin_nombre, admin_pin)` | Sucursal con el catálogo inicial y su primer administrador | 20 por cuenta |
 | `crear_administrador(cuenta, sucursal, nombre, pin)` | Rescate: administrador del personal si nadie puede entrar como tal | `formato`, `debil` |
@@ -225,6 +231,20 @@ errores de datos vuelven como `{ok: false, error}`; los de identidad o permiso s
 
 El correo de la invitación lo envía la app o un servicio aparte (se decide con el cliente, paso 6): el
 servidor solo devuelve el token para armar el enlace.
+
+- **Cambiar el rol de un miembro:** no hay una función propia. `invitar_miembro` responde `ya_miembro`
+  a quien ya está en la cuenta, así que el cambio se hace quitando al miembro (`quitar_miembro`) e
+  invitándolo de nuevo con el rol nuevo (`invitar_miembro` y `aceptar_invitacion`). Para bajar a un
+  propietario a encargado debe quedar otro propietario. La regla de `aceptar_invitacion` para quien ya
+  es miembro (sube, nunca baja) es una salvaguarda para invitaciones creadas fuera de la API; su prueba
+  las inserta con SQL y no representa un flujo de la app.
+- **Límites bajo concurrencia:** se comprueban con lo último confirmado en cualquier nivel de
+  aislamiento. Sucursales por cuenta, invitaciones vigentes por cuenta y códigos vigentes por sucursal
+  pasan por `_dueno` (escritura), que escribe la fila de la cuenta; las cuentas por persona, por la fila
+  de `cuentas_por_persona`, que se comprueba y se suma en la misma sentencia. Con dos llamadas a la vez,
+  en READ COMMITTED la segunda espera y responde `limite`; en REPEATABLE READ y SERIALIZABLE falla con
+  `40001` y, al reintentarla en una transacción nueva, responde `limite`. Lo prueba
+  `tests/sql/duenos.test.js` para los cuatro límites en los tres niveles.
 
 ## 4. Identidad del dispositivo
 
@@ -247,6 +267,9 @@ servidor solo devuelve el token para armar el enlace.
     los del PIN. Mientras dura el bloqueo, ni el código correcto entra;
   - una identidad que ya es equipo responde `VINCULADO`; una revocada, `REVOCADO`: la app inicia otra
     sesión anónima y se vincula con otro código;
+  - una identidad suspendida o borrada en Supabase Auth no se vincula (`IDENTIDAD`, sin gastar el
+    código) y, si ya era un equipo, pierde el acceso en la siguiente llamada (`DISPOSITIVO`); al
+    terminar una suspensión vuelve a servir;
   - revocar termina las sesiones de operador de ese equipo (`motivo_fin = 'equipo_revocado'`) y suelta
     la cocina si la tenía.
 - **Revocar:**
@@ -359,7 +382,8 @@ Reglas de aplicación (del plan):
     para inserción, uno para actualización y uno para borrado (comprobado el 3 de noviembre de 2026).
 - **Políticas sobre `realtime.messages`:**
   - lectura (escuchar): solo si `realtime.topic()` es el canal de la sucursal de un dispositivo sin
-    revocar con `auth_user_id = auth.uid()`;
+    revocar con `auth_user_id = auth.uid()` y con la identidad vigente (`_auth_vigente`: anónima, sin
+    suspender ni borrar), igual que `_dispositivo`;
   - escritura (publicar): **sin política para clientes**, así que ningún dispositivo puede publicar.
 - **Revocación con la conexión abierta:** se comprueba en el piloto y se mide el tiempo máximo en que
   el equipo aún recibe avisos (sin datos), con las mitigaciones del §4.
@@ -397,9 +421,11 @@ Reglas de aplicación (del plan):
 4. **Dispositivos y dueños** (hecho): validadores `_vinculacion`, `_identidad` y `_dueno`; alta de
    cuentas con su primera sucursal, catálogo inicial único y primer administrador; invitaciones (también
    la inicial del proveedor), membresías y bajas sin dejar la cuenta sin propietario; códigos de
-   vinculación, vinculación, panel de equipos y revocación; bitácora por cuenta (§3.3 y §4). Pruebas en
-   la matriz y en `tests/sql/duenos.test.js` (flujos, límites y carreras). Falta probarlo contra Supabase
-   Auth real (inicio anónimo, correo verificado) en un proyecto de staging antes del piloto.
+   vinculación, vinculación, panel de equipos y revocación; identidades suspendidas o borradas en
+   Supabase Auth rechazadas en cada llamada; límites que se respetan en cualquier nivel de aislamiento;
+   bitácora por cuenta (§3.3 y §4). Pruebas en la matriz y en `tests/sql/duenos.test.js` (flujos,
+   límites y carreras). Falta probarlo contra Supabase Auth real (inicio anónimo, correo verificado,
+   suspensión) en un proyecto de staging antes del piloto.
 5. **Tiempo real privado y claves del navegador por sucursal.**
 6. **Cliente:** panel de dueños, vinculación, pantalla de desbloqueo, validación del PIN de 6 a 8
    dígitos en la interfaz (también en el modo local) y borradores por autor.

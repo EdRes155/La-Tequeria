@@ -52,14 +52,75 @@ Para lo que necesita Supabase completo (Auth para dueños y dispositivos, Realti
 un proyecto de staging o la pila local de Supabase (`supabase start`, requiere Docker). Se decide al
 llegar a esos pasos.
 
-## Lo siguiente
+## Lo que sigue, hasta cerrar el plan
 
-1. **Decisiones para el ensayo de la migración** ([MIGRACION.md §8](MIGRACION.md#8-decisiones-pendientes-para-el-ensayo)):
-   - cómo obtener la copia de producción;
-   - la ventana del cambio;
-   - el correo del dueño para la invitación inicial.
-2. **Núcleo, paso 5** ([MODELO.md §7 y §8](MODELO.md#7-tiempo-real)): canal privado de tiempo real por
-   sucursal, publicado solo por el servidor, y claves del navegador por sucursal; medir el tiempo
-   máximo en que un equipo revocado aún recibe avisos.
-3. **Staging con Supabase Auth real** para probar el inicio anónimo y el correo verificado de los pasos
-   4 y 5 antes del piloto.
+En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita autorización expresa.
+
+**A. Núcleo, en desarrollo**
+
+1. **Paso 5: tiempo real privado y navegador** ([MODELO.md §7 y §8](MODELO.md#7-tiempo-real)):
+   - canal privado `sucursal:<id>` que publica solo el servidor (disparadores por sentencia con tablas
+     de transición), políticas sobre `realtime.messages` (escuchar: equipo vigente de esa sucursal, con
+     `_auth_vigente`; publicar: nadie) y retiro del canal público `tequeria`;
+   - claves del navegador por sucursal; al revocar o desvincular, borrar las claves, cancelar
+     suscripciones y descartar respuestas tardías.
+2. **Configuración del piloto** ([PLAN §2](../../PLAN-MULTINEGOCIO.md), «Para el piloto»): número de
+   mesas por sucursal (hoy no hay función para cambiarlo; el catálogo inicial crea 8) y revisar que
+   nombre, zona horaria, folio, menú y cocina se editen por sucursal, con `dominio.js`, el SQL y el
+   modo local alineados.
+3. **Paso 6: cliente:**
+   - entrada de dueños (correo verificado o Google) y panel: cuentas, sucursales, miembros,
+     invitaciones (con su envío por correo), códigos, equipos y revocación; reintento de `40001` en
+     una transacción nueva;
+   - pantalla de vinculación (sesión anónima y código) y recuperación (`VINCULADO`, `REVOCADO`,
+     `DISPOSITIVO`);
+   - desbloqueo por inactividad, `CAMBIAR_PIN` y PIN de 6 a 8 dígitos en la interfaz y el modo local;
+   - borradores por sucursal y autor; recorridos en navegador del flujo completo.
+
+**B. Staging con Supabase real**
+
+4. **Proyecto de staging:** el esquema, inicio anónimo (con CAPTCHA o límite), correo con
+   confirmación, expiración del JWT y la app en una vista previa.
+5. **Pruebas contra Supabase real:** vinculación, dueños, suspensión y borrado de identidades, tiempo
+   real privado, y medir el tiempo máximo en que un equipo revocado aún recibe avisos (cierra el último
+   caso pendiente de la matriz).
+6. **Pruebas de capacidad** (PLAN §5): equipos a la vez, llamadas, conexiones, CPU, mensajes de tiempo
+   real, almacenamiento y exportaciones; de ahí, los costos.
+7. **Validar La Tequería y «Taquería Piloto B»** con datos sintéticos: venta, cobro, corte, inventario y
+   varias pantallas de cocina sin interferirse, contra el «Criterio para cerrar el piloto».
+
+**C. Migración de La Tequería** ([MIGRACION.md](MIGRACION.md))
+
+8. **Decisiones** ([§8](MIGRACION.md#8-decisiones-pendientes-para-el-ensayo)): cómo obtener la copia de
+   producción, la ventana del cambio y quién avisa al personal, y el correo del dueño.
+9. **Copia recuperable:** restaurarla en una instancia aparte y comprobar que se lee.
+10. **Ensayo completo sobre la copia:** huellas antes y después, prueba de humo, paquete de
+    reintegración y recuperación.
+11. **Cambio en producción** (§5): configurar Supabase Auth, aplicar, comparar huellas, invitación
+    inicial y activación, publicar la app nueva, vincular equipos, PIN nuevos y prueba de humo.
+12. **Observación y limpieza final** (§7): borrar el respaldo antiguo y `app_state`, con registro.
+
+**D. Piloto operativo**
+
+13. **Elegir la segunda taquería real:** propietario o encargado disponible, al menos dos equipos y un
+    menú que quepa en la plantilla.
+14. **Alta y preparación:** `crear_cuenta`, equipos y personal; sus flujos primero con datos de prueba.
+15. **Operar el piloto** con registro de incidencias, y verificar los criterios de cierre con las dos
+    taquerías reales.
+
+**E. Operación comercial** (PLAN §7 y «Antes de cobrar»)
+
+16. **Planes y aspectos legales:** Vercel Pro, Supabase Pro (respaldos), aviso de privacidad y términos
+    (la app guarda domicilios).
+17. **Suscripción:** Stripe o Mercado Pago con una parte de servidor, avisos verificados que no se
+    aplican dos veces, estados de suscripción (con el estado `suspendida` de la cuenta) y qué pasa si
+    falla un pago, sin cortar una comanda o un cobro a la mitad.
+18. **Respaldos por cliente:** restaurar en una instancia aparte y reintegrar solo sus datos, ensayado.
+19. **Monitoreo y cuotas por cliente**, con los costos medidos.
+
+**F. Después del piloto**
+
+20. **Personalización** según lo que pidan los clientes (PLAN §2, «Después del piloto»): marca, datos
+    del ticket, nombres de mesa, tipos de pedido, folio con reinicio y prefijo, menú genérico, tickets,
+    cobros, reglas, cocina, corte, domicilio, ajustes que solo endurecen la seguridad y permisos por
+    rol.
