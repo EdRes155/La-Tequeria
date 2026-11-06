@@ -101,16 +101,18 @@ medición: el servidor cierra el canal al vencer el JWT y un cambio que sale en 
 Un cliente modificado que ignora `DISPOSITIVO` y sigue escuchando. Cuatro equipos revocados a la vez, cada
 uno en un momento distinto de la renovación de su JWT (supabase-js renueva cuando le faltan menos de 120 s):
 
-| Equipo | Edad del JWT al revocar | Último aviso / sin avisos desde | Qué lo cortó |
+| Equipo | Edad del JWT al revocar | Último aviso – sin avisos desde | Qué lo cortó |
 |---|---|---|---|
-| `justo-antes` | 172 s · 174 s | 6–11 s · 6–11 s | Su renovación, a los 9 s · 6 s |
-| `a-medias` | 84 s · 89 s | 91–97 s · 90–96 s | Su renovación, a los 97 s · 92 s |
-| `recien` (peor caso de un cliente que renueva) | 13 s · 13 s | 166–171 s · 165–170 s | Su renovación, a los 167 s · 167 s |
-| `token-fijo` (nunca manda otro JWT) | — · 12 s | — · 288–293 s | El servidor, al vencer el JWT (288 s) |
+| `justo-antes` | 172 · 174 · 173 s | 6–11 · 6–11 · 5–11 s | Su renovación, a los 9 · 6 · 7 s |
+| `a-medias` | 84 · 89 · 88 s | 91–97 · 90–96 · 89–94 s | Su renovación, a los 97 · 92 · 93 s |
+| `recien` (peor caso de un cliente que renueva) | 13 · 13 · 13 s | 166–171 · 165–170 · 163–168 s | Su renovación, a los 167 · 167 · 168 s |
+| `token-fijo` (nunca manda otro JWT) | — · 12 · 12 s | — · 288–293 · 285–291 s | El servidor, al vencer el JWT (288 s) |
 
-Dos corridas (separadas por «·»), con el control recibiendo los 99 y 100 cambios. En las dos, el canal de
-cada equipo revocado se cerró (`CLOSED`) y no volvió a recibir nada. La primera corrida tenía un
-`sin-renovar` en lugar de `token-fijo` y no medía lo que debía (ver «Hallazgos»).
+Tres corridas (separadas por «·»); el control recibió los 99, 100 y 100 cambios. En todas, el canal de
+cada equipo revocado se cerró (`CLOSED`) y no volvió a recibir nada. La primera tenía un `sin-renovar` en
+lugar de `token-fijo` y no medía lo que debía (ver «Hallazgos»); la segunda marcó como fallo un aviso de un cambio enviado
+justo al vencer el JWT (menos de un segundo), y de ahí la tolerancia de 5 s; la tercera pasó todas las
+comprobaciones.
 
 **Conclusión:** Realtime vuelve a evaluar la política cuando el cliente manda un JWT nuevo, y cierra el
 canal cuando vence el JWT si el cliente nunca manda otro. El peor caso es la vigencia del JWT: **300 s**
@@ -124,13 +126,14 @@ aviso (o, sin cambios en la sucursal, con su consulta periódica cada 30 s) llam
 
 | Equipo | Edad del JWT al revocar | Sin datos en pantalla a los |
 |---|---|---|
-| `justo-antes`, sin cambios en la sucursal | 148 s | 29.1 s |
-| `a-medias`, sin cambios | 66 s | 6.2 s |
-| `recien`, sin cambios | 6 s | 32.0 s |
-| `con-cambios`, un cambio cada 5 s | 47 s | 4.8 s |
+| `justo-antes`, sin cambios en la sucursal | 148 · 147 s | 29.1 · 30.2 s |
+| `a-medias`, sin cambios | 66 · 66 s | 6.2 · 6.8 s |
+| `recien`, sin cambios | 6 · 7 s | 32.0 · 31.5 s |
+| `con-cambios`, un cambio cada 5 s | 47 · 47 s | 4.8 · 5.1 s |
 
-El control siguió en Mesas y recibió los 10 cambios; ningún equipo revocado recibió avisos después de
-vaciar la pantalla ni conservó claves. Cota comprobada: 45 s sin cambios, 10 s con cambios.
+Dos corridas, las dos con todas las comprobaciones bien: el control siguió en Mesas y recibió los 10
+cambios; ningún equipo revocado recibió avisos después de vaciar la pantalla ni conservó claves. Cota
+comprobada: 45 s sin cambios, 10 s con cambios.
 
 **Limitación conocida:** con la pestaña oculta la app no hace la consulta periódica; si no hay cambios,
 la pantalla se vacía al volver a mostrarse (la primera llamada responde `DISPOSITIVO`). La pantalla de
