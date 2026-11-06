@@ -97,10 +97,12 @@ escribe nada: las funciones lo rechazan en la siguiente llamada.
 
 **Cómo se mide.** Un cambio cada 5 s en la sucursal. Un equipo de **control**, vigente, escucha el mismo
 canal: si un cambio no le llega, la medición no vale (así una interrupción general no se confunde con un
-corte). Cada equipo revocado debe haber recibido todo antes de revocarlo, no volver a recibir nada después
-de su último aviso, y ese último aviso tiene que llegar dentro del **límite elegido, la vigencia del JWT
-(300 s)**, y del vencimiento del JWT que tenía al revocarlo, con 5 s de tolerancia (la resolución de la
-medición: el servidor cierra el canal al vencer el JWT y un cambio que sale en ese instante todavía llega).
+corte). Cada equipo revocado debe haber recibido todo antes de revocarlo y no volver a recibir nada después
+de su último aviso. Ese último aviso se toma con la **hora en que llegó** (no la de envío del cambio) y
+tiene que caer dentro del **máximo acordado de 300 s**, sin tolerancia, y antes de que venza el JWT que
+tenía al revocarlo (más 2 s para un aviso que ya iba en camino cuando el servidor cerró el canal). Si el
+JWT de staging pasa de 300 s, `corte.mjs` falla antes de empezar. (Hasta la cuarta corrida se usaba la hora
+de envío con 5 s de tolerancia; desde la quinta, la de llegada.)
 
 ### Un cliente que no suelta el canal (`corte.mjs`)
 
@@ -120,6 +122,10 @@ cada equipo revocado se cerró (`CLOSED`) y no volvió a recibir nada. La primer
 lugar de `token-fijo` y no medía lo que debía (ver «Hallazgos»); la segunda marcó como fallo un aviso de un cambio enviado
 justo al vencer el JWT (menos de un segundo), y de ahí la tolerancia de 5 s; la tercera pasó todas las
 comprobaciones, y la cuarta también.
+
+**Quinta corrida, con la hora de llegada** (6 de noviembre, 20:01): último aviso recibido a los 6.0 s
+(`justo-antes`), 92.0 s (`a-medias`), 162.3 s (`recien`) y 286.4 s (`token-fijo`, medio segundo antes de que
+venciera su JWT, a los 286.9 s); el control recibió todos los cambios. Todas las comprobaciones bien.
 
 **Conclusión:** Realtime vuelve a evaluar la política cuando el cliente manda un JWT nuevo, y cierra el
 canal cuando vence el JWT si el cliente nunca manda otro. El peor caso es la vigencia del JWT: **300 s**
