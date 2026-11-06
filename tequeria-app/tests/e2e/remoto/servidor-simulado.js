@@ -25,8 +25,12 @@ export const NO_AUTORIZADO = errorDe("DISPOSITIVO", "Este equipo no está autori
 
 // Token con forma de JWT (supabase-js y Realtime lo leen) para una identidad anónima simulada
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
-const tokenDe = (uid) => `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: uid, role: "authenticated", is_anonymous: true,
-  exp: Math.floor(Date.now() / 1000) + 3600 })}.firma`;
+const tokenDe = (uid, correo = null) => `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: uid, role: "authenticated",
+  is_anonymous: !correo, ...(correo ? { email: correo } : {}), exp: Math.floor(Date.now() / 1000) + 3600 })}.firma`;
+const sesionDe = (uid, correo = null) => ({ access_token: tokenDe(uid, correo), token_type: "bearer", expires_in: 3600,
+  expires_at: Math.floor(Date.now() / 1000) + 3600, refresh_token: "renovar-" + uid,
+  user: { id: uid, aud: "authenticated", role: "authenticated", is_anonymous: !correo, ...(correo ? { email: correo } : {}) } });
+const errorAuth = (status, codigo, msg) => ({ status, contentType: "application/json", body: JSON.stringify({ code: status, error_code: codigo, msg }) });
 
 // Instala el servidor en la página. respuestas: { función: (args, quien) => datos | { status, body } }, donde
 // quien es el id de la identidad anónima que llama (null sin sesión). Simula también Supabase Auth: cada
@@ -42,7 +46,8 @@ const TURNSTILE = `(() => {
   };
 })();`;
 
-export async function servidorSimulado(page, respuestas, { captcha = () => true } = {}) {
+// personas: { correo: { clave, confirmado } } que pueden entrar con correo y contraseña (panel de dueños)
+export async function servidorSimulado(page, respuestas, { captcha = () => true, personas = {} } = {}) {
   const llamadas = [];
   const identidades = [];
   const captchas = [];   // token de CAPTCHA de cada inicio anónimo (null si no llegó)
@@ -51,15 +56,38 @@ export async function servidorSimulado(page, respuestas, { captcha = () => true 
     route.fulfill({ status: 200, contentType: "application/javascript", body: TURNSTILE }));
   await page.route(`${SUPABASE_SIMULADO}/**`, async (route) => {
     const url = new URL(route.request().url());
+    const cuerpo = (() => { try { return route.request().postDataJSON() || {}; } catch { return {}; } })();
+    const tokenCaptcha = cuerpo.gotrue_meta_security?.captcha_token ?? null;
+    const sinCaptcha = () => route.fulfill(errorAuth(400, "captcha_failed", "captcha protection: request disallowed"));
+    // persona que entra con correo y contraseña (panel de dueños)
+    if (url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "password") {
+      captchas.push(tokenCaptcha);
+      llamadas.push({ fn: "auth:password", args: { correo: cuerpo.email, captcha: tokenCaptcha }, quien: null, t: Date.now() });
+      if (!tokenCaptcha || !captcha(tokenCaptcha)) return sinCaptcha();
+      const p = personas[cuerpo.email];
+      if (!p || p.clave !== cuerpo.password) return route.fulfill(errorAuth(400, "invalid_credentials", "Invalid login credentials"));
+      if (!p.confirmado) return route.fulfill(errorAuth(400, "email_not_confirmed", "Email not confirmed"));
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(sesionDe("p-" + cuerpo.email, cuerpo.email)) });
+    }
+    if (url.pathname === "/auth/v1/recover") {
+      llamadas.push({ fn: "auth:recover", args: { correo: cuerpo.email, captcha: tokenCaptcha }, quien: null, t: Date.now() });
+      return tokenCaptcha && captcha(tokenCaptcha) ? route.fulfill({ status: 200, contentType: "application/json", body: "{}" }) : sinCaptcha();
+    }
+    if (url.pathname === "/auth/v1/signup" && cuerpo.email) {
+      // alta de una persona: queda sin confirmar hasta abrir el enlace del correo
+      captchas.push(tokenCaptcha);
+      llamadas.push({ fn: "auth:signup-correo", args: { correo: cuerpo.email, captcha: tokenCaptcha }, quien: null, t: Date.now() });
+      if (!tokenCaptcha || !captcha(tokenCaptcha)) return sinCaptcha();
+      personas[cuerpo.email] = { clave: cuerpo.password, confirmado: false };
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "p-" + cuerpo.email, email: cuerpo.email,
+        aud: "authenticated", role: "authenticated", identities: [{ id: "i1" }], confirmation_sent_at: new Date().toISOString() }) });
+    }
     if (url.pathname === "/auth/v1/signup") {
       // como Supabase con CAPTCHA: sin token válido no hay identidad
-      const token = route.request().postDataJSON()?.gotrue_meta_security?.captcha_token ?? null;
+      const token = tokenCaptcha;
       captchas.push(token);
       llamadas.push({ fn: "auth:signup", args: { captcha: token }, quien: null, t: Date.now() });
-      if (!token || !captcha(token)) {
-        return route.fulfill({ status: 400, contentType: "application/json",
-          body: JSON.stringify({ code: "captcha_failed", error_code: "captcha_failed", msg: "captcha protection: request disallowed" }) });
-      }
+      if (!token || !captcha(token)) return sinCaptcha();
       const uid = `anonima-${identidades.length + 1}`;
       identidades.push(uid);
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
@@ -74,14 +102,15 @@ export async function servidorSimulado(page, respuestas, { captcha = () => true 
     if (!fn) return route.fulfill({ status: 404, body: "{}" });
     const args = route.request().postDataJSON() || {};
     const auth = route.request().headers()["authorization"] || "";
-    const quien = (() => { try { return JSON.parse(Buffer.from(auth.split(".")[1], "base64url").toString()).sub || null; } catch { return null; } })();
+    const claims = (() => { try { return JSON.parse(Buffer.from(auth.split(".")[1], "base64url").toString()); } catch { return {}; } })();
+    const quien = claims.sub || null;
     llamadas.push({ fn, args, quien, t: Date.now() });
     // Como Supabase real: sin sesión, la llamada va con la llave pública y anon no ejecuta ninguna función
     if (!quien) {
       return route.fulfill({ status: 401, contentType: "application/json",
         body: JSON.stringify({ code: "42501", message: `permission denied for function ${fn}`, hint: null, details: null }) });
     }
-    const r = tabla[fn] ? await tabla[fn](args, quien) : { status: 404, body: { code: "PGRST202", message: "no existe" } };
+    const r = tabla[fn] ? await tabla[fn](args, quien, claims) : { status: 404, body: { code: "PGRST202", message: "no existe" } };
     const esRespuesta = r && typeof r === "object" && "status" in r && "body" in r;
     await route.fulfill({
       status: esRespuesta ? r.status : 200, contentType: "application/json",

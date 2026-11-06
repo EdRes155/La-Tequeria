@@ -232,6 +232,23 @@ errores de datos vuelven como `{ok: false, error}`; los de identidad o permiso s
 El correo de la invitación lo envía la app o un servicio aparte (se decide con el cliente, paso 6): el
 servidor solo devuelve el token para armar el enlace.
 
+- **Implementado en la app (paso 6b):** el panel de dueños vive en `/duenos` (`src/PanelDuenos.jsx`,
+  `src/duenos.js`), cargado aparte de la app de comandas.
+  - La persona entra con correo y contraseña (10 o más caracteres; alta con confirmación del correo y
+    recuperación de la contraseña), con el CAPTCHA, en un **cliente de Supabase aparte** con su propia
+    clave (`tequeria-identidad-dueno`): entrar o salir del panel en un equipo vinculado no toca la
+    identidad del equipo.
+  - Sin cuentas, registra su taquería (`crear_cuenta`). Con cuentas: sus sucursales con «Vincular un
+    equipo» (código legible ABCD-2345 con su vencimiento; opción de monitor de cocina dedicado), los
+    equipos con su último uso y «Dar de baja», el administrador de rescate, nueva sucursal y personas
+    con acceso (invitar, cancelar, quitar o salir). Un encargado vincula y da de baja equipos, pero no
+    administra personas ni sucursales.
+  - La invitación es un enlace (`/invitacion?clave=…`) que se copia y se envía por WhatsApp o correo:
+    al abrirlo, la persona entra con el correo invitado y la acepta. Enviarlo por correo desde la app
+    queda pendiente de un servidor de correo propio (SMTP).
+  - Con `40001` el panel repite la llamada (hasta 3 veces) y el servidor vuelve a comprobar los límites.
+  - Lo prueban `tests/e2e/remoto/duenos.spec.js` y, con Supabase real, `scripts/staging/duenos.mjs`.
+
 - **Cambiar el rol de un miembro:** no hay una función propia. `invitar_miembro` responde `ya_miembro`
   a quien ya está en la cuenta, así que el cambio se hace quitando al miembro (`quitar_miembro`) e
   invitándolo de nuevo con el rol nuevo (`invitar_miembro` y `aceptar_invitacion`). Para bajar a un
@@ -513,8 +530,10 @@ Reglas de aplicación (del plan):
 5. **Tiempo real privado y claves del navegador por sucursal** (hecho): canal `sucursal:<id>` que
    solo publica el servidor, política de escucha con las reglas de `_dispositivo`, y claves del navegador
    por sucursal con limpieza al cambiar de sucursal o al revocar el equipo (§7 y §8).
-6. **Cliente:** vinculación del equipo (hecha, §4); pantalla de desbloqueo, PIN de 6 a 8 dígitos en la
-   interfaz y el modo local, borradores por autor y pestaña oculta (hechos, §5.2 y §8); panel de dueños.
+6. **Cliente** (hecho): vinculación del equipo (§4); pantalla de desbloqueo, PIN de 6 a 8 dígitos en la
+   interfaz y el modo local, borradores por autor y pestaña oculta (§5.2 y §8); panel de dueños (§3.3).
+   Pendiente de decisiones: el servidor de correo (SMTP) para la confirmación, la recuperación y las
+   invitaciones, y la entrada con Google.
 7. **Validación con Supabase real (staging)** (en curso, [STAGING.md](STAGING.md)): proyecto aparte con
    el esquema, inicio anónimo, correo verificado, JWT de 300 s y solo canales privados comprobados en el
    servidor; prueba de humo, recorrido de la app en el navegador y medición del tiempo de corte con un

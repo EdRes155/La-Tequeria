@@ -14,7 +14,7 @@ canal y clave del navegador de esta lista debe quedar ligada a una sucursal o ju
 - **Devuelven lo ya guardado** si se repite el id: `cobrar`, `enviar_comanda`, `reenviar_cocina`. Todas comprueban que sea de la misma sucursal.
 - **PIN de administrador:** `crear_usuario`, `eliminar_usuario`, `hacer_corte`, `no_cobrar`, `restablecer_acceso`, `restablecer_pin`. Todas lo buscan solo en la sucursal de la sesión.
 - **Tiempo real:** el servidor avisa en el canal privado de cada sucursal (`sucursal:<id>`) desde 28 disparadores por sentencia en `bebidas`, `carnes`, `cobros`, `cocina_hechos`, `config`, `cortes`, `gastos`, `mesas`, `tickets`, `usuarios`; solo escucha un equipo vigente de esa sucursal (política sobre `realtime.messages` con `privado.puede_escuchar`) y ningún cliente publica. El navegador escucha `sucursal:<id>`.
-- **Funciones de la API que el navegador no usa:** `aceptar_invitacion`, `cancelar_invitacion`, `crear_administrador`, `crear_cuenta`, `crear_sucursal`, `generar_codigo`, `invitar_miembro`, `listar_dispositivos`, `listar_miembros`, `mis_cuentas`, `quitar_miembro`, `restablecer_acceso`, `revocar_dispositivo` (compatibilidad; decidir si se retiran).
+- **Funciones de la API que el navegador no usa:** — (compatibilidad; decidir si se retiran).
 
 ## Tablas
 
@@ -224,7 +224,7 @@ sucursal del equipo. Las del modo local son su propia base y no dependen de ning
 | `tequeria:<sucursal>:ultimo_usuario` | `ULTIMO_KEY` | `src/App.jsx` | Sí |
 | `tequeria:sucursal` | `SUCURSAL_KEY` | `src/claves.js` | No |
 
-Funciones que llama el navegador (41): `actualizar_bebida`, `actualizar_carne`, `agregar_bebida`, `agregar_carne`, `agregar_extra`, `agregar_gasto`, `ajustar_bebida`, `alternar_oculto`, `anular_cobro`, `archivar_tickets`, `cambiar_pin`, `cobrar`, `crear_usuario`, `desbloquear`, `eliminar_bebida`, `eliminar_carne`, `eliminar_extra`, `eliminar_gasto`, `eliminar_usuario`, `enviar_comanda`, `estado`, `fijar_ajuste`, `fijar_mesas`, `fijar_negocio`, `fijar_precio`, `fijar_precio_extra`, `guardar_borrador_mesa`, `hacer_corte`, `latido_cocina`, `liberar_cocina`, `liberar_mesa`, `login`, `logout`, `marcar_hecho`, `marcar_recibido`, `mover_tickets`, `no_cobrar`, `reenviar_cocina`, `restablecer_pin`, `usuarios_login`, `vincular_dispositivo`.
+Funciones que llama el navegador (54): `aceptar_invitacion`, `actualizar_bebida`, `actualizar_carne`, `agregar_bebida`, `agregar_carne`, `agregar_extra`, `agregar_gasto`, `ajustar_bebida`, `alternar_oculto`, `anular_cobro`, `archivar_tickets`, `cambiar_pin`, `cancelar_invitacion`, `cobrar`, `crear_administrador`, `crear_cuenta`, `crear_sucursal`, `crear_usuario`, `desbloquear`, `eliminar_bebida`, `eliminar_carne`, `eliminar_extra`, `eliminar_gasto`, `eliminar_usuario`, `enviar_comanda`, `estado`, `fijar_ajuste`, `fijar_mesas`, `fijar_negocio`, `fijar_precio`, `fijar_precio_extra`, `generar_codigo`, `guardar_borrador_mesa`, `hacer_corte`, `invitar_miembro`, `latido_cocina`, `liberar_cocina`, `liberar_mesa`, `listar_dispositivos`, `listar_miembros`, `login`, `logout`, `marcar_hecho`, `marcar_recibido`, `mis_cuentas`, `mover_tickets`, `no_cobrar`, `quitar_miembro`, `reenviar_cocina`, `restablecer_acceso`, `restablecer_pin`, `revocar_dispositivo`, `usuarios_login`, `vincular_dispositivo`.
 
 ## Pruebas con PIN de 4 o 5 dígitos
 
@@ -236,6 +236,7 @@ deberán adaptarse cuando se implemente, además de agregar casos de rechazo y t
 | `tests/dominio.test.js` | 8 |
 | `tests/e2e/comandas.spec.js` | 1 |
 | `tests/e2e/remoto/desbloqueo.spec.js` | 1 |
+| `tests/e2e/remoto/duenos.spec.js` | 1 |
 | `tests/e2e/remoto/servidor-simulado.js` | 1 |
 | `tests/localStore.test.js` | 6 |
 | `tests/sql/credenciales.test.js` | 6 |

@@ -179,6 +179,11 @@ Antes de la ventana, en Supabase:
   `realtime.messages` que no sea la de la app: si hay otra, el archivo se detiene para revisarla
   (MODELO.md §7).
 - API: el esquema `privado` no se agrega a los esquemas expuestos.
+- Auth, direcciones de vuelta: `site_url` = `https://la-tequeria.vercel.app/duenos` y permitida
+  `https://la-tequeria.vercel.app/**` (confirmación del correo y recuperación de la contraseña).
+- Auth, servidor de correo (SMTP) propio: sin él, Supabase solo envía a los miembros del equipo del
+  proyecto y unos pocos por hora, así que los dueños no recibirían la confirmación ni la recuperación.
+  El proveedor y sus datos los decide y los escribe el dueño en Supabase (Authentication → SMTP).
 - **Comprobar que se aplica, no solo lo que dice la configuración** (en staging, «solo canales
   privados» no se aplicaba hasta desactivarlo y volver a activarlo; [STAGING.md](STAGING.md)): un canal
   público se rechaza con `PrivateOnly`, con y sin sesión; un inicio anónimo sin token de CAPTCHA se

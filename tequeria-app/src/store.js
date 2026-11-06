@@ -263,6 +263,8 @@ function crearRemoto() {
       crearUsuario: (adminPin, nombre, pin, rol) => conPin("crear_usuario", { p_admin_pin: adminPin, p_nombre: nombre, p_pin: pin, p_rol: rol }),
       eliminarUsuario: (adminPin, id) => conPin("eliminar_usuario", { p_admin_pin: adminPin, p_id: id }),
       restablecerPin: (adminPin, id, pin) => conPin("restablecer_pin", { p_admin_pin: adminPin, p_id: id, p_pin_nuevo: pin }),
+      // quita el bloqueo por intentos fallidos de una persona del personal (MODELO.md §6)
+      restablecerAcceso: (adminPin, id) => conPin("restablecer_acceso", { p_admin_pin: adminPin, p_id: id }),
       cobrar: (id, tickets, metodo, recibido, propina, liberarMesa) => conToken("cobrar", {
         p_id: id, p_tickets: tickets, p_metodo: metodo, p_recibido: recibido ?? null, p_propina: propina || 0, p_liberar_mesa: !!liberarMesa,
       }, { reintentos: 1 }),   // idempotente por id

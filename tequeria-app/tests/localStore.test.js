@@ -230,6 +230,15 @@ describe("modo local", () => {
     expect((await api.cambiarPin("739104", "123123")).error).toBe("debil");
     expect((await api.cambiarPin("739104", "739104")).error).toBe("debil");   // el mismo
     expect((await api.cambiarPin("739104", "582039")).ok).toBe(true);
+    // cinco PIN equivocados bloquean a Luis; un administrador le quita el bloqueo (restablecer_acceso)
+    await api.salir();
+    for (let i = 0; i < 5; i++) await api.entrar(luis.id, "000000");
+    expect((await api.entrar(luis.id, "582039")).error).toBe("bloqueado");
+    await api.entrar(usuarios.find((u) => u.nombre === "Ana").id, "864213");
+    expect((await falla(api.acciones.restablecerAcceso("000000", luis.id))).codigo).toBe("pin");
+    expect(await api.acciones.restablecerAcceso("864213", luis.id)).toEqual({ ok: true, estabaBloqueado: true });
+    await api.salir();
+    expect((await api.entrar(luis.id, "582039")).ok).toBe(true);
     await api.acciones.enviar(t("mesero-1"));
     expect((await falla(api.acciones.fijarPrecio("taco-pastor", 1))).codigo).toBe("PERMISO");
     const est = await api.cargar();

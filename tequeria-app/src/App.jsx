@@ -424,6 +424,7 @@ export default function App() {
       crearUsuario: (adminPin, nombre, pin, rol) => ejecutar(() => a.crearUsuario(adminPin, nombre, pin, rol), { partes: ["usuarios"] }),
       eliminarUsuario: (adminPin, id) => ejecutar(() => a.eliminarUsuario(adminPin, id), { partes: ["usuarios"] }),
       restablecerPin: (adminPin, id, pin) => ejecutar(() => a.restablecerPin(adminPin, id, pin), { partes: ["usuarios"] }),
+      restablecerAcceso: (adminPin, id) => ejecutar(() => a.restablecerAcceso(adminPin, id), { partes: [] }),
       // El cobro maneja sus errores en el diálogo (no se pierde lo capturado)
       async cobrar(id, tickets, metodo, recibido, propina, liberar) {
         try {
@@ -798,6 +799,7 @@ function Vincular({ motivo, onListo }) {
       <button type="button" className="btn btn-ghost btn-block" onClick={onListo} style={{ marginTop: 8 }}>
         <RefreshCw size={16} aria-hidden="true" /> Volver a intentar entrar
       </button>
+      <a className="btn btn-ghost btn-block" href="/duenos" style={{ marginTop: 4 }}>Soy dueño: entrar al panel</a>
     </form>
   );
 }
@@ -3161,6 +3163,13 @@ function AdminMeseros({ data, db, user }) {
     if (r.ok) toast(`PIN de ${u.nombre} restablecido`, "ok");
   };
 
+  const quitarBloqueo = async (u) => {
+    const pin = await pedirPin({ titulo: `Quitar el bloqueo de ${u.nombre}`, mensaje: "Si se bloqueó por PIN equivocados, podrá volver a intentar de inmediato. Escribe tu PIN de administrador para autorizar.", etiqueta: "Tu PIN de administrador" });
+    if (pin === null) return;
+    const r = await db.restablecerAcceso(pin, u.id);
+    if (r.ok) toast(r.r?.estabaBloqueado ? `${u.nombre} ya puede volver a intentar` : `${u.nombre} no estaba bloqueado`, "ok");
+  };
+
   return (
     <div>
       <div className="inv-list">
@@ -3169,6 +3178,7 @@ function AdminMeseros({ data, db, user }) {
             <span className="inv-name">{u.nombre}{u.id === user.id ? " (tú)" : ""}</span>
             <span className={"rol-tag " + u.rol}>{ROLES[u.rol] || u.rol}</span>
             <button type="button" className="btn btn-line btn-sm" onClick={() => restablecer(u)} aria-label={`Restablecer PIN de ${u.nombre}`}><KeyRound size={14} aria-hidden="true" /> PIN</button>
+            {u.id !== user.id && <button type="button" className="btn btn-line btn-sm" onClick={() => quitarBloqueo(u)} aria-label={`Quitar el bloqueo de ${u.nombre}`}>Quitar bloqueo</button>}
             {u.id !== user.id && <button type="button" className="btn btn-danger-ghost btn-sm" onClick={() => quitar(u)} aria-label={`Eliminar a ${u.nombre}`}><Trash2 size={14} aria-hidden="true" /> Quitar</button>}
           </div>
         ))}

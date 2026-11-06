@@ -74,9 +74,10 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
 3. **Paso 6: cliente:**
    - pantalla de vinculación (sesión anónima y código) y recuperación (`VINCULADO`, `REVOCADO`,
      `DISPOSITIVO`) (hecho; recorridos «remoto simulado»);
-   - entrada de dueños (correo verificado o Google) y panel: cuentas, sucursales, miembros,
-     invitaciones (con su envío por correo), códigos, equipos y revocación; reintento de `40001` en
-     una transacción nueva;
+   - entrada de dueños con correo verificado y panel: cuentas, sucursales, miembros, invitaciones
+     (enlace para compartir), códigos, equipos y revocación; reintento de `40001` en una transacción
+     nueva (hecho, paso 6b; `tests/e2e/remoto/duenos.spec.js` y `scripts/staging/duenos.mjs`).
+     Pendiente de decisiones: servidor de correo (SMTP) y entrada con Google;
    - desbloqueo por inactividad, `CAMBIAR_PIN` y PIN de 6 a 8 dígitos en la interfaz y el modo local;
      borradores por sucursal y autor; pestaña oculta sin datos hasta confirmar (hecho, paso 6c;
      `tests/e2e/remoto/desbloqueo.spec.js`).

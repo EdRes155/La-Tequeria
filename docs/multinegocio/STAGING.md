@@ -25,6 +25,8 @@ panel de Supabase con sus datos intactos).
 | Auth: contraseñas | Mínimo 10 caracteres | Compensa que no haya revisión de contraseñas filtradas (ver avisos) |
 | Auth: vigencia del JWT | **300 s** (aprobado para producción) | Es el límite elegido para el tiempo de corte del tiempo real (antes, 600 s) |
 | Auth: límite de inicios anónimos | 100 por hora y por IP **solo en staging**, para repetir las mediciones (cada una usa de 5 a 7) | En producción, 30 (el de Supabase) |
+| Auth: direcciones de vuelta | `site_url` = la vista previa de esta rama en `/duenos`; permitidas: `https://*-edres155s-projects.vercel.app/**`, `http://127.0.0.1:*/**`, `http://localhost:*/**` | Los enlaces de confirmación y de recuperación de los correos de Auth vuelven al panel |
+| Auth: correo (SMTP) | **El de Supabase** (sin SMTP propio): solo envía a los miembros del equipo del proyecto y 2 por hora | Basta para staging (las personas de prueba se crean ya confirmadas); para dueños reales hace falta un SMTP propio |
 | Auth: CAPTCHA | Cloudflare Turnstile con las **llaves de prueba** de Cloudflare (públicas; siempre pasan) | Supabase exige un token en cada inicio anónimo y con correo, y lo comprueba con Cloudflare. Producción usará llaves reales (MIGRACION.md §5) |
 | Realtime: solo canales privados | Activado **y aplicado** (lo comprueba `humo.mjs`) | Ver «Hallazgos» |
 
@@ -52,6 +54,7 @@ node scripts/staging/humo.mjs              # unos 30 s
 node scripts/staging/navegador.mjs         # unos 40 s; usa la última sucursal de humo.mjs
 node scripts/staging/corte.mjs             # unos 9 min
 node scripts/staging/corte-navegador.mjs   # unos 5 min
+node scripts/staging/duenos.mjs            # unos 2 min: panel de dueños
 ```
 
 **`humo.mjs`**, contra el servidor real:
@@ -86,6 +89,13 @@ administrador entra y ve sus mesas, al recargar conserva la identidad y la sesi�
 conectado («En línea, sincronizado») y, al revocar el equipo, vuelve a «Vincular este equipo» sin datos en
 pantalla ni claves guardadas. Al final comprueba que la CSP no bloqueó nada: sin
 `challenges.cloudflare.com` en la CSP, Turnstile no carga y la vinculación no avanza (comprobado).
+
+**`duenos.mjs`**: el panel de dueños, compilado como se publica, con Supabase real y el widget real de
+Turnstile. Una dueña entra con su correo, registra su taquería y genera un código; en otra ventana un equipo
+se vincula con él y entra su administrador; la dueña lo ve y lo da de baja, y el equipo vuelve a «Vincular
+este equipo» sin datos; invita a un encargado, que abre el enlace, entra con su correo, ve la cuenta sin
+poder administrar personas, y el enlace ya no sirve una segunda vez. Al final, sin bloqueos de la CSP.
+Resultado (6 de noviembre): 5 de 5.
 
 **`corte.mjs`** y **`corte-navegador.mjs`**: el tiempo de corte, abajo.
 

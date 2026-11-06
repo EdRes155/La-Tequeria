@@ -1,4 +1,8 @@
 {
+  "rewrites": [
+    { "source": "/duenos", "destination": "/index.html" },
+    { "source": "/invitacion", "destination": "/index.html" }
+  ],
   "headers": [
     {
       "source": "/(.*)",

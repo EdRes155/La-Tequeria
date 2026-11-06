@@ -513,6 +513,15 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       guardar(["usuarios"]);
       return { ok: true };
     },
+    async restablecerAcceso(adminPin, id) {
+      const u = exigir(["admin"]);
+      conPin(await reautenticar(adminPin, u.id));
+      if (!db.usuarios.some((x) => x.id === id)) conPin({ ok: false, error: "no_existe" });
+      const estabaBloqueado = espera("u:" + id) > 0;
+      delete db.intentos["u:" + id];
+      guardar([]);
+      return { ok: true, estabaBloqueado };
+    },
     async restablecerPin(adminPin, id, pin) {
       const u = exigir(["admin"]);
       conPin(await reautenticar(adminPin, u.id));
