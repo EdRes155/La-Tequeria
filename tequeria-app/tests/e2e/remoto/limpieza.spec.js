@@ -3,7 +3,7 @@
 // confirmación, ni la lista de personal de la sucursal anterior. Cada prueba vuelve a entrar con otra persona
 // —en la misma sucursal o, tras vincular el equipo de nuevo, en otra— cuyo estado ya no trae esa cuenta.
 import { test, expect } from "@playwright/test";
-import { servidorSimulado, estadoInicial, errorDe, NO_AUTORIZADO, PIN, SUCURSAL, clavesDeLaApp, conIdentidad } from "./servidor-simulado.js";
+import { servidorSimulado, estadoInicial, errorDe, NO_AUTORIZADO, PIN, SUCURSAL, clavesDeLaApp, conIdentidad, personalSimulado } from "./servidor-simulado.js";
 
 const ANA = { id: "u-ana", nombre: "Ana", rol: "admin" };
 const BETO = { id: "u-beto", nombre: "Beto", rol: "mesero" };
@@ -18,22 +18,8 @@ const CUENTA = {
   extras: [], total: 20, hora: "13:05", mesero: "Ana", estado: "pendiente", cobro: null, hechos: [],
 };
 
-// Sucursal simulada con varias personas: el token del login dice quién es, y cada quien recibe su estado
-function sucursal({ id = SUCURSAL, nombre = "Centro", negocio = "Taquería Simulada", personas, estadoDe }) {
-  return {
-    usuarios_login: () => ({ sucursal: { id, nombre }, negocio, usuarios: personas.map(({ id, nombre }) => ({ id, nombre })), hayAdmin: true }),
-    login: (a) => {
-      const u = personas.find((p) => p.id === a.p_id);
-      return u && a.p_pin === PIN ? { ok: true, token: "tok-" + u.id, debeCambiarPin: false, usuario: u } : { ok: false, error: "pin", restantes: 4 };
-    },
-    estado: (a) => {
-      const u = personas.find((p) => "tok-" + p.id === a.p_token);
-      return u ? estadoDe(u) : errorDe("SESION", "Tu sesión terminó. Vuelve a entrar.");
-    },
-    logout: () => null,
-    latido_cocina: () => true,
-  };
-}
+// Sucursal simulada con varias personas (servidor-simulado.js)
+const sucursal = (o) => personalSimulado(o).respuestas;
 async function entrar(page, quien) {
   const cambiar = page.getByRole("button", { name: "Cambiar de usuario" });
   if (await cambiar.isVisible()) await cambiar.click();

@@ -9,7 +9,7 @@
 import {
   CARNES_DEFAULT, BEBIDAS_DEFAULT, NUM_MESAS, MAX_MESAS, ZONA_DEFAULT, zonaValida, mensajeConfig,
   preciosDefault, preciosCarne, resolverItem, resumenPeriodo, AJUSTES_VALIDOS,
-  clone, uid, hora, fecha, redondear, slug, PIN_RE, pinDebil, ticketTotal, METODO_LABEL,
+  clone, uid, hora, fecha, redondear, slug, PIN_NUEVO_RE, pinDebil, ticketTotal, METODO_LABEL,
 } from "./dominio.js";
 
 const KEY = "tequeria_local_v3";
@@ -496,7 +496,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       conPin(await reautenticar(adminPin, u.id));
       if (!nombre.trim()) conPin({ ok: false, error: "nombre" });
       if (!["admin", "mesero", "cocinero"].includes(rol)) conPin({ ok: false, error: "rol" });
-      if (!PIN_RE.test(pin)) conPin({ ok: false, error: "formato" });
+      if (!PIN_NUEVO_RE.test(pin)) conPin({ ok: false, error: "formato" });
       if (pinDebil(pin)) conPin({ ok: false, error: "debil" });
       const id = uid().replace(/-/g, "").slice(0, 12);
       db.usuarios.push({ id, nombre: nombre.trim().slice(0, 40), rol, pinHash: await hashPin(pin, id), debeCambiarPin: false });
@@ -516,10 +516,11 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     async restablecerPin(adminPin, id, pin) {
       const u = exigir(["admin"]);
       conPin(await reautenticar(adminPin, u.id));
-      if (!PIN_RE.test(pin)) conPin({ ok: false, error: "formato" });
+      if (!PIN_NUEVO_RE.test(pin)) conPin({ ok: false, error: "formato" });
+      if (pinDebil(pin)) conPin({ ok: false, error: "debil" });
       const v = db.usuarios.find((x) => x.id === id) || conPin({ ok: false, error: "no_existe" });
       v.pinHash = await hashPin(pin, v.id);
-      v.debeCambiarPin = v.id !== u.id || pinDebil(pin);
+      v.debeCambiarPin = v.id !== u.id;
       delete db.intentos["u:" + v.id];
       guardar(["usuarios"]);
       return { ok: true };
@@ -537,7 +538,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     async crearAdminInicial(nombre, pin) {
       if (db.usuarios.some((u) => u.rol === "admin")) fallar("EXISTE", "Ya existe un administrador.");
       if (!nombre.trim()) fallar("DATOS", "Escribe un nombre.");
-      if (!PIN_RE.test(pin) || pinDebil(pin)) fallar("DATOS", "Usa un PIN de 4 a 8 dígitos que no sea trivial (no 1234, 1111…).");
+      if (!PIN_NUEVO_RE.test(pin) || pinDebil(pin)) fallar("DATOS", "Usa un PIN de 6 a 8 dígitos que no sea trivial (no 123456, 111111…).");
       const id = uid().replace(/-/g, "").slice(0, 12);
       db.usuarios.push({ id, nombre: nombre.trim().slice(0, 40), rol: "admin", pinHash: await hashPin(pin, id), debeCambiarPin: false });
       guardar(["usuarios"]);
@@ -549,7 +550,8 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       const u = db.usuarios.find((x) => x.id === id);
       if (!u || u.pinHash !== await hashPin(pin, u.id)) { const restantes = fallo(k, 5); guardar([]); return { ok: false, error: "pin", restantes }; }
       delete db.intentos[k];
-      if (pinDebil(pin)) u.debeCambiarPin = true;
+      // un PIN heredado (de 4 o 5 dígitos) o trivial solo sirve para entrar y elegir uno nuevo, como en el servidor
+      if (!PIN_NUEVO_RE.test(pin) || pinDebil(pin)) u.debeCambiarPin = true;
       guardar([]);
       guardarSesion({ usuarioId: u.id });
       return { ok: true, usuario: { id: u.id, nombre: u.nombre, rol: u.rol }, debeCambiarPin: !!u.debeCambiarPin };
@@ -563,7 +565,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     async cambiarPin(actual, nuevo) {
       const u = yo();
       if (u.pinHash !== await hashPin(actual, u.id)) { const restantes = fallo("s:" + u.id, 5); guardar([]); return { ok: false, error: "pin", restantes }; }
-      if (!PIN_RE.test(nuevo)) return { ok: false, error: "formato" };
+      if (!PIN_NUEVO_RE.test(nuevo)) return { ok: false, error: "formato" };
       if (pinDebil(nuevo) || nuevo === actual) return { ok: false, error: "debil" };
       u.pinHash = await hashPin(nuevo, u.id);
       u.debeCambiarPin = false;
@@ -571,6 +573,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       return { ok: true };
     },
     async cargar(partes = null) { return estado(partes); },
+    async desbloquear() { return { ok: true }; },   // el modo local no bloquea por inactividad
     async latido() { return true; },
     async liberarCocina() {},
     suscribir(onCambio, onConexion) {

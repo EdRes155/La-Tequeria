@@ -149,9 +149,9 @@ comprobaciones bien: el control siguió en Mesas y recibió los 10
 cambios; ningún equipo revocado recibió avisos después de vaciar la pantalla ni conservó claves. Cota
 comprobada: 45 s sin cambios, 10 s con cambios.
 
-**Limitación conocida:** con la pestaña oculta la app no hace la consulta periódica; si no hay cambios,
-la pantalla se vacía al volver a mostrarse (la primera llamada responde `DISPOSITIVO`). La pantalla de
-desbloqueo del paso 6 la cubre.
+**Pestaña oculta:** oculta, la app no hace la consulta periódica. Desde el paso 6c, si vuelve a mostrarse
+después de 30 s o más, no enseña los datos hasta que el servidor confirma la sesión y el equipo; revocado,
+pasa a «Vincular este equipo» sin mostrar nada (`tests/e2e/remoto/desbloqueo.spec.js`).
 
 ## Hallazgos
 

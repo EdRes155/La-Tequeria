@@ -6,10 +6,10 @@ const CEL = { width: 390, height: 844 };
 async function entrarComoAdmin(page) {
   await page.goto("/");
   await page.getByLabel("Nombre").fill("Ana");
-  await page.getByLabel(/PIN \(4 a 8/).fill("8642");
+  await page.getByLabel(/PIN \(6 a 8/).fill("864213");
   await page.getByRole("button", { name: "Crear administrador" }).click();
   await page.getByRole("button", { name: "Ana" }).click();
-  await page.getByLabel("PIN", { exact: true }).fill("8642");
+  await page.getByLabel("PIN", { exact: true }).fill("864213");
   await page.getByRole("button", { name: "Entrar" }).click();
   await expect(page.getByRole("heading", { name: "Mesas" })).toBeVisible();
 }
@@ -138,7 +138,7 @@ test("cocina: lo listo se puede regresar a preparación y el corte no borra pend
   await expect(page.locator(".corte-total")).toHaveText("$40");
   await page.getByRole("button", { name: "Hacer corte" }).click();
   await page.getByRole("dialog", { name: "Corte del día" }).getByRole("button", { name: "Hacer corte" }).click();
-  await page.getByLabel("PIN de administrador").fill("8642");
+  await page.getByLabel("PIN de administrador").fill("864213");
   await page.getByRole("button", { name: "Autorizar" }).click();
   await expect(page.getByText("Corte guardado: 2 venta(s) · $40")).toBeVisible();
   await page.getByRole("tab", { name: /Pendientes/ }).click();
@@ -181,7 +181,7 @@ test("cobros: cambio en efectivo, mesa liberada y el corte separa lo cobrado de 
   const corte = page.getByRole("dialog", { name: "Corte del día" });
   await expect(corte).toContainText("Quedan $20 por cobrar");
   await corte.getByRole("button", { name: "Hacer corte" }).click();
-  await page.getByLabel("PIN de administrador").fill("8642");
+  await page.getByLabel("PIN de administrador").fill("864213");
   await page.getByRole("button", { name: "Autorizar" }).click();
   await expect(page.getByText("Corte guardado: 2 venta(s) · $60 · cobrado $40")).toBeVisible();
   await page.getByRole("button", { name: /^Mesas/ }).click();
@@ -227,7 +227,7 @@ test("cocina ordenada y abreviada, estatus para el mesero y no se libera una mes
   await dlg.getByLabel("PIN de administrador").fill("0000");
   await dlg.getByRole("button", { name: "Cerrar sin cobro" }).click();
   await expect(dlg.getByRole("alert")).toContainText("PIN incorrecto");
-  await dlg.getByLabel("PIN de administrador").fill("8642");
+  await dlg.getByLabel("PIN de administrador").fill("864213");
   await dlg.getByRole("button", { name: "Cerrar sin cobro" }).click();
   const hecho = page.getByRole("dialog", { name: "Cerrado sin cobro · Mesa 5" });
   await expect(hecho).toContainText("La Mesa 5 quedó libre.");
@@ -282,10 +282,10 @@ test("modo monitor: el cocinero entra a la pantalla de cocina y procesa las coma
   await expect(page.getByRole("button", { name: /^Monitor/ })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("tab", { name: "Usuarios" }).click();
   await page.getByLabel("Nombre", { exact: true }).fill("Toño");
-  await page.getByLabel("PIN del nuevo usuario").fill("5173");
+  await page.getByLabel("PIN del nuevo usuario").fill("517392");
   await page.getByLabel("Rol").selectOption("cocinero");
   await page.getByRole("button", { name: "Crear usuario" }).click();
-  await page.getByLabel("Tu PIN de administrador").fill("8642");
+  await page.getByLabel("Tu PIN de administrador").fill("864213");
   await page.getByRole("dialog").getByRole("button", { name: /Autorizar|Confirmar|Continuar/ }).click();
   await expect(page.getByText('Usuario "Toño" creado')).toBeVisible();
 
@@ -298,7 +298,7 @@ test("modo monitor: el cocinero entra a la pantalla de cocina y procesa las coma
 
   await page.getByRole("button", { name: "Cambiar de usuario" }).click();   // la entrada recuerda al último usuario
   await page.getByRole("button", { name: "Toño" }).click();
-  await page.getByLabel("PIN", { exact: true }).fill("5173");
+  await page.getByLabel("PIN", { exact: true }).fill("517392");
   await page.getByRole("button", { name: "Entrar" }).click();
   const tablero = page.getByRole("main", { name: "Comandas por preparar" });
   await expect(tablero).toBeVisible();
@@ -337,7 +337,7 @@ test("dos monitores: una tarjeta por mesa, lo tachado y los cambios se ven en am
   // segunda pantalla en el mismo navegador (otra pestaña con su propia sesión)
   const otra = await context.newPage();
   await otra.goto("/");
-  await otra.getByLabel("PIN", { exact: true }).fill("8642");
+  await otra.getByLabel("PIN", { exact: true }).fill("864213");
   await otra.getByRole("button", { name: "Entrar" }).click();
   await otra.getByRole("button", { name: /^Cocina/ }).click();
   await otra.getByRole("button", { name: "Abrir monitor" }).click();

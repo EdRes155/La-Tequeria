@@ -9,7 +9,7 @@ import { api, remoto, ErrorApi, mensajePin, TODAS } from "./store.js";
 import {
   ROLES, puede, puedeEditar, money, ticketTotal, contarTacos, contarProductos, CATS, PREPS, PREP_LABEL,
   empaqueItems, catalogoBase, buildMenu, uid, clone, nuevaOrden, nuevoPedido, domVacio, telefonoValido,
-  pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, pinDebil, hora, fecha,
+  pedidoParaEnviar, textoCorteWhatsApp, nombreTicket, slug, leerImporte, PIN_RE, PIN_NUEVO_RE, pinDebil, hora, fecha,
   METODOS_PAGO, METODO_LABEL, sugerenciasEfectivo, porCobrarDeMesa, iniciales, colorAvatar, redondear,
   ordenarItems, nombreCocina, PASOS_PEDIDO, estadoPedido, unirTickets, pedidosDeMesa, leerAjustes, porPreparar,
   agruparComandas, lineaCocina, ZONAS_MX, ZONA_DEFAULT, MAX_MESAS,
@@ -82,6 +82,29 @@ const TIPOS = {
 // Sin autorización: la sesión del operador venció o se revocó (SESION), o el equipo dejó de estar autorizado
 // (DISPOSITIVO). En los dos casos se cierra la sesión y la pantalla queda vacía.
 const sinAutorizacion = (e) => e?.codigo === "SESION" || e?.codigo === "DISPOSITIVO";
+const esBloqueo = (e) => e?.codigo === "BLOQUEO_INACTIVIDAD";
+const OCULTA_MAX = 30000;   // ms con la pestaña oculta tras los que, al volver, se confirma con el servidor antes de mostrar datos
+
+/* Borradores por autor (MODELO.md §8): se guardan en este equipo con la sucursal y el operador, y solo los
+   recupera ese operador al volver a entrar (o al desbloquear). Si sale a propósito descartándolos, se borran;
+   si su sesión vence o se bloquea y entra otra persona, se conservan para él. Duran lo que una sesión. */
+const VIGENCIA_BORRADORES = 12 * 3600e3;
+const claveBorradores = (usuarioId) => `borradores:${usuarioId}`;
+function cargarBorradores(usuarioId) {
+  const g = usuarioId && leerJson(claveBorradores(usuarioId), null);
+  if (!g?.borradores || Date.now() - (g.guardado || 0) > VIGENCIA_BORRADORES) return {};
+  const bs = {};
+  for (const [k, b] of Object.entries(g.borradores)) {
+    // un envío que quedó a medias: no se sabe si llegó; se reintenta con el mismo id (el servidor no duplica)
+    bs[k] = b?.envio?.estado === "enviando"
+      ? { ...b, envio: { estado: "error", incierto: true, mensaje: "No se sabe si este envío llegó a cocina. Revisa antes de reenviar." } } : b;
+  }
+  return bs;
+}
+function guardarBorradores(usuarioId, bs) {
+  const conCambios = Object.fromEntries(Object.entries(bs).filter(([, b]) => tieneCambios(b)));
+  guardarJson(claveBorradores(usuarioId), Object.keys(conCambios).length ? { guardado: Date.now(), borradores: conCambios } : null);
+}
 
 /* borradores de comanda: viven en App para no perderse al cambiar de pantalla */
 const normalizarPedido = (p) => ({
@@ -143,7 +166,9 @@ export default function App() {
   const [sinRed, setSinRed] = useState(false);
   const [view, setView] = useState("mesas");
   const [ctx, setCtx] = useState(null);
-  const [borradores, setBorradores] = useState({});
+  const [borradores, setBorradores] = useState(() => cargarBorradores(api.sesionGuardada()?.usuario?.id));
+  const [bloqueada, setBloqueada] = useState(false);     // sesión bloqueada por inactividad: pide el PIN
+  const [verificando, setVerificando] = useState(false); // al volver de una pestaña oculta: no muestra datos hasta confirmar
   const [printTicket, setPrintTicket] = useState(null);
   const [monitorPref, setMonitorPref] = useState(null);   // null: según rol y modo; true/false: abierto o cerrado a mano
   const [, setEstacionVer] = useState(0);                 // vuelve a leer la estación de este dispositivo
@@ -174,10 +199,13 @@ export default function App() {
   // Al cerrar la sesión (o perder la autorización del equipo) no queda nada de ella para quien entre después:
   // todo estado de aquí con datos del negocio vuelve a su valor inicial, y se cierran los diálogos y avisos.
   // Si el equipo dejó de estar autorizado, tampoco queda la lista de personal de su sucursal.
-  const cerrarSesion = useCallback((mensaje = null, codigo = null) => {
+  const cerrarSesion = useCallback((mensaje = null, codigo = null, { descartar = false } = {}) => {
     epoca.current++;
     clearTimeout(reintento.current); reintento.current = null;
+    const quien = api.sesionGuardada()?.usuario?.id;
+    if (descartar && quien) guardarBorradores(quien, {});   // salió a propósito y los descartó
     api.salir();
+    setBloqueada(false); setVerificando(false);
     cerrarDialogos();
     setSesion(null); setData(null); setBorradores({}); setView("mesas"); setCtx(null);
     setCobro(null); setPrintTicket(null); setDispositivoAbierto(false); setCambiandoPin(false); setMonitorPref(null);
@@ -191,6 +219,7 @@ export default function App() {
     if (e.codigo === "DESCARTADA") return;   // respuesta de antes de cambiar de sucursal o de autorización
     // sesión vencida o equipo que dejó de estar autorizado (el almacén ya borró sus claves y canales)
     if (sinAutorizacion(e)) { cerrarSesion(e.message, e.codigo); return; }
+    if (esBloqueo(e)) { setBloqueada(true); return; }
     if (e.codigo === "CAMBIAR_PIN") { setSesion((s) => s && { ...s, debeCambiarPin: true }); return; }
     if (e.codigo === "RED") setSinRed(true);
     toast(e.message, "error");
@@ -218,7 +247,7 @@ export default function App() {
       if (ep !== epoca.current) return;   // la sesión se cerró mientras tanto
       if (diferidasRef.current.size) marcarDiferidas((s) => (partes || TODAS).forEach((p) => s.delete(p)));
       const vigente = (p) => pedidas.current[p] === n;
-      const parche = { yo: r.yo };
+      const parche = { yo: r.yo, bloqueo: r.bloqueo ?? null };   // bloqueo: monitor dedicado con la sesión bloqueada (§5.4)
       if ("nombreNegocio" in r && vigente("config")) Object.assign(parche, { nombreNegocio: r.nombreNegocio, zonaHoraria: r.zonaHoraria, precios: r.precios, extras: r.extras, ocultos: r.ocultos, ajustes: r.ajustes || {} });
       ["carnes", "bebidas", "usuarios", "mesas", "cocina", "historial", "cortes", "gastos", "porCobrar"].forEach((p) => { if (p in r && vigente(p)) parche[p] = r[p]; });
       if ("periodo" in r && vigente("historial")) parche.periodo = r.periodo;
@@ -228,6 +257,7 @@ export default function App() {
     } catch (e) {
       if (ep !== epoca.current || e.codigo === "DESCARTADA") return;
       if (sinAutorizacion(e)) { cerrarSesion(e.message, e.codigo); return; }
+      if (esBloqueo(e)) { setBloqueada(true); return; }   // se vuelve a cargar al desbloquear
       if (e.codigo === "RED") setSinRed(true);
       setErrorCarga(e);
       // se vuelve a intentar sola en unos segundos (una sola espera a la vez)
@@ -268,13 +298,36 @@ export default function App() {
         if (ok === false) cerrarSesion("Otra cocina tomó la sesión en otro dispositivo.");
       } catch (e) {
         if (!vivo || ep !== epoca.current || e.codigo === "DESCARTADA") return;
-        if (sinAutorizacion(e)) cerrarSesion(e.message, e.codigo); else setCocinaIncierta(true);
+        if (sinAutorizacion(e)) cerrarSesion(e.message, e.codigo);
+        else if (esBloqueo(e)) setBloqueada(true);
+        else setCocinaIncierta(true);
       }
     };
     beat();
     const iv = setInterval(beat, 15000);
     return () => { vivo = false; clearInterval(iv); };
   }, [usuario?.id, usuario?.rol, debeCambiar, cerrarSesion]);
+
+  // Borradores del operador en este equipo (MODELO.md §8): se guardan al cambiar
+  useEffect(() => { if (usuario?.id) guardarBorradores(usuario.id, borradores); }, [borradores, usuario?.id]);
+
+  // Al volver a mostrar la pestaña después de un rato oculta (sin consultas periódicas ni avisos mientras
+  // tanto), no se muestra nada hasta confirmar con el servidor que la sesión y el equipo siguen vigentes
+  useEffect(() => {
+    if (!remoto || !usuario) return;
+    let oculta = document.visibilityState === "hidden" ? Date.now() : null;
+    const f = () => {
+      if (document.visibilityState === "hidden") { oculta = Date.now(); return; }
+      if (oculta && Date.now() - oculta >= OCULTA_MAX) {
+        const ep = epoca.current;
+        setVerificando(true);
+        refrescar(null).finally(() => { if (ep === epoca.current) setVerificando(false); });
+      }
+      oculta = null;
+    };
+    document.addEventListener("visibilitychange", f);
+    return () => document.removeEventListener("visibilitychange", f);
+  }, [usuario?.id, refrescar]);
 
   // Avisar antes de cerrar la pestaña con comandas sin enviar ni guardar
   useEffect(() => {
@@ -309,7 +362,7 @@ export default function App() {
           refrescar(["mesas", "bebidas", "cocina", "historial"]);
           return r;
         } catch (e) {
-          if (sinAutorizacion(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (sinAutorizacion(e) || esBloqueo(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
           if (e.codigo === "RED") setSinRed(true);
           if (e.codigo === "MESA_OCUPADA" || e.codigo === "SIN_EXISTENCIA" || e.codigo === "PRODUCTO") refrescar(["mesas", "bebidas", "config", "carnes"]);
           throw e;
@@ -379,7 +432,7 @@ export default function App() {
           refrescar(["porCobrar", "historial", "mesas", "cocina"]);
           return r;
         } catch (e) {
-          if (sinAutorizacion(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (sinAutorizacion(e) || esBloqueo(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
           if (e.codigo === "RED") setSinRed(true);
           if (e.codigo === "YA_COBRADO" || e.codigo === "TICKET") refrescar(["porCobrar", "historial"]);
           throw e;
@@ -393,7 +446,7 @@ export default function App() {
           refrescar(["porCobrar", "historial", "mesas", "cocina"]);
           return r;
         } catch (e) {
-          if (sinAutorizacion(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (sinAutorizacion(e) || esBloqueo(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
           if (e.codigo === "RED") setSinRed(true);
           if (e.codigo === "YA_COBRADO" || e.codigo === "TICKET") refrescar(["porCobrar", "historial"]);
           throw e;
@@ -411,7 +464,7 @@ export default function App() {
   const salir = async () => {
     const n = Object.values(borradores).filter(tieneCambios).length;
     if (n > 0 && !(await confirmDialog({ titulo: "Cerrar sesión", mensaje: `Hay ${n} comanda(s) sin enviar ni guardar en este dispositivo. Si sales se perderán.`, confirmar: "Salir y descartar", peligro: true }))) return;
-    cerrarSesion(null);
+    cerrarSesion(null, null, { descartar: true });
   };
 
   const hosts = (<><Toaster /><ConfirmHost /><ChoiceHost /><PinHost /></>);
@@ -419,7 +472,7 @@ export default function App() {
   if (!usuario) {
     return (<>
       <Login pantalla={pantalla} error={errorPantalla} reintentar={cargarPantalla} aviso={aviso} sinRed={sinRed}
-        onEntrar={(r) => { setAviso(null); setSesion({ usuario: r.usuario, debeCambiarPin: r.debeCambiarPin }); }} />
+        onEntrar={(r) => { setAviso(null); setBorradores(cargarBorradores(r.usuario.id)); setSesion({ usuario: r.usuario, debeCambiarPin: r.debeCambiarPin }); }} />
       {hosts}
     </>);
   }
@@ -427,6 +480,21 @@ export default function App() {
     return (<>
       <CambiarPin forzado usuario={usuario} negocio={pantalla?.negocio} sinRed={sinRed} onSalir={cerrarSesion}
         onListo={() => { toast("PIN actualizado", "ok"); setSesion((s) => ({ ...s, debeCambiarPin: false })); }} />
+      {hosts}
+    </>);
+  }
+  if (bloqueada) {
+    return (<>
+      <Desbloqueo usuario={usuario} negocio={pantalla?.negocio || data?.nombreNegocio} sinRed={sinRed} onSalir={cerrarSesion}
+        onListo={() => { setBloqueada(false); refrescar(null); }} />
+      {hosts}
+    </>);
+  }
+  if (verificando) {
+    return (<>
+      <EntradaShell negocio={pantalla?.negocio || data?.nombreNegocio} sinRed={sinRed}>
+        <p role="status" className="login-sub" style={{ margin: 0, textAlign: "center" }}><Loader2 size={18} className="girando" aria-hidden="true" /> Comprobando la sesión…</p>
+      </EntradaShell>
       {hosts}
     </>);
   }
@@ -470,6 +538,13 @@ export default function App() {
     return (
       <div className="app-monitor">
         <style>{CSS}</style>
+        {data.bloqueo === "inactividad" && (
+          // monitor dedicado con la sesión bloqueada: las comandas se siguen viendo; marcar algo pide el PIN
+          <div className="aviso-barra" role="status">
+            <span>Sesión bloqueada por inactividad: las comandas se siguen viendo. Para marcar algo, escribe tu PIN.</span>
+            <button type="button" className="btn btn-sm btn-line" onClick={() => setBloqueada(true)}>Desbloquear</button>
+          </div>
+        )}
         <Resguardo onReintentar={() => refrescar(null)}>
           <MonitorCocina data={data} db={db} user={userActual} conn={sinRed ? "sinred" : conn} incierta={cocinaIncierta}
             errorCarga={errorCarga} onImprimir={abrirImpresion} onDispositivo={() => setDispositivoAbierto(true)}
@@ -743,12 +818,51 @@ function CrearAdminLocal({ onListo }) {
       <p className="login-sub">Primera vez en este navegador: crea el administrador.</p>
       <div className="campo"><label htmlFor={id + "n"}>Nombre</label>
         <input id={id + "n"} className="inp" value={nombre} onChange={(e) => setNombre(e.target.value)} autoComplete="off" /></div>
-      <div className="campo"><label htmlFor={id + "p"}>PIN (4 a 8 dígitos, no trivial)</label>
+      <div className="campo"><label htmlFor={id + "p"}>PIN (6 a 8 dígitos, no trivial)</label>
         <input id={id + "p"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={pin}
           onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))} /></div>
       {err && <div className="login-err" role="alert">{err}</div>}
       <button type="submit" className="btn btn-primary btn-block">Crear administrador</button>
     </form>
+  );
+}
+
+/* ============================== DESBLOQUEO ============================== */
+// Sesión bloqueada por inactividad (MODELO.md §5.2): solo el mismo operador la desbloquea con su PIN y sigue
+// donde se quedó (sus borradores incluidos). «Cambiar de usuario» cierra la sesión; sus borradores se
+// quedan guardados para cuando vuelva a entrar.
+function Desbloqueo({ usuario, negocio, sinRed, onListo, onSalir }) {
+  const id = useId();
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const enviar = async (e) => {
+    e.preventDefault();
+    if (busy || !PIN_RE.test(pin)) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await api.desbloquear(pin);
+      if (r.ok) { onListo(); return; }
+      setErr(mensajePin(r)); setPin("");
+    } catch (ex) {
+      if (sinAutorizacion(ex)) onSalir(ex.message, ex.codigo); else setErr(ex.message);
+    } finally { setBusy(false); }
+  };
+  return (
+    <EntradaShell negocio={negocio} sinRed={sinRed}>
+      <form onSubmit={enviar}>
+        <h1 className="login-titulo">Sesión bloqueada</h1>
+        <p className="login-sub">Por inactividad. {usuario.nombre}, escribe tu PIN para seguir donde te quedaste.</p>
+        <div className="campo"><label htmlFor={id}>PIN de {usuario.nombre}</label>
+          <input id={id} className="inp" type="password" inputMode="numeric" autoComplete="off" autoFocus value={pin}
+            onChange={(e) => { setErr(""); setPin(e.target.value.replace(/\D/g, "").slice(0, 8)); }} /></div>
+        {err && <div className="login-err" role="alert">{err}</div>}
+        <button type="submit" className="btn btn-primary btn-block" disabled={busy || !PIN_RE.test(pin)}>
+          {busy ? <Loader2 size={16} className="girando" aria-hidden="true" /> : null} Desbloquear
+        </button>
+        <button type="button" className="btn btn-ghost btn-block" onClick={() => onSalir(null)} style={{ marginTop: 8 }}>Cambiar de usuario</button>
+      </form>
+    </EntradaShell>
   );
 }
 
@@ -764,7 +878,7 @@ function CambiarPin({ forzado, usuario, negocio, sinRed, onListo, onCancelar, on
 
   const guardar = async (e) => {
     e.preventDefault(); setErr("");
-    if (!PIN_RE.test(nuevo)) { setErr("El PIN nuevo debe tener de 4 a 8 dígitos."); return; }
+    if (!PIN_NUEVO_RE.test(nuevo)) { setErr("El PIN nuevo debe tener de 6 a 8 dígitos."); return; }
     if (pinDebil(nuevo)) { setErr(mensajePin({ error: "debil" })); return; }
     if (nuevo !== conf) { setErr("La confirmación no coincide con el PIN nuevo."); return; }
     setBusy(true);
@@ -786,7 +900,7 @@ function CambiarPin({ forzado, usuario, negocio, sinRed, onListo, onCancelar, on
       </>)}
       <div className="campo"><label htmlFor={id + "a"}>PIN actual</label>
         <input id={id + "a"} className="inp" type="password" inputMode="numeric" autoComplete="off" data-autofocus autoFocus={forzado} value={actual} onChange={soloDigitos(setActual)} /></div>
-      <div className="campo"><label htmlFor={id + "n"}>PIN nuevo (4 a 8 dígitos)</label>
+      <div className="campo"><label htmlFor={id + "n"}>PIN nuevo (6 a 8 dígitos)</label>
         <input id={id + "n"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={nuevo} onChange={soloDigitos(setNuevo)} /></div>
       <div className="campo"><label htmlFor={id + "c"}>Confirma el PIN nuevo</label>
         <input id={id + "c"} className="inp" type="password" inputMode="numeric" autoComplete="off" value={conf} onChange={soloDigitos(setConf)} /></div>
@@ -3021,7 +3135,7 @@ function AdminMeseros({ data, db, user }) {
   const add = async (e) => {
     e.preventDefault();
     const n = nuevo.nombre.trim(); const p = nuevo.pin.trim();
-    if (!n || !PIN_RE.test(p)) { toast("Escribe nombre y un PIN de 4 a 8 dígitos.", "error"); return; }
+    if (!n || !PIN_NUEVO_RE.test(p)) { toast("Escribe nombre y un PIN de 6 a 8 dígitos.", "error"); return; }
     if (pinDebil(p)) { toast(mensajePin({ error: "debil" }), "error"); return; }
     const pin = await pedirPin({ titulo: "Crear usuario", mensaje: "Escribe tu PIN de administrador para autorizar.", etiqueta: "Tu PIN de administrador" });
     if (pin === null) return;
@@ -3037,9 +3151,10 @@ function AdminMeseros({ data, db, user }) {
     if (r.ok) toast("Usuario eliminado", "ok");
   };
   const restablecer = async (u) => {
-    const nuevoPin = await pedirPin({ titulo: `PIN temporal para ${u.nombre}`, mensaje: "Escribe un PIN temporal (4 a 8 dígitos). Al entrar deberá elegir uno propio.", etiqueta: "PIN temporal", confirmar: "Continuar" });
+    const nuevoPin = await pedirPin({ titulo: `PIN temporal para ${u.nombre}`, mensaje: "Escribe un PIN temporal (6 a 8 dígitos). Al entrar deberá elegir uno propio.", etiqueta: "PIN temporal", confirmar: "Continuar" });
     if (nuevoPin === null) return;
-    if (!PIN_RE.test(nuevoPin)) { toast("El PIN debe tener de 4 a 8 dígitos.", "error"); return; }
+    if (!PIN_NUEVO_RE.test(nuevoPin)) { toast("El PIN temporal debe tener de 6 a 8 dígitos.", "error"); return; }
+    if (pinDebil(nuevoPin)) { toast(mensajePin({ error: "debil" }), "error"); return; }
     const pin = await pedirPin({ titulo: "Restablecer PIN", mensaje: "Escribe tu PIN de administrador para autorizar.", etiqueta: "Tu PIN de administrador" });
     if (pin === null) return;
     const r = await db.restablecerPin(pin, u.id, nuevoPin);

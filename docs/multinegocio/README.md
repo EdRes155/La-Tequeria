@@ -78,7 +78,8 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
      invitaciones (con su envío por correo), códigos, equipos y revocación; reintento de `40001` en
      una transacción nueva;
    - desbloqueo por inactividad, `CAMBIAR_PIN` y PIN de 6 a 8 dígitos en la interfaz y el modo local;
-   - borradores por sucursal y autor; recorridos en navegador del flujo completo.
+     borradores por sucursal y autor; pestaña oculta sin datos hasta confirmar (hecho, paso 6c;
+     `tests/e2e/remoto/desbloqueo.spec.js`).
 
 **B. Staging con Supabase real**
 

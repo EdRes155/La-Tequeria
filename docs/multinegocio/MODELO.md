@@ -352,6 +352,12 @@ interbloqueo (lo cubre una prueba).
   - sus fallos cuentan para el operador y el dispositivo (§6).
 - Una función con sesión bloqueada responde el código `BLOQUEO_INACTIVIDAD`. La app muestra la
   pantalla de PIN y conserva los borradores (§8).
+- **Implementado en la app (paso 6c):** con `BLOQUEO_INACTIVIDAD` (en una recarga, una acción o el
+  latido) la app muestra «Sesión bloqueada» en lugar de los datos; con el PIN del mismo operador
+  (`desbloquear`) sigue donde estaba, con sus borradores y su diálogo abierto. «Cambiar de usuario»
+  cierra la sesión y deja sus borradores guardados para él. En el monitor dedicado, `estado` responde
+  `bloqueo: "inactividad"`: las comandas se siguen viendo con un aviso, y marcar algo pide el PIN. Lo
+  prueba `tests/e2e/remoto/desbloqueo.spec.js`.
 
 ### 5.3 Reloj
 
@@ -465,11 +471,20 @@ Reglas de aplicación (del plan):
     autorizado, tampoco queda la lista de personal de su sucursal (ni un instante, al vincularse a
     otra). Lo prueba `tests/e2e/remoto/limpieza.spec.js` volviendo a entrar con otra persona, en la
     misma sucursal o en otra.
-- **Borradores** (paso 6):
-  - se guardan con la sucursal y el autor;
-  - tras un bloqueo, solo se recuperan al reautenticar al mismo operador; el siguiente usuario no
-    los ve;
-  - una escritura que ya empezó se termina; la siguiente acción pide la autorización vigente.
+- **Borradores** (implementado, paso 6c):
+  - se guardan en el equipo con la sucursal y el autor (`tequeria:<sucursal>:borradores:<usuario>`),
+    durante 12 horas como máximo;
+  - tras un bloqueo, solo se recuperan al reautenticar al mismo operador (al desbloquear o al volver a
+    entrar); el siguiente usuario no los ve. Si el autor sale a propósito descartándolos, se borran;
+  - una escritura que ya empezó se termina; la siguiente acción pide la autorización vigente. Un envío
+    que quedó a medias se marca como incierto y se reintenta con el mismo id (el servidor no duplica).
+- **Pestaña oculta** (implementado, paso 6c): oculta no hace consultas periódicas; si vuelve a mostrarse
+  después de 30 s o más, la app no enseña los datos («Comprobando la sesión…») hasta que el servidor
+  confirma que la sesión y el equipo siguen vigentes. Si fue revocado, va a «Vincular este equipo» sin
+  mostrar nada.
+- **PIN nuevo** (implementado, paso 6c): al crearlo, cambiarlo o restablecerlo, la interfaz y el modo
+  local exigen de 6 a 8 dígitos no triviales, con las mismas reglas que `_pin_debil`; en el modo local,
+  entrar con un PIN de 4 o 5 dígitos obliga a elegir uno nuevo, como en el servidor.
 
 ## 9. Orden sugerido para implementar (paso 3 del plan)
 
@@ -498,9 +513,8 @@ Reglas de aplicación (del plan):
 5. **Tiempo real privado y claves del navegador por sucursal** (hecho): canal `sucursal:<id>` que
    solo publica el servidor, política de escucha con las reglas de `_dispositivo`, y claves del navegador
    por sucursal con limpieza al cambiar de sucursal o al revocar el equipo (§7 y §8).
-6. **Cliente:** vinculación del equipo (hecha, §4); panel de dueños, pantalla de desbloqueo,
-   validación del PIN de 6 a 8 dígitos en la interfaz (también en el modo local) y borradores por
-   autor.
+6. **Cliente:** vinculación del equipo (hecha, §4); pantalla de desbloqueo, PIN de 6 a 8 dígitos en la
+   interfaz y el modo local, borradores por autor y pestaña oculta (hechos, §5.2 y §8); panel de dueños.
 7. **Validación con Supabase real (staging)** (en curso, [STAGING.md](STAGING.md)): proyecto aparte con
    el esquema, inicio anónimo, correo verificado, JWT de 300 s y solo canales privados comprobados en el
    servidor; prueba de humo, recorrido de la app en el navegador y medición del tiempo de corte con un

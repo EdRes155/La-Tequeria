@@ -119,3 +119,32 @@ export function entradaDe(usuario) {
 // Llaves de la app en el almacenamiento del navegador
 export const clavesDeLaApp = (page) => page.evaluate(() => [
   ...Object.keys(localStorage), ...Object.keys(sessionStorage)].filter((k) => k.startsWith("tequeria")).sort());
+
+// Sucursal con varias personas: el token del login dice quién es y cada quien recibe su estado. bloquear(u)
+// deja su sesión bloqueada por inactividad (como _contexto tras 15 min sin interacción): todo responde
+// BLOQUEO_INACTIVIDAD hasta que la misma persona desbloquea con su PIN.
+export const SESION_VENCIDA = errorDe("SESION", "Tu sesión terminó. Vuelve a entrar.");
+export const BLOQUEO = errorDe("BLOQUEO_INACTIVIDAD", "Por inactividad, escribe tu PIN para continuar.");
+export function personalSimulado({ id = SUCURSAL, nombre = "Centro", negocio = "Taquería Simulada", personas, estadoDe }) {
+  const bloqueadas = new Set();
+  const quien = (a) => personas.find((p) => "tok-" + p.id === a.p_token);
+  const conSesion = (f) => (a) => { const u = quien(a); return !u ? SESION_VENCIDA : bloqueadas.has(u.id) ? BLOQUEO : f(u, a); };
+  const respuestas = {
+    usuarios_login: () => ({ sucursal: { id, nombre }, negocio, usuarios: personas.map(({ id: i, nombre: n }) => ({ id: i, nombre: n })), hayAdmin: true }),
+    login: (a) => {
+      const u = personas.find((p) => p.id === a.p_id);
+      return u && a.p_pin === PIN ? { ok: true, token: "tok-" + u.id, debeCambiarPin: !!u.debeCambiarPin, usuario: u } : { ok: false, error: "pin", restantes: 4 };
+    },
+    estado: conSesion((u) => estadoDe(u)),
+    desbloquear: (a) => {
+      const u = quien(a);
+      if (!u) return SESION_VENCIDA;
+      if (a.p_pin !== PIN) return { ok: false, error: "pin", restantes: 3 };
+      bloqueadas.delete(u.id);
+      return { ok: true };
+    },
+    logout: () => null,
+    latido_cocina: conSesion(() => true),
+  };
+  return { respuestas, bloquear: (u) => bloqueadas.add(u.id), bloqueadas };
+}

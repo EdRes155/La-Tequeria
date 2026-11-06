@@ -425,13 +425,23 @@ export function nombreCocina(item) {
 export const slug = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
   .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || uid().slice(0, 8);
 
+// PIN que se escribe para entrar o autorizar: los heredados de 4 o 5 dígitos siguen sirviendo para entrar
+// (y obligan a elegir uno nuevo)
 export const PIN_RE = /^[0-9]{4,8}$/;
+// PIN nuevo, al crearlo, cambiarlo o restablecerlo: de 6 a 8 dígitos (como _pin_formato_ok del servidor)
+export const PIN_NUEVO_RE = /^[0-9]{6,8}$/;
+// PIN trivial, con las mismas reglas que _pin_debil del servidor: repeticiones (000000, 121212, 123123,
+// 12341234), secuencias ascendentes o descendentes, también circulares (123456, 890123, 654321), y PIN de
+// demostración o muy usados
+const PIN_COMUNES = ["1234", "4321", "0123", "1212", "2468", "1357", "12345", "123456", "654321", "12341234",
+  "112233", "11223344", "123321", "147258", "159753", "246810", "135790", "102030", "696969"];
 export function pinDebil(p) {
   if (!p) return true;
-  if (/^(.)\1+$/.test(p)) return true;
-  if (["1234", "4321", "0123", "1212", "2468", "1357", "12345", "123456", "654321", "12341234"].includes(p)) return true;
-  return "0123456789012345".includes(p) || "9876543210987654".includes(p);
+  if (/^(.)\1+$/.test(p) || /^(..)\1+$/.test(p) || /^(...)\1+$/.test(p) || /^(....)\1+$/.test(p)) return true;
+  if ("01234567890123456789".includes(p) || "98765432109876543210".includes(p)) return true;
+  return PIN_COMUNES.includes(p);
 }
+export const pinNuevoValido = (p) => PIN_NUEVO_RE.test(p || "") && !pinDebil(p);
 
 // Hora y fecha en la zona horaria del negocio (como _hora y _fecha del servidor). Sin zona, la del navegador.
 const enZona = (zona) => (zona && zonaValida(zona) ? { timeZone: zona } : {});

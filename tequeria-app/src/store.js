@@ -188,6 +188,8 @@ function crearRemoto() {
       sesion = null; guardarSesion(null);
       if (t) { try { await rpc("logout", { p_token: t }); } catch {} }
     },
+    // Sesión bloqueada por inactividad (BLOQUEO_INACTIVIDAD): el mismo operador vuelve a escribir su PIN
+    desbloquear: (pin) => conToken("desbloquear", { p_pin: pin }),
     async cambiarPin(actual, nuevo) {
       const r = await conToken("cambiar_pin", { p_pin_actual: actual, p_pin_nuevo: nuevo });
       if (r.ok && sesion) { sesion = { ...sesion, debeCambiarPin: false }; guardarSesion(sesion); }
@@ -300,7 +302,7 @@ export function mensajePin(r) {
       ? `PIN incorrecto. Te quedan ${r.restantes} intento(s) antes de un bloqueo temporal.` : "PIN incorrecto.";
     case "bloqueado": return `Demasiados intentos. Espera ${min} min e inténtalo de nuevo.`;
     case "cocina_ocupada": return "Ya hay una cocina abierta en otro dispositivo. Para usar varias pantallas, actívalo en Administración → Cocina.";
-    case "formato": return "El PIN debe tener de 4 a 8 dígitos.";
+    case "formato": return "El PIN nuevo debe tener de 6 a 8 dígitos.";
     case "debil": return "Ese PIN es muy fácil de adivinar (por ejemplo 1234 o 1111). Elige otro.";
     case "rol": return "Rol no válido.";
     case "nombre": return "Escribe un nombre.";

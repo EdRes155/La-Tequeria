@@ -28,15 +28,15 @@ describe("modo local", () => {
     const p = await api.pantallaLogin();
     expect(p.hayAdmin).toBe(false);
     expect(p.usuarios).toEqual([]);
-    await expect(api.crearAdminInicial("Ana", "1234")).rejects.toThrow(/trivial/);
+    await expect(api.crearAdminInicial("Ana", "123456")).rejects.toThrow(/trivial/);
   });
 
   it("flujo completo sin errores y sin PIN en texto plano", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
     expect((await api.entrar(usuarios[0].id, "0000")).error).toBe("pin");
-    expect((await api.entrar(usuarios[0].id, "8642")).ok).toBe(true);
-    await api.acciones.crearUsuario("8642", "Luis", "5173", "mesero");
+    expect((await api.entrar(usuarios[0].id, "864213")).ok).toBe(true);
+    await api.acciones.crearUsuario("864213", "Luis", "517392", "mesero");
     const r = await api.acciones.enviar(t("local-envio-1"));
     expect(r.ticket.total).toBe(40);
     const almacenado = localStorage.getItem("tequeria_local_v3");
@@ -47,9 +47,9 @@ describe("modo local", () => {
   });
 
   it("valida existencias, idempotencia y mesas como el servidor", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
+    await api.entrar(usuarios[0].id, "864213");
     await api.acciones.actualizarBebida("coca", { cantidad: 1 });
     const e = await falla(api.acciones.enviar(t("sin-coca-1", { tipo: "aqui", mesaId: 1, ordenes: [{ id: "o", items: [{ key: "beb-coca", cantidad: 2 }] }] })));
     expect(e).toBeInstanceOf(ErrorApi);
@@ -72,12 +72,12 @@ describe("modo local", () => {
   });
 
   it("el corte no saca de cocina lo pendiente y exige PIN de administrador", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
+    await api.entrar(usuarios[0].id, "864213");
     await api.acciones.enviar(t("pendiente-1"));
     expect((await falla(api.acciones.corte("0000"))).codigo).toBe("pin");
-    const r = await api.acciones.corte("8642");
+    const r = await api.acciones.corte("864213");
     expect(r.corte).toMatchObject({ tickets: 1, total: 40 });
     const est = await api.cargar();
     expect(est.historial).toEqual([]);
@@ -86,9 +86,9 @@ describe("modo local", () => {
   });
 
   it("no libera una mesa sin cobrar; un administrador puede cerrarla sin cobro", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
+    await api.entrar(usuarios[0].id, "864213");
     await api.acciones.enviar(t("mesa2-1", { tipo: "aqui", mesaId: 2 }));
     let est = await api.cargar();
     const tk = est.cocina.find((x) => x.id === "mesa2-1");
@@ -99,8 +99,8 @@ describe("modo local", () => {
 
     expect((await falla(api.acciones.liberarMesa(2))).codigo).toBe("POR_COBRAR");
     expect((await falla(api.acciones.noCobrar("0000", ["mesa2-1"], "Se fue", true))).codigo).toBe("pin");
-    expect((await falla(api.acciones.noCobrar("8642", ["mesa2-1"], " ", true))).codigo).toBe("DATOS");
-    expect(await api.acciones.noCobrar("8642", ["mesa2-1"], "Se fue", true)).toMatchObject({ ok: true, mesaLiberada: true, total: 40 });
+    expect((await falla(api.acciones.noCobrar("864213", ["mesa2-1"], " ", true))).codigo).toBe("DATOS");
+    expect(await api.acciones.noCobrar("864213", ["mesa2-1"], "Se fue", true)).toMatchObject({ ok: true, mesaLiberada: true, total: 40 });
     est = await api.cargar();
     expect(est.mesas[1].estado).toBe("libre");
     expect(est.porCobrar).toEqual([]);
@@ -109,9 +109,9 @@ describe("modo local", () => {
   });
 
   it("guarda los ajustes del negocio solo con valores válidos", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
+    await api.entrar(usuarios[0].id, "864213");
     expect((await api.cargar()).ajustes).toEqual({});
     expect((await falla(api.acciones.fijarAjuste("modoCocina", "pantalla"))).codigo).toBe("DATOS");
     expect((await falla(api.acciones.fijarAjuste("otra", true))).codigo).toBe("DATOS");
@@ -121,9 +121,9 @@ describe("modo local", () => {
   });
 
   it("configuración del piloto: nombre, zona horaria y número de mesas, con las reglas del servidor", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
+    await api.entrar(usuarios[0].id, "864213");
     const a = api.acciones;
     expect((await api.cargar(["config"])).zonaHoraria).toBe("America/Mexico_City");
     expect((await falla(a.fijarNegocio("  ", "America/Mexico_City"))).codigo).toBe("nombre");
@@ -137,9 +137,9 @@ describe("modo local", () => {
     await a.enviar(t("local-mesa-10", { tipo: "aqui", mesaId: 10 }));
     const e = await falla(a.fijarMesas(8));
     expect([e.codigo, e.message]).toEqual(["ocupadas", "La Mesa 10 está en uso o con cuentas por cobrar. Libéralas antes de quitarlas."]);
-    await a.crearUsuario("8642", "Luis", "5173", "mesero");
+    await a.crearUsuario("864213", "Luis", "517392", "mesero");
     const mesero = (await api.pantallaLogin()).usuarios.find((u) => u.nombre === "Luis");
-    await api.entrar(mesero.id, "5173");
+    await api.entrar(mesero.id, "517392");
     expect((await falla(a.fijarMesas(9))).codigo).toBe("PERMISO");
   });
 
@@ -147,9 +147,9 @@ describe("modo local", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-05T05:30:00Z"));   // 05:30 del 5 en UTC; 21:30 del 4 en Tijuana
     try {
-      await api.crearAdminInicial("Ana", "8642");
+      await api.crearAdminInicial("Ana", "864213");
       const { usuarios } = await api.pantallaLogin();
-      await api.entrar(usuarios[0].id, "8642");
+      await api.entrar(usuarios[0].id, "864213");
       const a = api.acciones;
       await a.fijarNegocio("Norte", "UTC");
       await a.enviar(t("zona-utc"));
@@ -162,15 +162,15 @@ describe("modo local", () => {
       expect([de("zona-utc").fecha, de("zona-utc").hora]).toEqual(["05/11/2026", "05:30"]);
       expect([de("zona-tijuana").fecha, de("zona-tijuana").hora, de("zona-tijuana").cobro.hora]).toEqual(["04/11/2026", "21:30", "21:30"]);
       expect([h.gastos[0].fecha, h.gastos[0].hora]).toEqual(["04/11/2026", "21:30"]);
-      await a.corte("8642");
+      await a.corte("864213");
       expect((await api.cargar(["cortes"])).cortes[0]).toMatchObject({ fecha: "04/11/2026", hora: "21:30" });
     } finally { vi.useRealTimers(); }
   });
 
   it("al reducir las mesas, las que sobran se desactivan y no se borran, como en el servidor", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
+    await api.entrar(usuarios[0].id, "864213");
     const a = api.acciones;
     await a.enviar(t("mesa-8", { tipo: "aqui", mesaId: 8 }));
     await a.cobrar("cobro-mesa-8", ["mesa-8"], "efectivo", 100, 0, true);
@@ -190,9 +190,9 @@ describe("modo local", () => {
   });
 
   it("cocina: cambios con el estado visto, lotes y tachados como el servidor", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+    await api.crearAdminInicial("Ana", "864213");
     const { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
+    await api.entrar(usuarios[0].id, "864213");
     await api.acciones.enviar(t("k1"));
     await api.acciones.enviar(t("k2"));
     const visto = (id, estado = "pendiente") => [{ id, estado }];
@@ -209,19 +209,27 @@ describe("modo local", () => {
     expect((await api.cargar(["porCobrar"])).porCobrar).toHaveLength(2);   // archivar no borra lo que falta cobrar
   });
 
-  it("aplica permisos por rol y obliga a cambiar un PIN débil", async () => {
-    await api.crearAdminInicial("Ana", "8642");
+  it("aplica permisos por rol, el PIN nuevo de 6 a 8 dígitos no trivial y el cambio obligatorio tras restablecerlo", async () => {
+    await api.crearAdminInicial("Ana", "864213");
     let { usuarios } = await api.pantallaLogin();
-    await api.entrar(usuarios[0].id, "8642");
-    await api.acciones.crearUsuario("8642", "Luis", "5173", "mesero");
-    await api.acciones.restablecerPin("8642", (await api.pantallaLogin()).usuarios.find((u) => u.nombre === "Luis").id, "1111");
+    await api.entrar(usuarios[0].id, "864213");
+    // las mismas reglas que el servidor para un PIN nuevo
+    expect((await falla(api.acciones.crearUsuario("864213", "Luis", "5173", "mesero"))).codigo).toBe("formato");
+    expect((await falla(api.acciones.crearUsuario("864213", "Luis", "121212", "mesero"))).codigo).toBe("debil");
+    await api.acciones.crearUsuario("864213", "Luis", "517392", "mesero");
+    const idLuis = (await api.pantallaLogin()).usuarios.find((u) => u.nombre === "Luis").id;
+    expect((await falla(api.acciones.restablecerPin("864213", idLuis, "1111"))).codigo).toBe("formato");
+    expect((await falla(api.acciones.restablecerPin("864213", idLuis, "901234"))).codigo).toBe("debil");   // secuencia circular
+    await api.acciones.restablecerPin("864213", idLuis, "739104");
     ({ usuarios } = await api.pantallaLogin());
     const luis = usuarios.find((u) => u.nombre === "Luis");
-    const r = await api.entrar(luis.id, "1111");
-    expect(r.debeCambiarPin).toBe(true);
+    const r = await api.entrar(luis.id, "739104");
+    expect(r.debeCambiarPin).toBe(true);   // lo puso un administrador: debe elegir uno propio
     expect((await falla(api.acciones.enviar(t("debil-1")))).codigo).toBe("CAMBIAR_PIN");
-    expect((await api.cambiarPin("1111", "2222")).error).toBe("debil");
-    expect((await api.cambiarPin("1111", "7391")).ok).toBe(true);
+    expect((await api.cambiarPin("739104", "2222")).error).toBe("formato");
+    expect((await api.cambiarPin("739104", "123123")).error).toBe("debil");
+    expect((await api.cambiarPin("739104", "739104")).error).toBe("debil");   // el mismo
+    expect((await api.cambiarPin("739104", "582039")).ok).toBe(true);
     await api.acciones.enviar(t("mesero-1"));
     expect((await falla(api.acciones.fijarPrecio("taco-pastor", 1))).codigo).toBe("PERMISO");
     const est = await api.cargar();
