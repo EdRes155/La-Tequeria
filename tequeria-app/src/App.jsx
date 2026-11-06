@@ -714,6 +714,7 @@ function Vincular({ motivo, onListo }) {
         <input id={id + "n"} className="inp" value={nombre} maxLength={60} autoComplete="off" placeholder="Caja, Cocina, Tablet de meseros…"
           onChange={(e) => { setErr(""); setNombre(e.target.value); }} /></div>
       {captcha.activo && <div ref={cajaCaptcha} className="captcha" />}
+      {captcha.estado === "esperando" && <p className="login-sub" role="status">Completa la verificación de seguridad para continuar.</p>}
       {captcha.estado === "error" && <div className="login-err" role="alert">No se pudo cargar la verificación de seguridad. Revisa la conexión y recarga la página.</div>}
       {err && <div className="login-err" id={id + "e"} role="alert">{err}</div>}
       <button type="submit" className="btn btn-primary btn-block" disabled={busy || limpio.length !== 8 || !nombre.trim()}>

@@ -184,7 +184,8 @@ desbloqueo del paso 6 la cubre.
 
 ## Pendiente
 
-- Llaves reales de Turnstile para producción (MIGRACION.md §5).
+- Llave secreta real de Turnstile en Supabase de producción, en la ventana de la migración (la de sitio
+  ya está en Vercel para Production; MIGRACION.md §5).
 - La protección de contraseñas filtradas (plan Pro) se deja para después: por ahora, mínimo de 10
   caracteres (decidido el 6 de noviembre).
 - Repetir la medición con el cliente del paso 6 terminado (panel de dueños y desbloqueo).

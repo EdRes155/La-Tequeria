@@ -168,11 +168,13 @@ Antes de la ventana, en Supabase:
 - Auth: inicio de sesión anónimo activado y protegido con CAPTCHA y límite por IP (30 por hora, el de
   Supabase), inicio con correo con confirmación obligatoria (o con Google), contraseñas de al menos 10
   caracteres (sin el plan Pro no hay revisión de contraseñas filtradas) y JWT de 300 s (MODELO.md §4).
-- CAPTCHA con llaves **reales** de Cloudflare Turnstile (staging usa las de prueba): el dueño crea el
-  widget en Cloudflare para `la-tequeria.vercel.app`; la llave de sitio (pública) va en la variable
-  `VITE_TURNSTILE_SITE_KEY` de Vercel con destino Production, y la llave secreta la escribe él mismo en
-  Supabase (Authentication → Attack Protection → CAPTCHA, proveedor Turnstile). La secreta nunca pasa
-  por el chat ni por un archivo.
+- CAPTCHA con llaves **reales** de Cloudflare Turnstile (staging usa las de prueba). El widget ya existe y
+  su llave de sitio (pública) ya está en la variable `VITE_TURNSTILE_SITE_KEY` de Vercel con destino
+  Production (6 de noviembre de 2026; la app de `main` no la usa todavía). Falta, en la ventana: que el
+  dueño escriba la llave secreta en Supabase de producción (Authentication → Attack Protection →
+  CAPTCHA, proveedor Turnstile); nunca pasa por el chat ni por un archivo. El widget debe tener
+  `la-tequeria.vercel.app` entre sus dominios. En modo administrado, a veces pide marcar una casilla: la
+  pantalla de vinculación lo indica.
 - Realtime: solo canales privados (acceso público desactivado), y ninguna política sobre
   `realtime.messages` que no sea la de la app: si hay otra, el archivo se detiene para revisarla
   (MODELO.md §7).
