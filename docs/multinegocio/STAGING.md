@@ -109,16 +109,17 @@ uno en un momento distinto de la renovación de su JWT (supabase-js renueva cuan
 
 | Equipo | Edad del JWT al revocar | Último aviso – sin avisos desde | Qué lo cortó |
 |---|---|---|---|
-| `justo-antes` | 172 · 174 · 173 s | 6–11 · 6–11 · 5–11 s | Su renovación, a los 9 · 6 · 7 s |
-| `a-medias` | 84 · 89 · 88 s | 91–97 · 90–96 · 89–94 s | Su renovación, a los 97 · 92 · 93 s |
-| `recien` (peor caso de un cliente que renueva) | 13 · 13 · 13 s | 166–171 · 165–170 · 163–168 s | Su renovación, a los 167 · 167 · 168 s |
-| `token-fijo` (nunca manda otro JWT) | — · 12 · 12 s | — · 288–293 · 285–291 s | El servidor, al vencer el JWT (288 s) |
+| `justo-antes` | 172 · 174 · 173 · 174 s | 6–11 · 6–11 · 5–11 · 6–11 s | Su renovación, a los 9 · 6 · 7 · 6 s |
+| `a-medias` | 84 · 89 · 88 · 89 s | 91–97 · 90–96 · 89–94 · 91–96 s | Su renovación, a los 97 · 92 · 93 · 92 s |
+| `recien` (peor caso de un cliente que renueva) | 13 · 13 · 13 · 13 s | 166–171 · 165–170 · 163–168 · 167–172 s | Su renovación, a los 167 · 167 · 168 · 167 s |
+| `token-fijo` (nunca manda otro JWT) | — · 12 · 12 · 12 s | — · 288–293 · 285–291 · 286–291 s | El servidor, al vencer el JWT (288 s) |
 
-Tres corridas (separadas por «·»); el control recibió los 99, 100 y 100 cambios. En todas, el canal de
+Cuatro corridas (separadas por «·»; la cuarta, con el CAPTCHA activo); el control recibió todos los
+cambios en cada una. En todas, el canal de
 cada equipo revocado se cerró (`CLOSED`) y no volvió a recibir nada. La primera tenía un `sin-renovar` en
 lugar de `token-fijo` y no medía lo que debía (ver «Hallazgos»); la segunda marcó como fallo un aviso de un cambio enviado
 justo al vencer el JWT (menos de un segundo), y de ahí la tolerancia de 5 s; la tercera pasó todas las
-comprobaciones.
+comprobaciones, y la cuarta también.
 
 **Conclusión:** Realtime vuelve a evaluar la política cuando el cliente manda un JWT nuevo, y cierra el
 canal cuando vence el JWT si el cliente nunca manda otro. El peor caso es la vigencia del JWT: **300 s**
@@ -132,12 +133,13 @@ aviso (o, sin cambios en la sucursal, con su consulta periódica cada 30 s) llam
 
 | Equipo | Edad del JWT al revocar | Sin datos en pantalla a los |
 |---|---|---|
-| `justo-antes`, sin cambios en la sucursal | 148 · 147 s | 29.1 · 30.2 s |
-| `a-medias`, sin cambios | 66 · 66 s | 6.2 · 6.8 s |
-| `recien`, sin cambios | 6 · 7 s | 32.0 · 31.5 s |
-| `con-cambios`, un cambio cada 5 s | 47 · 47 s | 4.8 · 5.1 s |
+| `justo-antes`, sin cambios en la sucursal | 148 · 147 · 151 s | 29.1 · 30.2 · 28.1 s |
+| `a-medias`, sin cambios | 66 · 66 · 70 s | 6.2 · 6.8 · 2.7 s |
+| `recien`, sin cambios | 6 · 7 · 10 s | 32.0 · 31.5 · 27.8 s |
+| `con-cambios`, un cambio cada 5 s | 47 · 47 · 45 s | 4.8 · 5.1 · 4.6 s |
 
-Dos corridas, las dos con todas las comprobaciones bien: el control siguió en Mesas y recibió los 10
+Tres corridas (la tercera, compilada como se publica, con la CSP y el CAPTCHA real), todas con todas las
+comprobaciones bien: el control siguió en Mesas y recibió los 10
 cambios; ningún equipo revocado recibió avisos después de vaciar la pantalla ni conservó claves. Cota
 comprobada: 45 s sin cambios, 10 s con cambios.
 
