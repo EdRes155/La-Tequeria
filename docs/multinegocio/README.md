@@ -11,7 +11,7 @@ sucursal.
 | Modelo de cuenta, sucursal, membresía, dispositivo y sesión, con el contexto de cada función | [MODELO.md](MODELO.md): un validador por tipo de llamada y estado de cuenta pendiente de activación | Diseño listo; paso 1 del núcleo implementado (abajo) |
 | Núcleo, paso 1: cuentas, sucursales y `sucursal_id` | Sección «MULTINEGOCIO» de `tequeria-app/supabase-schema.sql`; `tests/sql/migracion.test.js` | Implementado y ensayado sobre la instantánea de producción; no aplicado en producción |
 | Núcleo, paso 5: tiempo real privado y navegador | `_avisar_sucursal`, `privado.puede_escuchar` y la política de `realtime.messages` en `supabase-schema.sql`; `src/claves.js`; `tests/sql/tiempo-real.test.js` y `tests/navegador.test.js` | Implementado y probado con el stub de Realtime; la medición con una conexión abierta queda para staging (paso 7) |
-| Configuración del piloto (PLAN §2) | `fijar_negocio` y `fijar_mesas` en `supabase-schema.sql`, el modo local y Administración → Negocio; `tests/sql/configuracion.test.js` | Implementado y probado (servidor, modo local y navegador) |
+| Configuración del piloto (PLAN §2) | `fijar_negocio` y `fijar_mesas` en `supabase-schema.sql`, el modo local y Administración → Negocio; `tests/sql/configuracion.test.js` | Implementado y probado (servidor, modo local y navegador). En el modo local la zona horaria rige las horas y fechas y las mesas que sobran se desactivan, igual que en el servidor |
 | Núcleo, paso 4: dispositivos y dueños | `_vinculacion`, `_identidad` y `_dueno`; alta de cuentas, invitaciones, membresías, códigos, vinculación y revocación en `supabase-schema.sql`; `tests/sql/duenos.test.js` y la matriz | Implementado y probado con el `auth.users` de pruebas; falta probarlo contra Supabase Auth real en staging. El panel y la pantalla de vinculación van con el cliente (paso 6) |
 | Núcleo, paso 3: política de seguridad del personal | `_contexto` con tipo de llamada, contadores, `desbloquear` y `restablecer_acceso` en `supabase-schema.sql`; `tests/sql/reloj.test.js` | Implementado y probado con reloj controlado en el servidor; la parte de la interfaz va con el cliente (paso 6) |
 | Núcleo, paso 2: validadores y funciones por sucursal | `_dispositivo` y `_contexto` en `supabase-schema.sql`; matriz en `tests/sql/aislamiento.test.js` | Implementado: las funciones de la API prueban sus casos de aislamiento con las dos cuentas; solo quedan pendientes los declarados para pasos posteriores. Desde aquí el esquema exige equipos vinculados y ya no sirve con la app publicada (ver MIGRACION.md) |
@@ -41,6 +41,7 @@ npm test                          # todo: unitarias, SQL (si hay TEST_DATABASE_U
 npm run test:sql                  # solo SQL
 npm run inventario                # regenera docs/multinegocio/INVENTARIO.md
 npm run inventario -- --check     # lo que corre la CI
+npm run test:e2e                  # recorridos en navegador: modo local y «remoto simulado» (sin base de datos)
 # huella de una base (sobre una copia o un ensayo); la misma sal antes y después
 psql "$URL_DE_LA_COPIA" -qAt -c "set huella.version = 'origen'" -c "set huella.sal = '<aleatoria>'" \
   -f scripts/huella-datos.sql -o antes.json

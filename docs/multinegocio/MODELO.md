@@ -421,7 +421,11 @@ Reglas de aplicación (del plan):
   - si el equipo aparece en otra sucursal, se borran las claves de la anterior y su sesión;
   - si el servidor responde `DISPOSITIVO`, se borran todas las claves de la app, se sueltan los canales
     y sube la «generación»: las respuestas de antes se descartan (`DESCARTADA`) y la app vuelve a la
-    entrada. La pantalla de vinculación llega con el cliente (paso 6).
+    entrada. La pantalla de vinculación llega con el cliente (paso 6);
+  - en la pantalla, `DISPOSITIVO` y `SESION` cierran la sesión igual llegue en una recarga, en el
+    latido de cocina o en una acción: la pantalla se vacía, el reintento pendiente se cancela y lo que
+    responda después ya no la toca. Lo prueban los recorridos «remoto simulado»
+    (`tests/e2e/remoto/`), con la app compilada contra un servidor que intercepta Playwright.
 - **Borradores** (paso 6):
   - se guardan con la sucursal y el autor;
   - tras un bloqueo, solo se recuperan al reautenticar al mismo operador; el siguiente usuario no

@@ -1,5 +1,5 @@
 // Modo local (sin Supabase): debe funcionar de punta a punta con las mismas reglas que el servidor.
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 function almacen() {
   const m = new Map();
@@ -141,6 +141,52 @@ describe("modo local", () => {
     const mesero = (await api.pantallaLogin()).usuarios.find((u) => u.nombre === "Luis");
     await api.entrar(mesero.id, "5173");
     expect((await falla(a.fijarMesas(9))).codigo).toBe("PERMISO");
+  });
+
+  it("la hora y la fecha de comandas, cobros, gastos y cortes siguen la zona del negocio, también al cambiar de día", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-05T05:30:00Z"));   // 05:30 del 5 en UTC; 21:30 del 4 en Tijuana
+    try {
+      await api.crearAdminInicial("Ana", "8642");
+      const { usuarios } = await api.pantallaLogin();
+      await api.entrar(usuarios[0].id, "8642");
+      const a = api.acciones;
+      await a.fijarNegocio("Norte", "UTC");
+      await a.enviar(t("zona-utc"));
+      await a.fijarNegocio("Norte", "America/Tijuana");
+      await a.enviar(t("zona-tijuana"));
+      await a.cobrar("cobro-tijuana", ["zona-tijuana"], "efectivo", 100, 0, false);
+      await a.agregarGasto("gasto-tijuana", "Hielo", 10);
+      const h = (await api.cargar(["historial", "gastos"]));
+      const de = (id) => h.historial.find((x) => x.id === id);
+      expect([de("zona-utc").fecha, de("zona-utc").hora]).toEqual(["05/11/2026", "05:30"]);
+      expect([de("zona-tijuana").fecha, de("zona-tijuana").hora, de("zona-tijuana").cobro.hora]).toEqual(["04/11/2026", "21:30", "21:30"]);
+      expect([h.gastos[0].fecha, h.gastos[0].hora]).toEqual(["04/11/2026", "21:30"]);
+      await a.corte("8642");
+      expect((await api.cargar(["cortes"])).cortes[0]).toMatchObject({ fecha: "04/11/2026", hora: "21:30" });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("al reducir las mesas, las que sobran se desactivan y no se borran, como en el servidor", async () => {
+    await api.crearAdminInicial("Ana", "8642");
+    const { usuarios } = await api.pantallaLogin();
+    await api.entrar(usuarios[0].id, "8642");
+    const a = api.acciones;
+    await a.enviar(t("mesa-8", { tipo: "aqui", mesaId: 8 }));
+    await a.cobrar("cobro-mesa-8", ["mesa-8"], "efectivo", 100, 0, true);
+    await a.fijarMesas(5);
+    expect((await api.cargar(["mesas"])).mesas.map((m) => m.id)).toEqual([1, 2, 3, 4, 5]);
+    // en el almacenamiento la Mesa 8 sigue, desactivada, y su comanda la sigue señalando
+    const guardado = JSON.parse(localStorage.getItem("tequeria_local_v3"));
+    expect(guardado.mesas.find((m) => m.id === 8)).toMatchObject({ id: 8, activa: false, estado: "libre" });
+    expect(guardado.tickets.find((x) => x.id === "mesa-8").mesaId).toBe(8);
+    // para la operación no existe
+    expect((await falla(a.guardarBorrador(8, { ordenes: [{ id: "o1", items: [{ key: "taco-pastor", cantidad: 1 }] }], extras: [] }))).codigo).toBe("MESA");
+    expect((await falla(a.enviar(t("mesa-8-b", { tipo: "aqui", mesaId: 8 })))).codigo).toBe("MESA");
+    // al volver a subir el número, regresa libre
+    await a.fijarMesas(8);
+    expect((await api.cargar(["mesas"])).mesas.find((m) => m.id === 8)).toMatchObject({ estado: "libre" });
+    expect((await api.cargar(["mesas"])).mesas).toHaveLength(8);
   });
 
   it("cocina: cambios con el estado visto, lotes y tachados como el servidor", async () => {

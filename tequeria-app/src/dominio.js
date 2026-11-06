@@ -433,5 +433,7 @@ export function pinDebil(p) {
   return "0123456789012345".includes(p) || "9876543210987654".includes(p);
 }
 
-export const hora = () => new Date().toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", hour12: false });
-export const fecha = () => new Date().toLocaleDateString("es-MX", { day: "2-digit", month: "2-digit", year: "numeric" });
+// Hora y fecha en la zona horaria del negocio (como _hora y _fecha del servidor). Sin zona, la del navegador.
+const enZona = (zona) => (zona && zonaValida(zona) ? { timeZone: zona } : {});
+export const hora = (zona) => new Date().toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", hour12: false, ...enZona(zona) });
+export const fecha = (zona) => new Date().toLocaleDateString("es-MX", { day: "2-digit", month: "2-digit", year: "numeric", ...enZona(zona) });

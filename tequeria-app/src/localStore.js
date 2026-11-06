@@ -93,7 +93,10 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     return { ok: true, admin: a };
   }
   const conPin = (r) => { if (!r.ok) throw new ErrorApi(r.error, mensajePin(r), r); return r; };
-  const mesa = (id) => db.mesas.find((m) => m.id === id) || fallar("MESA", "La mesa no existe.");
+  // zona horaria del negocio: horas y fechas de comandas, cobros, gastos y cortes (como el servidor)
+  const zona = () => db.config.zonaHoraria || ZONA_DEFAULT;
+  // una mesa desactivada (Administración → Negocio) es, para la operación, una que no existe
+  const mesa = (id) => db.mesas.find((m) => m.id === id && m.activa !== false) || fallar("MESA", "La mesa no existe.");
 
   function valorar(items, empaque) {
     return (items || []).map((it) => {
@@ -128,7 +131,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
     // desde: inicio de la visita actual (comanda original más reciente de la mesa ocupada)
     const desde = (m) => (m.estado !== "ocupada" ? null
       : db.tickets.filter((t) => t.mesaId === m.id && !t.esExtra && !t.reenvio && t.creado).map((t) => t.creado).sort().pop() || null);
-    if (quiere("mesas")) r.mesas = db.mesas.map((m) => ({ ...m, desde: desde(m) }));
+    if (quiere("mesas")) r.mesas = db.mesas.filter((m) => m.activa !== false).map(({ activa, ...m }) => ({ ...m, desde: desde(m) }));
     const privado = (t) => (u.rol === "mesero" && t.creadoPor !== u.id ? { ...t, domicilio: null } : t);
     if (quiere("cocina")) r.cocina = db.tickets.filter((t) => !t.archivado).map((t) => privado(conCobro(t)));
     if (caja && quiere("historial")) {
@@ -152,7 +155,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       if (version != null && (m.version || 0) !== version) fallar("CONFLICTO", "Otro dispositivo cambió esta mesa. Revisa el borrador antes de guardar.");
       const hay = (pedido?.ordenes || []).some((o) => o.items.length > 0);
       Object.assign(m, hay
-        ? { estado: "borrador", pedido: clone(pedido), mesero: u.nombre, hora: hora() }
+        ? { estado: "borrador", pedido: clone(pedido), mesero: u.nombre, hora: hora(zona()) }
         : { estado: "libre", pedido: null, mesero: null, hora: null, extras: [] });
       m.version = (m.version || 0) + 1;
       guardar(["mesas"]);
@@ -198,7 +201,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
         const b = db.bebidas.find((x) => x.id === id);
         if (!b || b.cantidad < q) fallar("SIN_EXISTENCIA", `No hay suficiente ${b?.nombre || id} (quedan ${b?.cantidad || 0}).`);
       }
-      const h = hora();
+      const h = hora(zona());
       const total = ticketTotal({ ordenes, extras });
       let m = null;
       if (tipo === "aqui") {
@@ -214,7 +217,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       db.folio = (db.folio || 0) + 1;
       const t = {
         id: p.id, folio: db.folio, tipo, esExtra: !!p.esExtra, origen, mesaId: m ? m.id : null, ordenes, extras, mesero: u.nombre,
-        hora: h, fecha: fecha(), estado: "pendiente", total, domicilio, reenvio: false,
+        hora: h, fecha: fecha(zona()), estado: "pendiente", total, domicilio, reenvio: false,
         cuenta: p.cuenta === "separada" ? "separada" : "junta", paraLlevar: tipo === "aqui" && !p.esExtra && !!p.paraLlevar,
         referencia: tipo === "llevar" ? (p.referencia || "").trim() || null : null, creadoPor: u.id, archivado: false,
         creado: new Date().toISOString(), recibido: null,
@@ -232,7 +235,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       const ordenes = [...(m.pedido?.ordenes || []), ...(m.extras || []).flatMap((e) => e.ordenes || [])];
       const extras = [...(m.pedido?.extras || []), ...(m.extras || []).flatMap((e) => e.extras || [])];
       const t = { id, tipo: "aqui", esExtra: false, origen: `Mesa ${m.id}`, mesaId: m.id, ordenes: clone(ordenes), extras: clone(extras),
-        mesero: m.mesero || u.nombre, hora: hora(), fecha: fecha(), estado: "pendiente", total: 0, domicilio: null,
+        mesero: m.mesero || u.nombre, hora: hora(zona()), fecha: fecha(zona()), estado: "pendiente", total: 0, domicilio: null,
         reenvio: true, cuenta: "junta", paraLlevar: false, referencia: null, creadoPor: u.id, archivado: false,
         creado: new Date().toISOString(), recibido: null };
       db.tickets.unshift(t);
@@ -293,7 +296,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       const id = uid();
       const gastos = db.gastos.filter((g) => !g.corteId);
       const res = resumenPeriodo(abiertos, gastos, cobros);
-      db.cortes.unshift({ id, fecha: fecha(), hora: hora(), tickets: res.count, total: res.total, gastos: res.gastos,
+      db.cortes.unshift({ id, fecha: fecha(zona()), hora: hora(zona()), tickets: res.count, total: res.total, gastos: res.gastos,
         cobrado: res.cobrado.total, porCobrar: res.porCobrar,
         detalle: { porTipo: res.porTipo, porMesero: res.porMesero, top: res.top, gastos: res.gastos, cobrado: res.cobrado,
           porCobrar: res.porCobrar, noCobrado: res.noCobrado },
@@ -330,7 +333,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       const mesas = [...new Set(ts.map((t) => t.mesaId).filter(Boolean))];
       const origen = ts.length === 1 ? ts[0].origen : mesas.length === 1 ? `Mesa ${mesas[0]}` : "Varias cuentas";
       const c = { id, metodo, total, propina: prop, recibido: rec, tickets: ts.length, origen, cobradoPor: u.id, cobradoNombre: u.nombre,
-        fecha: fecha(), hora: hora(), corteId: null, anulado: false };
+        fecha: fecha(zona()), hora: hora(zona()), corteId: null, anulado: false };
       db.cobros.unshift(c);
       ts.forEach((t) => { t.cobroId = id; });
       let mesaLiberada = false;
@@ -445,12 +448,18 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       exigir(["admin"]);
       const n = Number(cantidad);
       if (!Number.isInteger(n) || n < 1 || n > MAX_MESAS) fallar("cantidad", mensajeConfig({ error: "cantidad" }));
-      const ocupadas = db.mesas.filter((m) => m.id > n
+      const ocupadas = db.mesas.filter((m) => m.id > n && m.activa !== false
         && (m.estado !== "libre" || db.tickets.some((t) => t.mesaId === m.id && !t.cobroId && !t.reenvio))).map((m) => m.id);
       if (ocupadas.length) fallar("ocupadas", mensajeConfig({ error: "ocupadas", mesas: ocupadas }));
-      const actuales = new Map(db.mesas.map((m) => [m.id, m]));
-      db.mesas = Array.from({ length: n }, (_, i) => actuales.get(i + 1)
-        || { id: i + 1, estado: "libre", pedido: null, mesero: null, hora: null, extras: [], version: 0 });
+      // como el servidor: las que sobran se desactivan, no se borran (sus comandas anteriores las siguen señalando)
+      for (const m of db.mesas) {
+        const activa = m.id <= n;
+        if ((m.activa !== false) !== activa) { m.activa = activa; m.version = (m.version || 0) + 1; }
+      }
+      for (let id = 1; id <= n; id++) {
+        if (!db.mesas.some((m) => m.id === id)) db.mesas.push({ id, estado: "libre", pedido: null, mesero: null, hora: null, extras: [], version: 0, activa: true });
+      }
+      db.mesas.sort((a, b) => a.id - b.id);
       guardar(["mesas"]);
       return { ok: true, mesas: n };
     },
@@ -472,7 +481,7 @@ export function crearLocal({ ErrorApi, mensajePin }) {
       if (!concepto.trim()) fallar("DATOS", "Escribe el concepto del gasto.");
       if (!(monto > 0)) fallar("DATOS", "El monto debe ser mayor a cero.");
       if (!db.gastos.some((g) => g.id === id)) {
-        db.gastos.unshift({ id, concepto: concepto.trim().slice(0, 120), monto: redondear(monto), fecha: fecha(), hora: hora(), user: u.nombre });
+        db.gastos.unshift({ id, concepto: concepto.trim().slice(0, 120), monto: redondear(monto), fecha: fecha(zona()), hora: hora(zona()), user: u.nombre });
       }
       guardar(["gastos", "historial"]);
     },

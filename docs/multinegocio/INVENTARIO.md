@@ -235,7 +235,7 @@ deberán adaptarse cuando se implemente, además de agregar casos de rechazo y t
 |---|---|
 | `tests/dominio.test.js` | 8 |
 | `tests/e2e/comandas.spec.js` | 10 |
-| `tests/localStore.test.js` | 37 |
+| `tests/localStore.test.js` | 42 |
 | `tests/sql/credenciales.test.js` | 6 |
 | `tests/sql/duenos.test.js` | 6 |
 | `tests/sql/esquema.test.js` | 20 |

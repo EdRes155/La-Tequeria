@@ -1,5 +1,6 @@
 node_modules
 dist
+dist-remoto-simulado
 .DS_Store
 # configuración local: nunca se versiona (se conserva el ejemplo)
 .env

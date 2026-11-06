@@ -78,6 +78,10 @@ const TIPOS = {
   domicilio: { label: "Domicilio",       corto: "Domicilio", color: "var(--barro)", icon: Bike },
 };
 
+// Sin autorización: la sesión del operador venció o se revocó (SESION), o el equipo dejó de estar autorizado
+// (DISPOSITIVO). En los dos casos se cierra la sesión y la pantalla queda vacía.
+const sinAutorizacion = (e) => e?.codigo === "SESION" || e?.codigo === "DISPOSITIVO";
+
 /* borradores de comanda: viven en App para no perderse al cambiar de pantalla */
 const normalizarPedido = (p) => ({
   ordenes: (p?.ordenes?.length ? p.ordenes : [nuevaOrden(1)]).map((o) => ({ prep: "con-todo", ...o, items: o.items || [] })),
@@ -159,7 +163,13 @@ export default function App() {
   }, []);
   useEffect(() => { if (!usuario) cargarPantalla(); }, [usuario, cargarPantalla]);
 
+  // Época de la sesión en pantalla: sube al cerrarla. Una carga o un latido que responde después ya no toca
+  // la pantalla, y el reintento pendiente se cancela.
+  const epoca = useRef(0);
+  const reintento = useRef(null);
   const cerrarSesion = useCallback((mensaje = null) => {
+    epoca.current++;
+    clearTimeout(reintento.current); reintento.current = null;
     api.salir();
     setSesion(null); setData(null); setBorradores({}); setView("mesas"); setCtx(null);
     setAviso(mensaje); setCocinaIncierta(false); setErrorCarga(null); setCambiandoPin(false); setMonitorPref(null);
@@ -168,9 +178,8 @@ export default function App() {
   const manejarError = useCallback((e) => {
     if (!(e instanceof ErrorApi)) { console.error(e); toast("Ocurrió un error inesperado.", "error"); return; }
     if (e.codigo === "DESCARTADA") return;   // respuesta de antes de cambiar de sucursal o de autorización
-    if (e.codigo === "SESION") { cerrarSesion(e.message); return; }
-    // el equipo dejó de estar autorizado: el almacén ya borró sus claves y canales; se vuelve a la entrada
-    if (e.codigo === "DISPOSITIVO") { cerrarSesion(e.message); return; }
+    // sesión vencida o equipo que dejó de estar autorizado (el almacén ya borró sus claves y canales)
+    if (sinAutorizacion(e)) { cerrarSesion(e.message); return; }
     if (e.codigo === "CAMBIAR_PIN") { setSesion((s) => s && { ...s, debeCambiarPin: true }); return; }
     if (e.codigo === "RED") setSinRed(true);
     toast(e.message, "error");
@@ -182,7 +191,6 @@ export default function App() {
   const [diferidas, setDiferidas] = useState([]);
   const diferidasRef = useRef(new Set());
   const marcarDiferidas = (fn) => { fn(diferidasRef.current); setDiferidas([...diferidasRef.current]); };
-  const reintento = useRef(null);
 
   // Cada parte del estado solo se reemplaza con la respuesta más reciente que se pidió para ella
   const pedidas = useRef({});
@@ -195,10 +203,11 @@ export default function App() {
       partes = pedido.filter((p) => !luego.includes(p));
       if (!partes.length) return;
     }
-    const n = ++contador.current;
+    const n = ++contador.current, ep = epoca.current;
     (partes || TODAS).forEach((p) => { pedidas.current[p] = n; });
     try {
       const r = await api.cargar(partes);
+      if (ep !== epoca.current) return;   // la sesión se cerró mientras tanto
       if (diferidasRef.current.size) marcarDiferidas((s) => (partes || TODAS).forEach((p) => s.delete(p)));
       const vigente = (p) => pedidas.current[p] === n;
       const parche = { yo: r.yo };
@@ -209,7 +218,8 @@ export default function App() {
       setErrorCarga(null); setSinRed(false);
       if (r.yo?.cambiarPin) setSesion((s) => (s && !s.debeCambiarPin ? { ...s, debeCambiarPin: true } : s));
     } catch (e) {
-      if (e.codigo === "SESION") { cerrarSesion(e.message); return; }
+      if (ep !== epoca.current || e.codigo === "DESCARTADA") return;
+      if (sinAutorizacion(e)) { cerrarSesion(e.message); return; }
       if (e.codigo === "RED") setSinRed(true);
       setErrorCarga(e);
       // se vuelve a intentar sola en unos segundos (una sola espera a la vez)
@@ -242,14 +252,15 @@ export default function App() {
     if (!usuario || usuario.rol !== "cocinero" || debeCambiar) return;
     let vivo = true;
     const beat = async () => {
+      const ep = epoca.current;
       try {
         const ok = await api.latido();
-        if (!vivo) return;
+        if (!vivo || ep !== epoca.current) return;
         setCocinaIncierta(false);
         if (ok === false) cerrarSesion("Otra cocina tomó la sesión en otro dispositivo.");
       } catch (e) {
-        if (!vivo) return;
-        if (e.codigo === "SESION") cerrarSesion(e.message); else setCocinaIncierta(true);
+        if (!vivo || ep !== epoca.current || e.codigo === "DESCARTADA") return;
+        if (sinAutorizacion(e)) cerrarSesion(e.message); else setCocinaIncierta(true);
       }
     };
     beat();
@@ -290,7 +301,7 @@ export default function App() {
           refrescar(["mesas", "bebidas", "cocina", "historial"]);
           return r;
         } catch (e) {
-          if (e.codigo === "SESION" || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (sinAutorizacion(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
           if (e.codigo === "RED") setSinRed(true);
           if (e.codigo === "MESA_OCUPADA" || e.codigo === "SIN_EXISTENCIA" || e.codigo === "PRODUCTO") refrescar(["mesas", "bebidas", "config", "carnes"]);
           throw e;
@@ -360,7 +371,7 @@ export default function App() {
           refrescar(["porCobrar", "historial", "mesas", "cocina"]);
           return r;
         } catch (e) {
-          if (e.codigo === "SESION" || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (sinAutorizacion(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
           if (e.codigo === "RED") setSinRed(true);
           if (e.codigo === "YA_COBRADO" || e.codigo === "TICKET") refrescar(["porCobrar", "historial"]);
           throw e;
@@ -374,7 +385,7 @@ export default function App() {
           refrescar(["porCobrar", "historial", "mesas", "cocina"]);
           return r;
         } catch (e) {
-          if (e.codigo === "SESION" || e.codigo === "CAMBIAR_PIN") manejarError(e);
+          if (sinAutorizacion(e) || e.codigo === "CAMBIAR_PIN") manejarError(e);
           if (e.codigo === "RED") setSinRed(true);
           if (e.codigo === "YA_COBRADO" || e.codigo === "TICKET") refrescar(["porCobrar", "historial"]);
           throw e;
@@ -496,7 +507,7 @@ export default function App() {
         {view === "gastos"     && (puede(userActual, "gastos") ? <Gastos {...props} /> : <SinAcceso />)}
         {view === "admin"      && (puede(userActual, "admin") ? <Admin {...props} /> : <SinAcceso />)}
       </Resguardo></main>
-      {cobro && <CobroModal {...cobro} db={db} negocio={data.nombreNegocio} onClose={() => setCobro(null)} />}
+      {cobro && <CobroModal {...cobro} db={db} negocio={data.nombreNegocio} zona={data.zonaHoraria} onClose={() => setCobro(null)} />}
       {comunes}
     </div>
   );
@@ -1239,8 +1250,8 @@ function Comanda({ data, db, user, go, ctx, borrador, setBorrador, quitarBorrado
 
   const previewTicket = esExtra
     ? { id: "preview", tipo: "aqui", esExtra: true, origen: `Mesa ${mesaId}`, paraLlevar: false,
-        ordenes: pedido.ordenes, extras: pedido.extras || [], mesero: user.nombre, hora: hora(), fecha: fecha(), domicilio: null }
-    : buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user);
+        ordenes: pedido.ordenes, extras: pedido.extras || [], mesero: user.nombre, hora: hora(data.zonaHoraria), fecha: fecha(data.zonaHoraria), domicilio: null }
+    : buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user, data.zonaHoraria);
 
   const envioAlerta = envio?.estado === "error" ? (
     <div className="envio-alerta" role="alert">
@@ -1412,13 +1423,13 @@ function ResumenPedido({ ped }) {
   </>);
 }
 
-function buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user) {
+function buildTicketPreview(entrada, tipo, mesaId, dom, refLlevar, pedido, user, zona) {
   let tt, origen, paraLlevar = false;
   if (entrada === "aqui") { tt = "aqui"; origen = `Mesa ${mesaId}`; paraLlevar = tipo === "llevar"; }
   else if (entrada === "llevar") { tt = "llevar"; origen = refLlevar.trim() ? `Para llevar · ${refLlevar.trim()}` : "Para llevar"; }
   else { tt = "domicilio"; origen = dom.nombre || "Domicilio"; }
   return { id: "preview", tipo: tt, origen, paraLlevar, ordenes: pedido.ordenes, extras: pedido.extras || [],
-    mesero: user.nombre, hora: hora(), fecha: fecha(), domicilio: entrada === "domicilio" ? dom : null };
+    mesero: user.nombre, hora: hora(zona), fecha: fecha(zona), domicilio: entrada === "domicilio" ? dom : null };
 }
 
 /* columna de menú */
@@ -1577,7 +1588,7 @@ function notificar(titulo, cuerpo) {
 /* ============================== COBRO ============================== */
 const ICONO_PAGO = { efectivo: Banknote, tarjeta: CreditCard, transferencia: ArrowLeftRight };
 
-function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
+function CobroModal({ cuentas, titulo, mesaId, db, negocio, zona, onClose }) {
   const id = useId();
   const cobroId = useRef(uid());            // el mismo id en reintentos: el servidor no duplica
   const [sel, setSel] = useState(() => new Set(cuentas.map((t) => t.id)));
@@ -1637,8 +1648,8 @@ function CobroModal({ cuentas, titulo, mesaId, db, negocio, onClose }) {
     return {
       id: hecho.id, folio: c.map((t) => t.folio).filter(Boolean).join(", "), tipo: c[0].tipo, origen: titulo,
       paraLlevar: c.length === 1 && c[0].paraLlevar, ordenes: c.flatMap((t) => t.ordenes || []), extras: c.flatMap((t) => t.extras || []),
-      mesero: c[0].mesero, hora: hora(), fecha: fecha(), domicilio: c.length === 1 ? c[0].domicilio : null, cuenta: "junta",
-      cobro: { metodo: hecho.metodo, total: hecho.total, propina: hecho.propina, recibido: hecho.recibido, hora: hora() },
+      mesero: c[0].mesero, hora: hora(zona), fecha: fecha(zona), domicilio: c.length === 1 ? c[0].domicilio : null, cuenta: "junta",
+      cobro: { metodo: hecho.metodo, total: hecho.total, propina: hecho.propina, recibido: hecho.recibido, hora: hora(zona) },
     };
   };
 
@@ -2389,7 +2400,7 @@ function Cocina({ data, db, user, errorCarga, desactualizado, abrirMonitor }) {
   const res = data.periodo || { total: 0, count: 0, porTipo: {}, porMesero: {}, top: [], gastos: 0 };
 
   const compartirWhatsApp = () => {
-    const txt = textoCorteWhatsApp(data.nombreNegocio, res, fecha());
+    const txt = textoCorteWhatsApp(data.nombreNegocio, res, fecha(data.zonaHoraria));
     try { window.open("https://wa.me/?text=" + encodeURIComponent(txt), "_blank", "noopener"); }
     catch { try { navigator.clipboard.writeText(txt); toast("Resumen copiado", "ok"); } catch {} }
   };
