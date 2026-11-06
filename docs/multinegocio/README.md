@@ -82,11 +82,13 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
 
 **B. Staging con Supabase real**
 
-4. **Proyecto de staging:** el esquema, inicio anónimo (con CAPTCHA o límite), correo con
-   confirmación, expiración del JWT y la app en una vista previa.
-5. **Pruebas contra Supabase real** (paso 7 del núcleo, MODELO.md §9): vinculación, dueños, suspensión
-   y borrado de identidades, tiempo real privado, y medir el tiempo máximo en que un equipo revocado aún
-   recibe avisos con la conexión abierta (cierra el último caso pendiente de la matriz).
+4. **Proyecto de staging** (hecho, [STAGING.md](STAGING.md)): el esquema, inicio anónimo, correo con
+   confirmación, JWT de 10 minutos, solo canales privados y las vistas previas de Vercel apuntando a
+   staging. Falta el CAPTCHA del inicio anónimo.
+5. **Pruebas contra Supabase real** (paso 7 del núcleo, MODELO.md §9) (en curso): prueba de humo
+   (`scripts/staging/humo.mjs`) y recorrido de la app en el navegador (`scripts/staging/navegador.mjs`)
+   en verde; tiempo de corte medido (≈ 8 min con JWT de 10). Falta repetirlo con el cliente del paso 6
+   terminado (panel de dueños y desbloqueo).
 6. **Pruebas de capacidad** (PLAN §5): equipos a la vez, llamadas, conexiones, CPU, mensajes de tiempo
    real, almacenamiento y exportaciones; de ahí, los costos.
 7. **Validar La Tequería y «Taquería Piloto B»** con datos sintéticos: venta, cobro, corte, inventario y

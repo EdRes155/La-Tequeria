@@ -61,6 +61,11 @@ function traducir(error, status, vencido = false) {
     return new ErrorApi("RED", "El servidor no está disponible en este momento. Inténtalo de nuevo en unos segundos.", { incierto: true });
   }
   if (TRANSITORIOS.has(error.code)) return new ErrorApi("RED", "El servidor estaba ocupado. Inténtalo de nuevo.", { incierto: true });
+  // Sin identidad de equipo (sin sesión de Supabase, o vencida sin poder renovarse) la llamada va con la llave
+  // pública, y anon no ejecuta ninguna función: para la app es un equipo sin vincular (comprobado en staging)
+  if (error.code === "42501") {
+    return new ErrorApi("DISPOSITIVO", "Este equipo no está vinculado a una sucursal. Pide a un dueño o encargado un código para vincularlo.");
+  }
   if (error.code === "PGRST202" || error.code === "42883") {
     return new ErrorApi("ESQUEMA", "La base de datos no está actualizada. Ejecuta supabase-schema.sql (v3) en Supabase.");
   }

@@ -291,6 +291,9 @@ servidor solo devuelve el token para armar el enlace.
     dicen los intentos que quedan o cuánto esperar;
   - la identidad no se borra al recibir `DISPOSITIVO`: si la causa es temporal (sucursal o cuenta
     inactiva, suspensión), el equipo vuelve a servir sin vincularse de nuevo;
+  - sin identidad todavía (o vencida sin poder renovarse), Supabase responde `42501` (la llave pública no
+    ejecuta nada): la app lo trata como equipo sin vincular y no crea una identidad hasta que se vincula
+    (comprobado en staging);
   - lo prueban los recorridos `tests/e2e/remoto/vinculacion.spec.js`.
 - **Sesiones independientes:** la identidad del dispositivo no es la sesión del operador. Cambiar de
   turno o vencer las 12 horas no obliga a vincular otra vez. Y renovar el JWT del dispositivo no
@@ -474,6 +477,9 @@ Reglas de aplicación (del plan):
 6. **Cliente:** vinculación del equipo (hecha, §4); panel de dueños, pantalla de desbloqueo,
    validación del PIN de 6 a 8 dígitos en la interfaz (también en el modo local) y borradores por
    autor.
-7. **Validación con Supabase real (staging):** inicio anónimo, correo verificado, suspensión de
-   identidades, canales privados con el servidor de Realtime real y la medición del tiempo máximo en
-   que un equipo revocado aún recibe avisos con la conexión abierta (el caso «(paso 7)» de la matriz).
+7. **Validación con Supabase real (staging)** (en curso, [STAGING.md](STAGING.md)): proyecto aparte con
+   el esquema, inicio anónimo, correo verificado y solo canales privados; prueba de humo y recorrido de
+   la app en el navegador contra el servidor real. Medido: con la conexión abierta, un equipo revocado
+   dejó de recibir avisos a los ≈ 8 minutos con un JWT de 10 (el peor caso es la vigencia del JWT). Falta
+   el CAPTCHA del inicio anónimo y repetir la medición con el cliente del paso 6 terminado; el caso
+   «(paso 7)» de la matriz sigue pendiente hasta entonces.

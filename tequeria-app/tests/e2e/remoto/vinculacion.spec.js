@@ -47,7 +47,9 @@ test("primera vez: el equipo se vincula con el código, entra su personal y lo c
   const srv = await servidorSimulado(page, s.respuestas);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Vincular este equipo" })).toBeVisible();
-  await expect(page.getByText("Este equipo no está autorizado", { exact: false })).toBeVisible();
+  // sin identidad todavía: Supabase responde 42501 (anon no ejecuta nada) y la app lo trata como equipo sin vincular
+  await expect(page.getByText("Este equipo no está vinculado a una sucursal", { exact: false })).toBeVisible();
+  expect(srv.identidades).toEqual([]);   // no crea una identidad solo por abrir la app
   // un código equivocado dice cuántos intentos quedan; el bueno, con minúsculas y guion, vincula
   await vincular(page, "abcd-2344");
   await expect(page.getByText("Código no válido, vencido o ya usado. Te quedan 4 intento(s).")).toBeVisible();

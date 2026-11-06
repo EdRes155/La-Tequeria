@@ -56,6 +56,11 @@ export async function servidorSimulado(page, respuestas) {
     const auth = route.request().headers()["authorization"] || "";
     const quien = (() => { try { return JSON.parse(Buffer.from(auth.split(".")[1], "base64url").toString()).sub || null; } catch { return null; } })();
     llamadas.push({ fn, args, quien, t: Date.now() });
+    // Como Supabase real: sin sesión, la llamada va con la llave pública y anon no ejecuta ninguna función
+    if (!quien) {
+      return route.fulfill({ status: 401, contentType: "application/json",
+        body: JSON.stringify({ code: "42501", message: `permission denied for function ${fn}`, hint: null, details: null }) });
+    }
     const r = tabla[fn] ? await tabla[fn](args, quien) : { status: 404, body: { code: "PGRST202", message: "no existe" } };
     const esRespuesta = r && typeof r === "object" && "status" in r && "body" in r;
     await route.fulfill({
@@ -68,6 +73,15 @@ export async function servidorSimulado(page, respuestas) {
     responder(fn, f) { tabla[fn] = f; },
     cuantas: (fn) => llamadas.filter((x) => x.fn === fn).length,
   };
+}
+
+// El navegador ya tiene la identidad de un equipo (sesión anónima guardada por supabase-js), como un equipo
+// vinculado antes de abrir la app
+export async function conIdentidad(page, uid = "equipo-vinculado") {
+  const sesion = { access_token: tokenDe(uid), token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600,
+    refresh_token: "renovar-" + uid, user: { id: uid, aud: "authenticated", role: "authenticated", is_anonymous: true } };
+  await page.addInitScript((s) => { if (!localStorage.getItem("tequeria-identidad-equipo")) localStorage.setItem("tequeria-identidad-equipo", s); },
+    JSON.stringify(sesion));
 }
 
 // Pantalla de entrada y login de un usuario de la sucursal simulada
