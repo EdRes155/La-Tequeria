@@ -23,18 +23,40 @@ export function estadoInicial(yo) {
 export const errorDe = (codigo, mensaje) => ({ status: 400, body: { code: "P0001", message: codigo, hint: mensaje, details: null } });
 export const NO_AUTORIZADO = errorDe("DISPOSITIVO", "Este equipo no está autorizado. Pide a un dueño que lo vincule a la sucursal.");
 
-// Instala el servidor en la página. respuestas: { función: (args) => datos | { status, body } }.
-// Devuelve el registro de llamadas y una forma de cambiar respuestas.
+// Token con forma de JWT (supabase-js y Realtime lo leen) para una identidad anónima simulada
+const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+const tokenDe = (uid) => `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: uid, role: "authenticated", is_anonymous: true,
+  exp: Math.floor(Date.now() / 1000) + 3600 })}.firma`;
+
+// Instala el servidor en la página. respuestas: { función: (args, quien) => datos | { status, body } }, donde
+// quien es el id de la identidad anónima que llama (null sin sesión). Simula también Supabase Auth: cada
+// inicio de sesión anónimo crea una identidad nueva. Devuelve el registro de llamadas, las identidades
+// creadas y una forma de cambiar respuestas.
 export async function servidorSimulado(page, respuestas) {
   const llamadas = [];
+  const identidades = [];
   const tabla = { ...respuestas };
   await page.route(`${SUPABASE_SIMULADO}/**`, async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/auth/v1/signup") {
+      const uid = `anonima-${identidades.length + 1}`;
+      identidades.push(uid);
+      llamadas.push({ fn: "auth:signup", args: {}, quien: null, t: Date.now() });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        access_token: tokenDe(uid), token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_token: "renovar-" + uid, user: { id: uid, aud: "authenticated", role: "authenticated", is_anonymous: true } }) });
+    }
+    if (url.pathname === "/auth/v1/logout") {
+      llamadas.push({ fn: "auth:logout", args: {}, quien: null, t: Date.now() });
+      return route.fulfill({ status: 204, body: "" });
+    }
     const fn = (/\/rest\/v1\/rpc\/(\w+)/.exec(url.pathname) || [])[1];
     if (!fn) return route.fulfill({ status: 404, body: "{}" });
     const args = route.request().postDataJSON() || {};
-    llamadas.push({ fn, args, t: Date.now() });
-    const r = tabla[fn] ? await tabla[fn](args) : { status: 404, body: { code: "PGRST202", message: "no existe" } };
+    const auth = route.request().headers()["authorization"] || "";
+    const quien = (() => { try { return JSON.parse(Buffer.from(auth.split(".")[1], "base64url").toString()).sub || null; } catch { return null; } })();
+    llamadas.push({ fn, args, quien, t: Date.now() });
+    const r = tabla[fn] ? await tabla[fn](args, quien) : { status: 404, body: { code: "PGRST202", message: "no existe" } };
     const esRespuesta = r && typeof r === "object" && "status" in r && "body" in r;
     await route.fulfill({
       status: esRespuesta ? r.status : 200, contentType: "application/json",
@@ -42,7 +64,7 @@ export async function servidorSimulado(page, respuestas) {
     });
   });
   return {
-    llamadas,
+    llamadas, identidades,
     responder(fn, f) { tabla[fn] = f; },
     cuantas: (fn) => llamadas.filter((x) => x.fn === fn).length,
   };

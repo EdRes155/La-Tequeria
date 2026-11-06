@@ -601,7 +601,10 @@ function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
   };
 
   let cuerpo;
-  if (error) {
+  if (error?.codigo === "DISPOSITIVO" && remoto) {
+    // equipo sin vincular, revocado o de una sucursal o cuenta inactiva: se vincula con un código
+    cuerpo = <Vincular motivo={aviso ? null : error.message} onListo={reintentar} />;
+  } else if (error) {
     cuerpo = (<div role="alert">
       <h1 className="login-titulo">No hay conexión</h1>
       <p className="login-err">{error.message}</p>
@@ -661,6 +664,53 @@ function Login({ pantalla, error, reintentar, aviso, sinRed, onEntrar }) {
       {aviso && <div className="login-err" role="alert" style={{ marginBottom: 12 }}>{aviso}</div>}
       {cuerpo}
     </EntradaShell>
+  );
+}
+
+// Vincular este equipo a una sucursal (MODELO.md §4): el código lo genera un dueño o encargado en su panel;
+// vence en 10 minutos y sirve una sola vez. La identidad del equipo es una sesión anónima de Supabase.
+function Vincular({ motivo, onListo }) {
+  const id = useId();
+  const [codigo, setCodigo] = useState("");
+  const [nombre, setNombre] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const limpio = codigo.replace(/[\s-]/g, "");
+  const enviar = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    setErr(""); setBusy(true);
+    try {
+      const r = await api.vincular(codigo, nombre);
+      toast(`Equipo vinculado a ${r.sucursal.nombre}`, "ok");
+      onListo();
+    } catch (ex) {
+      // ya vinculado: o lo vinculó otra pestaña, o su sucursal o su cuenta no está activa por ahora
+      setErr(ex.codigo === "VINCULADO"
+        ? "Este equipo ya está vinculado. Si no puede entrar, su sucursal o su cuenta no está activa por ahora: habla con el dueño."
+        : ex instanceof ErrorApi ? ex.message : "No se pudo vincular el equipo. Inténtalo de nuevo.");
+    } finally { setBusy(false); }
+  };
+  return (
+    <form onSubmit={enviar}>
+      <h1 className="login-titulo">Vincular este equipo</h1>
+      {motivo && <p className="login-err" role="alert">{motivo}</p>}
+      <p className="login-sub">Pide a un dueño o encargado un código en el panel de dueños. Vence en 10 minutos y sirve una sola vez.</p>
+      <div className="campo"><label htmlFor={id + "c"}>Código de vinculación</label>
+        <input id={id + "c"} className="inp codigo-vinculacion" value={codigo} autoComplete="one-time-code" autoCapitalize="characters"
+          spellCheck={false} maxLength={11} placeholder="ABCD-2345" aria-invalid={!!err} aria-describedby={err ? id + "e" : undefined}
+          onChange={(e) => { setErr(""); setCodigo(e.target.value.toUpperCase().replace(/[^A-Z0-9 -]/g, "")); }} /></div>
+      <div className="campo"><label htmlFor={id + "n"}>Nombre de este equipo</label>
+        <input id={id + "n"} className="inp" value={nombre} maxLength={60} autoComplete="off" placeholder="Caja, Cocina, Tablet de meseros…"
+          onChange={(e) => { setErr(""); setNombre(e.target.value); }} /></div>
+      {err && <div className="login-err" id={id + "e"} role="alert">{err}</div>}
+      <button type="submit" className="btn btn-primary btn-block" disabled={busy || limpio.length !== 8 || !nombre.trim()}>
+        {busy ? <Loader2 size={16} className="girando" aria-hidden="true" /> : null} Vincular
+      </button>
+      <button type="button" className="btn btn-ghost btn-block" onClick={onListo} style={{ marginTop: 8 }}>
+        <RefreshCw size={16} aria-hidden="true" /> Volver a intentar entrar
+      </button>
+    </form>
   );
 }
 

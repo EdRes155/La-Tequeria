@@ -128,8 +128,33 @@ function crearRemoto() {
     return r;
   };
 
+  // Identidad del equipo en Supabase (MODELO.md §4): una sesión anónima. nueva: descarta la anterior (por
+  // ejemplo, revocada) y empieza otra; la anterior no se recupera.
+  async function asegurarIdentidad({ nueva = false } = {}) {
+    if (nueva) { try { await supabase.auth.signOut({ scope: "local" }); } catch {} }
+    const { data } = await supabase.auth.getSession();
+    if (data?.session) return;
+    const { error } = await supabase.auth.signInAnonymously();
+    if (error) throw new ErrorApi("IDENTIDAD", "No se pudo iniciar la identidad de este equipo. Revisa la conexión e inténtalo de nuevo.");
+  }
+
   return {
     modo: "remoto",
+    // Vincular este equipo a una sucursal con el código que generó un dueño (vincular_dispositivo). Si la
+    // identidad del equipo había sido revocada, se empieza una nueva y se usa el mismo código.
+    async vincular(codigo, nombre) {
+      await asegurarIdentidad();
+      const llamar = () => rpc("vincular_dispositivo", { p_codigo: codigo, p_nombre: nombre });
+      let r;
+      try { r = await llamar(); } catch (e) {
+        if (e.codigo !== "REVOCADO") throw e;
+        await asegurarIdentidad({ nueva: true });
+        r = await llamar();
+      }
+      if (r?.ok === false) throw new ErrorApi(r.error, mensajeVinculacion(r), r);
+      if (cambiarSucursal(r.sucursal.id)) { generacion++; sesion = null; }
+      return r;
+    },
     async pantallaLogin() {
       const r = await rpc("usuarios_login", {}, seguro);
       // el servidor dice de qué sucursal es este equipo; si es otra que la anterior, lo de aquella se borra
@@ -240,6 +265,19 @@ function crearRemoto() {
       }),
     },
   };
+}
+
+// Texto para las respuestas {ok:false, error} de vincular_dispositivo
+export function mensajeVinculacion(r) {
+  const min = Math.max(1, Math.ceil((r?.espera || 0) / 60));
+  switch (r?.error) {
+    case "codigo": return r.restantes > 0
+      ? `Código no válido, vencido o ya usado. Te quedan ${r.restantes} intento(s).`
+      : "Código no válido, vencido o ya usado. Por seguridad, el siguiente intento tendrá que esperar unos minutos.";
+    case "bloqueado": return `Demasiados intentos con códigos equivocados. Espera ${min} min e inténtalo de nuevo.`;
+    case "nombre": return "Escribe un nombre para este equipo (por ejemplo «Caja» o «Cocina»).";
+    default: return "No se pudo vincular el equipo.";
+  }
 }
 
 // Texto para las respuestas {ok:false, error} de login, PIN y administración

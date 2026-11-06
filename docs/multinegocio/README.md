@@ -72,11 +72,11 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
    (los cubre la matriz). Pruebas en `tests/sql/configuracion.test.js`, `tests/localStore.test.js` y un
    recorrido en navegador.
 3. **Paso 6: cliente:**
+   - pantalla de vinculación (sesión anónima y código) y recuperación (`VINCULADO`, `REVOCADO`,
+     `DISPOSITIVO`) (hecho; recorridos «remoto simulado»);
    - entrada de dueños (correo verificado o Google) y panel: cuentas, sucursales, miembros,
      invitaciones (con su envío por correo), códigos, equipos y revocación; reintento de `40001` en
      una transacción nueva;
-   - pantalla de vinculación (sesión anónima y código) y recuperación (`VINCULADO`, `REVOCADO`,
-     `DISPOSITIVO`);
    - desbloqueo por inactividad, `CAMBIAR_PIN` y PIN de 6 a 8 dígitos en la interfaz y el modo local;
    - borradores por sucursal y autor; recorridos en navegador del flujo completo.
 

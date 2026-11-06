@@ -280,6 +280,18 @@ servidor solo devuelve el token para armar el enlace.
   - al renovarse, las políticas del tiempo real vuelven a evaluar al equipo (§7).
 - **Recuperación:** un equipo perdido o un navegador borrado se revoca y se vincula de nuevo con otro
   código. La credencial anterior no se recupera.
+- **Implementado en la app (paso 6, vinculación):**
+  - la sesión anónima de Supabase se guarda y se renueva en su propia clave
+    (`tequeria-identidad-equipo`, `src/supabaseClient.js`);
+  - si la entrada responde `DISPOSITIVO`, la app muestra «Vincular este equipo»: código (con
+    minúsculas, espacios o guiones) y nombre del equipo; inicia la sesión anónima si no la hay y llama
+    a `vincular_dispositivo`;
+  - `REVOCADO`: descarta esa identidad (sin recuperarla), inicia otra y usa el mismo código;
+    `VINCULADO`: explica que su sucursal o su cuenta no está activa por ahora; `codigo` y `bloqueado`
+    dicen los intentos que quedan o cuánto esperar;
+  - la identidad no se borra al recibir `DISPOSITIVO`: si la causa es temporal (sucursal o cuenta
+    inactiva, suspensión), el equipo vuelve a servir sin vincularse de nuevo;
+  - lo prueban los recorridos `tests/e2e/remoto/vinculacion.spec.js`.
 - **Sesiones independientes:** la identidad del dispositivo no es la sesión del operador. Cambiar de
   turno o vencer las 12 horas no obliga a vincular otra vez. Y renovar el JWT del dispositivo no
   devuelve permisos a un operador bloqueado o vencido.
@@ -459,8 +471,9 @@ Reglas de aplicación (del plan):
 5. **Tiempo real privado y claves del navegador por sucursal** (hecho): canal `sucursal:<id>` que
    solo publica el servidor, política de escucha con las reglas de `_dispositivo`, y claves del navegador
    por sucursal con limpieza al cambiar de sucursal o al revocar el equipo (§7 y §8).
-6. **Cliente:** panel de dueños, vinculación, pantalla de desbloqueo, validación del PIN de 6 a 8
-   dígitos en la interfaz (también en el modo local) y borradores por autor.
+6. **Cliente:** vinculación del equipo (hecha, §4); panel de dueños, pantalla de desbloqueo,
+   validación del PIN de 6 a 8 dígitos en la interfaz (también en el modo local) y borradores por
+   autor.
 7. **Validación con Supabase real (staging):** inicio anónimo, correo verificado, suspensión de
    identidades, canales privados con el servidor de Realtime real y la medición del tiempo máximo en
    que un equipo revocado aún recibe avisos con la conexión abierta (el caso «(paso 7)» de la matriz).
