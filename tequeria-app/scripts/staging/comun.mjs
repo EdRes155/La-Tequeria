@@ -34,6 +34,12 @@ export async function abrirStaging({ servicio = false } = {}) {
   return { proyecto, ANON, SERVICIO };
 }
 
+// CAPTCHA: staging usa las llaves de PRUEBA de Cloudflare Turnstile (públicas; el secreto de prueba acepta
+// este token). Supabase exige un token en cada inicio de sesión anónimo o con correo.
+export const CAPTCHA_PRUEBA = "XXXX.DUMMY.TOKEN.XXXX";
+export const SITIO_CAPTCHA_PRUEBA = "1x00000000000000000000AA";
+export const conCaptcha = { options: { captchaToken: CAPTCHA_PRUEBA } };
+
 export const cliente = (ANON, { renovar = true } = {}) =>
   createClient(URL_PROYECTO, ANON, { auth: { persistSession: false, autoRefreshToken: renovar } });
 
@@ -84,7 +90,7 @@ export async function cuentaDePrueba({ ANON, SERVICIO }, letra) {
   const correo = `duena-${letra.toLowerCase()}.${marca}@ejemplo.invalid`, clave = crypto.randomUUID();
   await datos(servicio.auth.admin.createUser({ email: correo, password: clave, email_confirm: true }), "crear dueña");
   const duena = cliente(ANON);
-  await datos(duena.auth.signInWithPassword({ email: correo, password: clave }), "entrar con correo");
+  await datos(duena.auth.signInWithPassword({ email: correo, password: clave, ...conCaptcha }), "entrar con correo");
   const alta = await datos(duena.rpc("crear_cuenta", { p_nombre: `Prueba ${letra} ${marca}`, p_sucursal: `Centro ${letra}`,
     p_zona_horaria: "America/Mexico_City", p_admin_nombre: `Admin ${letra}`, p_admin_pin: PIN_PRUEBA }), "crear_cuenta");
   if (!alta.ok) throw new Error(JSON.stringify(alta));
@@ -95,4 +101,20 @@ export async function cuentaDePrueba({ ANON, SERVICIO }, letra) {
     if (!r.ok) throw new Error(JSON.stringify(r));
   };
   return X;
+}
+
+// La app compilada como se publica, con la URL y la llave pública de staging y la llave de sitio de prueba
+// del CAPTCHA, servida con las cabeceras de vercel.json (la CSP incluida), como en Vercel.
+export async function servirApp(ANON, puerto) {
+  const { build, preview } = await import("vite");
+  const { readFileSync } = await import("node:fs");
+  const raiz = new URL("../../", import.meta.url).pathname;
+  const outDir = raiz + "dist-staging";
+  Object.assign(process.env, { VITE_SUPABASE_URL: URL_PROYECTO, VITE_SUPABASE_ANON_KEY: ANON, VITE_TURNSTILE_SITE_KEY: SITIO_CAPTCHA_PRUEBA });
+  await build({ root: raiz, logLevel: "error", build: { outDir, emptyOutDir: true } });
+  const vercel = JSON.parse(readFileSync(raiz + "vercel.json", "utf8"));
+  const headers = Object.fromEntries(vercel.headers.find((h) => h.source === "/(.*)").headers.map((h) => [h.key, h.value]));
+  const srv = await preview({ root: raiz, logLevel: "error", build: { outDir },
+    preview: { host: "127.0.0.1", port: puerto, strictPort: true, headers } });
+  return { url: `http://127.0.0.1:${puerto}/`, cerrar: () => new Promise((ok) => srv.httpServer.close(() => ok())) };
 }

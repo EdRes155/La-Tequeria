@@ -83,9 +83,9 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
 **B. Staging con Supabase real**
 
 4. **Proyecto de staging** (hecho, [STAGING.md](STAGING.md)): el esquema, inicio anónimo, correo con
-   confirmación, contraseñas de 10 o más, JWT de 300 s, solo canales privados (comprobado en el
-   servidor, no solo en la configuración) y las vistas previas de Vercel apuntando a staging. Falta el
-   CAPTCHA del inicio anónimo y retirar las vistas previas antiguas que apuntan a producción.
+   confirmación, contraseñas de 10 o más, JWT de 300 s, CAPTCHA con Turnstile (llaves de prueba), solo
+   canales privados (todo comprobado en el servidor, no solo en la configuración) y las vistas previas
+   de Vercel apuntando a staging; las 27 que apuntaban a producción se borraron.
 5. **Pruebas contra Supabase real** (paso 7 del núcleo, MODELO.md §9) (en curso): prueba de humo
    (`humo.mjs`), recorrido de la app (`navegador.mjs`) y tiempo de corte con un receptor de control, en
    distintos momentos de la renovación del JWT (`corte.mjs`) y con la app real (`corte-navegador.mjs`),

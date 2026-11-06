@@ -257,8 +257,16 @@ servidor solo devuelve el token para armar el enlace.
     monitor dedicado.
 - **Intentos:** se limitan por IP y por identidad anónima. Las identidades anónimas sin
   dispositivo vinculado no tienen ningún permiso.
-- **Requisitos en Supabase:** activar el inicio de sesión anónimo y protegerlo con CAPTCHA o límite
+- **Requisitos en Supabase:** activar el inicio de sesión anónimo y protegerlo con CAPTCHA y límite
   de solicitudes.
+- **CAPTCHA (implementado):** Cloudflare Turnstile. La pantalla de vinculación pinta el widget
+  (`src/captcha.js`, llave de sitio en `VITE_TURNSTILE_SITE_KEY`) y la app manda un token sin usar en
+  cada inicio anónimo, también al reemplazar una identidad revocada (cada token sirve una vez: el widget
+  se reinicia y se espera el siguiente). Sin la llave (modo local) no hay CAPTCHA. Supabase lo comprueba
+  con Cloudflare; un token rechazado no crea identidad y la app pide repetir la verificación. La CSP de
+  `vercel.json` permite `challenges.cloudflare.com` (script y marco). Lo prueban los recorridos
+  «remoto simulado» y, con el widget real y la CSP, `scripts/staging/navegador.mjs`. El inicio con
+  correo de los dueños (paso 6) también lo necesita.
 - **Implementado (paso 4):**
   - el código se busca por su hash y se toma su fila hasta confirmar: dos equipos con el mismo código a
     la vez se ordenan y el segundo ya lo ve usado;
@@ -498,6 +506,6 @@ Reglas de aplicación (del plan):
    servidor; prueba de humo, recorrido de la app en el navegador y medición del tiempo de corte con un
    receptor de control, en distintos momentos de la renovación del JWT y con la app real. Medido: un
    cliente que no suelta el canal lo pierde a más tardar al vencer su JWT (300 s); la app real se queda
-   sin datos en ≤ 32 s sin cambios en la sucursal y en ≤ 5 s con cambios. Falta el CAPTCHA del inicio
-   anónimo y repetir la medición con el cliente del paso 6 terminado; el caso «(paso 7)» de la matriz
-   sigue pendiente hasta entonces.
+   sin datos en ≤ 32 s sin cambios en la sucursal y en ≤ 5 s con cambios. CAPTCHA del inicio anónimo
+   con Turnstile (llaves de prueba en staging). Falta repetir la medición con el cliente del paso 6
+   terminado; el caso «(paso 7)» de la matriz sigue pendiente hasta entonces.

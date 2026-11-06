@@ -18,7 +18,7 @@
 // recibió después, que no vuelve a recibir y que ese último aviso llega dentro del límite elegido (la vigencia
 // del JWT) y del vencimiento del JWT que tenía al revocarlo, con 5 s de tolerancia (la resolución).
 import { createClient } from "@supabase/supabase-js";
-import { abrirStaging, administracion, cliente, datos, suscribir, espera, cuentaDePrueba, PIN_PRUEBA, URL_PROYECTO } from "./comun.mjs";
+import { abrirStaging, administracion, cliente, datos, suscribir, espera, cuentaDePrueba, PIN_PRUEBA, URL_PROYECTO, conCaptcha } from "./comun.mjs";
 
 const { ANON, SERVICIO } = await abrirStaging({ servicio: true });
 const auth = await administracion("/config/auth");
@@ -38,7 +38,7 @@ const TOPIC = "sucursal:" + C.sucursal;
 async function vincular(nombre, { fijo = false } = {}) {
   const codigo = await C.codigo();
   const c = cliente(ANON, { renovar: !fijo });
-  const ses = await datos(c.auth.signInAnonymously(), "sesión anónima");
+  const ses = await datos(c.auth.signInAnonymously(conCaptcha), "sesión anónima");
   const v = await datos(c.rpc("vincular_dispositivo", { p_codigo: codigo, p_nombre: nombre }), "vincular");
   if (!v.ok) throw new Error(JSON.stringify(v));
   // token-fijo: otro cliente que siempre entrega el mismo JWT (no puede renovarlo: no tiene la sesión)

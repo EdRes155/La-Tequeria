@@ -68,6 +68,8 @@ h1,h2,h3,.brand-title,.mesa-num,.corte-total,.type-banner,.ticket-origen,.kt-ori
 .tecla.entrar{background:var(--agave);border-color:var(--agave);color:#fff;font-size:17px;}
 .tecla.entrar:disabled{opacity:.45;}
 .login-err{color:var(--alerta);margin:4px 0 6px;font-weight:600;}
+.captcha{display:flex;justify-content:center;margin:4px 0 10px;}
+.captcha:empty{margin:0;}
 .agitar{animation:agitar .35s ease;}
 @keyframes agitar{20%,60%{transform:translateX(-6px);}40%,80%{transform:translateX(6px);}}
 @media (prefers-reduced-motion:reduce){.agitar{animation:none;}}

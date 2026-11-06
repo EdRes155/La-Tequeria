@@ -17,6 +17,7 @@ import {
 import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin, cerrarDialogos } from "./ui.jsx";
 import { leer as leerClave, guardar as guardarClave, leerJson, guardarJson } from "./claves.js";
 import { CSS } from "./estilos.js";
+import { useCaptcha } from "./captcha.js";
 
 /* ============================================================
    LA TEQUERÍA — Sistema de comandas
@@ -682,13 +683,15 @@ function Vincular({ motivo, onListo }) {
   const [nombre, setNombre] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const cajaCaptcha = useRef(null);
+  const captcha = useCaptcha(cajaCaptcha);   // verificación de seguridad del inicio anónimo
   const limpio = codigo.replace(/[\s-]/g, "");
   const enviar = async (e) => {
     e.preventDefault();
     if (busy) return;
     setErr(""); setBusy(true);
     try {
-      const r = await api.vincular(codigo, nombre);
+      const r = await api.vincular(codigo, nombre, { captcha: captcha.obtener });
       toast(`Equipo vinculado a ${r.sucursal.nombre}`, "ok");
       onListo();
     } catch (ex) {
@@ -710,6 +713,8 @@ function Vincular({ motivo, onListo }) {
       <div className="campo"><label htmlFor={id + "n"}>Nombre de este equipo</label>
         <input id={id + "n"} className="inp" value={nombre} maxLength={60} autoComplete="off" placeholder="Caja, Cocina, Tablet de meseros…"
           onChange={(e) => { setErr(""); setNombre(e.target.value); }} /></div>
+      {captcha.activo && <div ref={cajaCaptcha} className="captcha" />}
+      {captcha.estado === "error" && <div className="login-err" role="alert">No se pudo cargar la verificación de seguridad. Revisa la conexión y recarga la página.</div>}
       {err && <div className="login-err" id={id + "e"} role="alert">{err}</div>}
       <button type="submit" className="btn btn-primary btn-block" disabled={busy || limpio.length !== 8 || !nombre.trim()}>
         {busy ? <Loader2 size={16} className="girando" aria-hidden="true" /> : null} Vincular

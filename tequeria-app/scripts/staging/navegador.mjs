@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Recorrido de la app real en el navegador contra STAGING (docs/multinegocio/STAGING.md). Nunca producción.
 //   node scripts/staging/navegador.mjs
-// Levanta la app (vite) con la URL y la llave pública de staging, y con Chromium: vincula el equipo con un
+// Compila la app con la URL y la llave pública de staging y la sirve con las cabeceras de vercel.json (la CSP),
+// y con Chromium: pasa el CAPTCHA (Turnstile real con la llave de prueba), vincula el equipo con un
 // código nuevo, entra el administrador de la última sucursal de prueba («Centro A» de humo.mjs, PIN 583920),
 // recarga sin perder la identidad ni la sesión, y comprueba que al revocar el equipo la app vuelve a
-// «Vincular este equipo» sin datos en pantalla. Usa 1 o 2 inicios anónimos (límite de staging: 30 por hora).
-import { spawn } from "node:child_process";
+// «Vincular este equipo» sin datos en pantalla. Usa 1 o 2 inicios anónimos.
 import { chromium } from "playwright";
-import { abrirStaging, sql, REF } from "./comun.mjs";
+import { abrirStaging, sql, servirApp } from "./comun.mjs";
 
 const PUERTO = 5176;
 const { ANON } = await abrirStaging();
@@ -19,19 +19,20 @@ const CODIGO = "NAVE" + String(Math.floor(2000 + Math.random() * 7000)).replace(
 await sql(`insert into public.codigos_vinculacion (sucursal_id, codigo_hash, creado_por, vence)
   values ('${suc.id}', public._hash_secreto('codigo', '${CODIGO}'), gen_random_uuid(), now() + interval '10 minutes')`);
 
-const vite = spawn("npx", ["vite", "--host", "127.0.0.1", "--port", String(PUERTO), "--strictPort"], {
-  env: { ...process.env, VITE_SUPABASE_URL: `https://${REF}.supabase.co`, VITE_SUPABASE_ANON_KEY: ANON }, stdio: "ignore" });
+const app = await servirApp(ANON, PUERTO);   // compilada como se publica, con la CSP de vercel.json
 const pasos = [];
 const paso = async (n, fn) => { try { await fn(); pasos.push(true); console.log("✓ " + n); } catch (e) { pasos.push(false); console.log(`✗ ${n} — ${e.message.split("\n")[0]}`); throw e; } };
 let navegador;
 try {
-  for (let i = 0; i < 60; i++) { try { if ((await fetch(`http://127.0.0.1:${PUERTO}`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
   navegador = await chromium.launch({ proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY, bypass: "127.0.0.1,localhost" } : undefined });
   const ctx = await navegador.newContext({ ignoreHTTPSErrors: true });   // el proxy del entorno inspecciona TLS
   const page = await ctx.newPage();
+  // lo que la CSP bloquee (por ejemplo, el script o el marco de Turnstile) sale en la consola
+  const bloqueos = [];
+  page.on("console", (m) => { if (/Content Security Policy|Refused to/i.test(m.text())) bloqueos.push(m.text().slice(0, 160)); });
 
   await paso("primera vez: pide vincular el equipo", async () => {
-    await page.goto(`http://127.0.0.1:${PUERTO}/`);
+    await page.goto(app.url);
     await page.getByRole("heading", { name: "Vincular este equipo" }).waitFor({ timeout: 30000 });
   });
   await paso("vincula con el código (minúsculas y guion) y muestra el personal de su sucursal", async () => {
@@ -63,9 +64,12 @@ try {
     const claves = await page.evaluate(() => Object.keys(localStorage).concat(Object.keys(sessionStorage)).filter((k) => k.startsWith("tequeria:")));
     if (claves.length) throw new Error("quedan claves: " + claves.join(", "));
   });
+  await paso("la CSP de vercel.json no bloqueó nada (Turnstile incluido)", async () => {
+    if (bloqueos.length) throw new Error(bloqueos.join(" | "));
+  });
 } catch { /* el paso ya lo informó */ } finally {
   await navegador?.close();
-  vite.kill();
+  await app.cerrar();
 }
 const bien = pasos.filter(Boolean).length;
 console.log(`\n${bien} de ${pasos.length} pasos bien.`);

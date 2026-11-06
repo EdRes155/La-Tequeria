@@ -165,16 +165,22 @@ Implementado (paso 2) en `supabase-schema.sql`:
 
 Antes de la ventana, en Supabase:
 
-- Auth: inicio de sesión anónimo activado y protegido (CAPTCHA o límite por IP: 30 por hora, el de
+- Auth: inicio de sesión anónimo activado y protegido con CAPTCHA y límite por IP (30 por hora, el de
   Supabase), inicio con correo con confirmación obligatoria (o con Google), contraseñas de al menos 10
   caracteres (sin el plan Pro no hay revisión de contraseñas filtradas) y JWT de 300 s (MODELO.md §4).
+- CAPTCHA con llaves **reales** de Cloudflare Turnstile (staging usa las de prueba): el dueño crea el
+  widget en Cloudflare para `la-tequeria.vercel.app`; la llave de sitio (pública) va en la variable
+  `VITE_TURNSTILE_SITE_KEY` de Vercel con destino Production, y la llave secreta la escribe él mismo en
+  Supabase (Authentication → Attack Protection → CAPTCHA, proveedor Turnstile). La secreta nunca pasa
+  por el chat ni por un archivo.
 - Realtime: solo canales privados (acceso público desactivado), y ninguna política sobre
   `realtime.messages` que no sea la de la app: si hay otra, el archivo se detiene para revisarla
   (MODELO.md §7).
 - API: el esquema `privado` no se agrega a los esquemas expuestos.
 - **Comprobar que se aplica, no solo lo que dice la configuración** (en staging, «solo canales
   privados» no se aplicaba hasta desactivarlo y volver a activarlo; [STAGING.md](STAGING.md)): un canal
-  público se rechaza con `PrivateOnly`, con y sin sesión, y la llave pública no ejecuta ninguna función.
+  público se rechaza con `PrivateOnly`, con y sin sesión; un inicio anónimo sin token de CAPTCHA se
+  rechaza; y la llave pública no ejecuta ninguna función.
   Es el primer paso de `scripts/staging/humo.mjs`, que se puede adaptar para leer sin escribir.
 
 1. Fuera del horario de servicio, con el personal avisado.

@@ -57,6 +57,9 @@ test("primera vez: el equipo se vincula con el código, entra su personal y lo c
   await expect(page.getByText("Equipo vinculado a Centro")).toBeVisible();
   await expect(page.getByRole("heading", { name: "¿Quién eres?" })).toBeVisible();
   expect(srv.identidades).toEqual(["anonima-1"]);   // una sola identidad para los dos intentos
+  // la identidad se inició con el token del CAPTCHA (widget pintado con la llave de sitio)
+  expect(srv.captchas).toEqual(["captcha-1"]);
+  await expect(page.locator("[data-turnstile]")).toHaveCount(0);   // ya no está la pantalla de vincular
   expect(srv.llamadas.filter((x) => x.fn === "vincular_dispositivo").map((x) => [x.quien, x.args.p_nombre]))
     .toEqual([["anonima-1", "Caja"], ["anonima-1", "Caja"]]);
   await entrar(page);
@@ -81,8 +84,9 @@ test("un equipo revocado vuelve a la pantalla de vincular y se recupera con otro
   await expect(page.getByRole("heading", { name: "Mesas" })).toHaveCount(0);
   await vincular(page, "WXYZ-6789", "Caja nueva");
   await expect(page.getByRole("heading", { name: "¿Quién eres?" })).toBeVisible();
-  // la identidad revocada se descartó (sin recuperarla) y la nueva quedó vinculada
+  // la identidad revocada se descartó (sin recuperarla) y la nueva quedó vinculada, con un token nuevo
   expect(srv.identidades).toEqual(["anonima-1", "anonima-2"]);
+  expect(srv.captchas).toEqual(["captcha-1", "captcha-2"]);
   expect(srv.cuantas("auth:logout")).toBe(1);
   expect(srv.llamadas.filter((x) => x.fn === "vincular_dispositivo").map((x) => x.quien)).toEqual(["anonima-1", "anonima-1", "anonima-2"]);
   expect(s.equipos.get("anonima-2")).toBe("vigente");
@@ -100,4 +104,22 @@ test("tras varios códigos equivocados pide esperar, y un equipo vinculado de un
   await vincular(page, "ABCD2345");
   await expect(page.getByText("su sucursal o su cuenta no está activa por ahora", { exact: false })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Vincular este equipo" })).toBeVisible();
+});
+
+test("CAPTCHA: sin un token válido no se crea la identidad; al reintentar se usa uno nuevo y vincula", async ({ page }) => {
+  const s = sucursal();
+  let aceptar = false;
+  const srv = await servidorSimulado(page, s.respuestas, { captcha: () => aceptar });
+  await page.goto("/");
+  await expect(page.locator("[data-turnstile]")).toHaveAttribute("data-turnstile", "1x00000000000000000000AA");
+  await vincular(page, "ABCD-2345");
+  await expect(page.getByText("No se pudo comprobar la verificación de seguridad", { exact: false })).toBeVisible();
+  expect(srv.identidades).toEqual([]);
+  expect(srv.cuantas("vincular_dispositivo")).toBe(0);
+  // Cloudflare la acepta en el segundo intento: el token usado no se repite
+  aceptar = true;
+  await page.getByRole("button", { name: "Vincular" }).click();
+  await expect(page.getByRole("heading", { name: "¿Quién eres?" })).toBeVisible();
+  expect(srv.captchas).toEqual(["captcha-1", "captcha-2"]);
+  expect(srv.identidades).toEqual(["anonima-1"]);
 });

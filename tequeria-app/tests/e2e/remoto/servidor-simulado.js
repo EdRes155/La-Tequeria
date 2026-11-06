@@ -32,16 +32,36 @@ const tokenDe = (uid) => `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: uid,
 // quien es el id de la identidad anónima que llama (null sin sesión). Simula también Supabase Auth: cada
 // inicio de sesión anónimo crea una identidad nueva. Devuelve el registro de llamadas, las identidades
 // creadas y una forma de cambiar respuestas.
-export async function servidorSimulado(page, respuestas) {
+// Turnstile simulado: cada vez que se pinta o se reinicia el widget entrega un token nuevo (captcha-1, -2…).
+const TURNSTILE = `(() => {
+  let n = 0; const ws = {};
+  const dar = (id) => setTimeout(() => ws[id] && ws[id].callback && ws[id].callback("captcha-" + (++n)), 50);
+  window.turnstile = {
+    render(el, o) { const id = "w" + Object.keys(ws).length; ws[id] = o; el.setAttribute("data-turnstile", o.sitekey); dar(id); return id; },
+    reset(id) { dar(id); }, remove(id) { delete ws[id]; },
+  };
+})();`;
+
+export async function servidorSimulado(page, respuestas, { captcha = () => true } = {}) {
   const llamadas = [];
   const identidades = [];
+  const captchas = [];   // token de CAPTCHA de cada inicio anónimo (null si no llegó)
   const tabla = { ...respuestas };
+  await page.route("https://challenges.cloudflare.com/**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/javascript", body: TURNSTILE }));
   await page.route(`${SUPABASE_SIMULADO}/**`, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/auth/v1/signup") {
+      // como Supabase con CAPTCHA: sin token válido no hay identidad
+      const token = route.request().postDataJSON()?.gotrue_meta_security?.captcha_token ?? null;
+      captchas.push(token);
+      llamadas.push({ fn: "auth:signup", args: { captcha: token }, quien: null, t: Date.now() });
+      if (!token || !captcha(token)) {
+        return route.fulfill({ status: 400, contentType: "application/json",
+          body: JSON.stringify({ code: "captcha_failed", error_code: "captcha_failed", msg: "captcha protection: request disallowed" }) });
+      }
       const uid = `anonima-${identidades.length + 1}`;
       identidades.push(uid);
-      llamadas.push({ fn: "auth:signup", args: {}, quien: null, t: Date.now() });
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
         access_token: tokenDe(uid), token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600,
         refresh_token: "renovar-" + uid, user: { id: uid, aud: "authenticated", role: "authenticated", is_anonymous: true } }) });
@@ -69,7 +89,7 @@ export async function servidorSimulado(page, respuestas) {
     });
   });
   return {
-    llamadas, identidades,
+    llamadas, identidades, captchas,
     responder(fn, f) { tabla[fn] = f; },
     cuantas: (fn) => llamadas.filter((x) => x.fn === fn).length,
   };

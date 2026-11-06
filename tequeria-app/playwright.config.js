@@ -6,6 +6,9 @@ import { defineConfig, devices } from "@playwright/test";
 //    prueba intercepta las llamadas (tests/e2e/remoto/servidor-simulado.js) y responde como el servidor.
 //    Sirve para probar cómo reacciona la app a respuestas del servidor (revocación, sesión vencida…).
 export const SUPABASE_SIMULADO = "http://127.0.0.1:5199";
+// Llave de sitio de prueba de Cloudflare Turnstile (pública; siempre pasa). En «remoto-simulado» el script de
+// Turnstile también se simula, así que la app pide un token por cada inicio anónimo como lo hará en producción.
+export const CAPTCHA_PRUEBA = "1x00000000000000000000AA";
 export default defineConfig({
   testDir: "tests/e2e",
   timeout: 30000,
@@ -23,7 +26,7 @@ export default defineConfig({
       url: "http://127.0.0.1:5174",
       reuseExistingServer: false,
       timeout: 60000,
-      env: { VITE_SUPABASE_URL: "", VITE_SUPABASE_ANON_KEY: "" },
+      env: { VITE_SUPABASE_URL: "", VITE_SUPABASE_ANON_KEY: "", VITE_TURNSTILE_SITE_KEY: "" },
     },
     {
       // compilada aparte (no comparte la caché del servidor de desarrollo) y servida tal cual se publica
@@ -31,7 +34,7 @@ export default defineConfig({
       url: "http://127.0.0.1:5175",
       reuseExistingServer: false,
       timeout: 120000,
-      env: { VITE_SUPABASE_URL: SUPABASE_SIMULADO, VITE_SUPABASE_ANON_KEY: "llave-publica-de-prueba" },
+      env: { VITE_SUPABASE_URL: SUPABASE_SIMULADO, VITE_SUPABASE_ANON_KEY: "llave-publica-de-prueba", VITE_TURNSTILE_SITE_KEY: CAPTCHA_PRUEBA },
     },
   ],
 });

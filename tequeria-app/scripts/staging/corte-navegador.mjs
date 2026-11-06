@@ -10,9 +10,8 @@
 //                 app (cada 30 s con el tiempo real conectado)
 //   con-cambios   se revoca mientras la sucursal cambia cada 5 s: debe quedarse sin datos con el siguiente aviso
 // Desde que su pantalla queda sin datos, la conexión de cada equipo revocado ya no recibe avisos de la sucursal.
-import { spawn } from "node:child_process";
 import { chromium } from "playwright";
-import { abrirStaging, administracion, sql, espera, cuentaDePrueba, PIN_PRUEBA, REF } from "./comun.mjs";
+import { abrirStaging, administracion, sql, espera, cuentaDePrueba, PIN_PRUEBA, servirApp } from "./comun.mjs";
 
 const PUERTO = 5177;
 const COTA_SIN_CAMBIOS = 45;   // s: consulta periódica (30 s sin avisos, revisada cada 5 s) más la respuesta
@@ -26,8 +25,7 @@ const N = await cuentaDePrueba({ ANON, SERVICIO }, "N");
 const TOPIC = "sucursal:" + N.sucursal;
 const cambiar = () => sql(`update public.bebidas set cantidad = cantidad + 1 where sucursal_id = '${N.sucursal}' and id = 'coca'`);
 
-const vite = spawn("npx", ["vite", "--host", "127.0.0.1", "--port", String(PUERTO), "--strictPort"], {
-  env: { ...process.env, VITE_SUPABASE_URL: `https://${REF}.supabase.co`, VITE_SUPABASE_ANON_KEY: ANON }, stdio: "ignore" });
+const app = await servirApp(ANON, PUERTO);   // compilada como se publica, con la CSP de vercel.json
 let navegador, fallos = 0;
 const mal = (m) => { fallos++; console.log("✗ " + m); };
 const bien = (m) => console.log("✓ " + m);
@@ -41,7 +39,7 @@ async function equipo(nombre) {
     const txt = typeof payload === "string" ? payload : Buffer.from(payload).toString("latin1");
     if (txt.includes(TOPIC) && txt.includes("cambio")) e.avisos.push(Date.now());
   }));
-  await page.goto(`http://127.0.0.1:${PUERTO}/`);
+  await page.goto(app.url);
   await page.getByRole("heading", { name: "Vincular este equipo" }).waitFor({ timeout: 30000 });
   await page.getByLabel("Código de vinculación").fill(await N.codigo());
   await page.getByLabel("Nombre de este equipo").fill("Navegador " + nombre);
@@ -87,7 +85,6 @@ async function revisarRevocado(e, cota) {
 }
 
 try {
-  for (let i = 0; i < 60; i++) { try { if ((await fetch(`http://127.0.0.1:${PUERTO}`)).ok) break; } catch {} await espera(500); }
   navegador = await chromium.launch({ proxy: process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY, bypass: "127.0.0.1,localhost" } : undefined });
 
   // Equipos en distintos momentos de la renovación: supabase-js renueva cuando faltan menos de 120 s
@@ -133,7 +130,7 @@ try {
   mal("el recorrido no terminó: " + e.message.split("\n")[0]);
 } finally {
   await navegador?.close();
-  vite.kill();
+  await app.cerrar();
 }
 console.log(fallos ? `\n${fallos} comprobación(es) fallaron.` : "\nTodas las comprobaciones bien.");
 process.exit(fallos ? 1 : 0);

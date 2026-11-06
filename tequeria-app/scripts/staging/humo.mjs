@@ -4,7 +4,7 @@
 // El tiempo de corte de un equipo revocado con la conexión abierta se mide aparte: corte.mjs (un cliente que no
 // suelta el canal) y corte-navegador.mjs (la app real).
 // Cada ejecución crea dos cuentas nuevas con personas, equipos y datos sintéticos (dominio .invalid).
-import { abrirStaging, administracion, cliente, datos, suscribir, espera, marca, pasos, igual, URL_PROYECTO } from "./comun.mjs";
+import { abrirStaging, administracion, cliente, datos, suscribir, espera, marca, pasos, igual, URL_PROYECTO, conCaptcha } from "./comun.mjs";
 import { createClient } from "@supabase/supabase-js";
 
 const { proyecto, ANON, SERVICIO } = await abrirStaging({ servicio: true });
@@ -21,28 +21,39 @@ async function persona(etiqueta) {
   const clave = crypto.randomUUID();
   await datos(servicio.auth.admin.createUser({ email: correo, password: clave, email_confirm: true }), "crear persona");
   const c = cliente(ANON);
-  const r = await datos(c.auth.signInWithPassword({ email: correo, password: clave }), "entrar con correo");
+  const r = await datos(c.auth.signInWithPassword({ email: correo, password: clave, ...conCaptcha }), "entrar con correo");
   return { c, correo, uid: r.user.id };
 }
 async function equipo() {
   const c = cliente(ANON);
-  const r = await datos(c.auth.signInAnonymously(), "sesión anónima");
+  const r = await datos(c.auth.signInAnonymously(conCaptcha), "sesión anónima");
   return { c, uid: r.user.id };
 }
 
 const PIN_A = "583920", PIN_B = "604917";
 let A = {}, B = {};
 
-await paso("configuración declarada: inicio anónimo, correo confirmado, JWT ≤ 300 s, contraseñas ≥ 10 y solo canales privados", async () => {
+await paso("configuración declarada: inicio anónimo, correo confirmado, JWT ≤ 300 s, contraseñas ≥ 10, CAPTCHA y solo canales privados", async () => {
   const auth = await administracion("/config/auth");
   const rt = await administracion("/config/realtime");
-  igual([auth.external_anonymous_users_enabled, auth.mailer_autoconfirm, auth.jwt_exp <= 300, auth.password_min_length >= 10, rt.private_only],
-    [true, false, true, true, true], "configuración");
+  igual([auth.external_anonymous_users_enabled, auth.mailer_autoconfirm, auth.jwt_exp <= 300, auth.password_min_length >= 10,
+    auth.security_captcha_enabled, auth.security_captcha_provider, rt.private_only],
+    [true, false, true, true, true, "turnstile", true], "configuración");
   return `JWT de ${auth.jwt_exp} s; lo que se aplica de verdad se comprueba en los pasos de abajo`;
 });
 
 await paso("sin sesión (anon) no se ejecuta ninguna función", async () => {
   await falla(cliente(ANON).rpc("usuarios_login"));
+});
+
+await paso("CAPTCHA, aplicado: sin token se rechaza el inicio anónimo y el inicio con correo", async () => {
+  const r = await cliente(ANON).auth.signInAnonymously();
+  if (!r.error || !/captcha/i.test(r.error.code + r.error.message)) throw new Error("inicio anónimo sin CAPTCHA: " + (r.error?.message || "aceptado"));
+  const correo = `sin-captcha.${marca}@ejemplo.invalid`, clave = crypto.randomUUID();
+  await datos(servicio.auth.admin.createUser({ email: correo, password: clave, email_confirm: true }), "crear persona");
+  const p = await cliente(ANON).auth.signInWithPassword({ email: correo, password: clave });
+  if (!p.error || !/captcha/i.test(p.error.code + p.error.message)) throw new Error("inicio con correo sin CAPTCHA: " + (p.error?.message || "aceptado"));
+  return r.error.code;
 });
 
 await paso("solo canales privados, aplicado: un canal público se rechaza con y sin sesión", async () => {

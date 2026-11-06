@@ -134,12 +134,19 @@ function crearRemoto() {
   };
 
   // Identidad del equipo en Supabase (MODELO.md §4): una sesión anónima. nueva: descarta la anterior (por
-  // ejemplo, revocada) y empieza otra; la anterior no se recupera.
-  async function asegurarIdentidad({ nueva = false } = {}) {
+  // ejemplo, revocada) y empieza otra; la anterior no se recupera. captcha: función que entrega un token sin
+  // usar del CAPTCHA (src/captcha.js); solo se pide si hay que iniciar una identidad.
+  async function asegurarIdentidad({ nueva = false, captcha } = {}) {
     if (nueva) { try { await supabase.auth.signOut({ scope: "local" }); } catch {} }
     const { data } = await supabase.auth.getSession();
     if (data?.session) return;
-    const { error } = await supabase.auth.signInAnonymously();
+    let captchaToken;
+    try { captchaToken = captcha ? await captcha() : undefined; }
+    catch { throw new ErrorApi("CAPTCHA", "Falta la verificación de seguridad. Complétala e inténtalo de nuevo."); }
+    const { error } = await supabase.auth.signInAnonymously(captchaToken ? { options: { captchaToken } } : undefined);
+    if (error && /captcha/i.test(`${error.code} ${error.message}`)) {
+      throw new ErrorApi("CAPTCHA", "No se pudo comprobar la verificación de seguridad. Vuelve a intentarlo.");
+    }
     if (error) throw new ErrorApi("IDENTIDAD", "No se pudo iniciar la identidad de este equipo. Revisa la conexión e inténtalo de nuevo.");
   }
 
@@ -147,13 +154,13 @@ function crearRemoto() {
     modo: "remoto",
     // Vincular este equipo a una sucursal con el código que generó un dueño (vincular_dispositivo). Si la
     // identidad del equipo había sido revocada, se empieza una nueva y se usa el mismo código.
-    async vincular(codigo, nombre) {
-      await asegurarIdentidad();
+    async vincular(codigo, nombre, { captcha } = {}) {
+      await asegurarIdentidad({ captcha });
       const llamar = () => rpc("vincular_dispositivo", { p_codigo: codigo, p_nombre: nombre });
       let r;
       try { r = await llamar(); } catch (e) {
         if (e.codigo !== "REVOCADO") throw e;
-        await asegurarIdentidad({ nueva: true });
+        await asegurarIdentidad({ nueva: true, captcha });
         r = await llamar();
       }
       if (r?.ok === false) throw new ErrorApi(r.error, mensajeVinculacion(r), r);

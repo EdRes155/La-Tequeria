@@ -10,7 +10,7 @@ paso 7). Solo tiene datos sintéticos (dominio `.invalid`). Nunca se copian dato
 | Proyecto | `la-tequeria-staging` (`izcaeojzbaoqlxkerria`), región `us-east-2`, plan gratuito |
 | URL | `https://izcaeojzbaoqlxkerria.supabase.co` |
 | Producción | `La Tequeria` (`ahmkfmoftpvhdcrjnhoe`), sin cambios |
-| App | Vistas previas de Vercel (rama distinta de `main`): `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY` con destino **Preview** apuntan a staging; las de **Production** siguen apuntando a producción |
+| App | Vistas previas de Vercel (rama distinta de `main`): `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` y `VITE_TURNSTILE_SITE_KEY` (llave de prueba) con destino **Preview** apuntan a staging; las de **Production** siguen apuntando a producción |
 
 Para tenerlo dentro del límite de dos proyectos gratuitos se pausó `cazaofertas-ml` (se reactiva desde el
 panel de Supabase con sus datos intactos).
@@ -23,9 +23,9 @@ panel de Supabase con sus datos intactos).
 | Auth: inicio anónimo | Activado | Identidad de los equipos (MODELO.md §4) |
 | Auth: confirmar correo | Obligatorio | `_identidad` exige correo verificado |
 | Auth: contraseñas | Mínimo 10 caracteres | Compensa que no haya revisión de contraseñas filtradas (ver avisos) |
-| Auth: vigencia del JWT | **300 s** | Es el límite elegido para el tiempo de corte del tiempo real (antes, 600 s) |
+| Auth: vigencia del JWT | **300 s** (aprobado para producción) | Es el límite elegido para el tiempo de corte del tiempo real (antes, 600 s) |
 | Auth: límite de inicios anónimos | 100 por hora y por IP **solo en staging**, para repetir las mediciones (cada una usa de 5 a 7) | En producción, 30 (el de Supabase) |
-| Auth: CAPTCHA | **Sin configurar** | Necesita claves de hCaptcha o Turnstile; queda pendiente antes del piloto |
+| Auth: CAPTCHA | Cloudflare Turnstile con las **llaves de prueba** de Cloudflare (públicas; siempre pasan) | Supabase exige un token en cada inicio anónimo y con correo, y lo comprueba con Cloudflare. Producción usará llaves reales (MIGRACION.md §5) |
 | Realtime: solo canales privados | Activado **y aplicado** (lo comprueba `humo.mjs`) | Ver «Hallazgos» |
 
 ## Avisos de seguridad de Supabase
@@ -37,7 +37,7 @@ Los cuatro que muestra el asesor de seguridad, el 6 de noviembre de 2026:
 | Tablas con RLS sin políticas (`rls_enabled_no_policy`) | Info | 25 | Esperado: nadie lee ni escribe las tablas directo; todo pasa por las funciones. |
 | Funciones `SECURITY DEFINER` que ejecuta `authenticated` (`authenticated_security_definer_function_executable`) | Aviso | 54 | Esperado: son la API. Cada una valida al equipo, la sesión o la persona (MODELO.md §3); `anon` no ejecuta ninguna (lo comprueba `humo.mjs`). |
 | Política que admite usuarios anónimos (`auth_allow_anonymous_sign_ins`) en `realtime.messages` | Aviso | 1 | Esperado: los equipos son identidades anónimas y escuchan su canal con la política `tequeria_escuchar_sucursal`. Solo deja escuchar a un equipo vinculado, sin revocar y vigente en Auth: una identidad anónima sin vincular, una persona, otra sucursal o una llamada sin sesión se rechazan (lo comprueba `humo.mjs` contra el servidor). |
-| Protección de contraseñas filtradas desactivada (`auth_leaked_password_protection`) | Aviso | 1 | No se puede activar en el plan gratuito: la API responde 402 («available on Pro Plans and up»). Se subió el mínimo a 10 caracteres. Decidir antes del piloto: plan Pro o aceptar el riesgo (los dueños también podrán entrar con Google, paso 6). |
+| Protección de contraseñas filtradas desactivada (`auth_leaked_password_protection`) | Aviso | 1 | No se puede activar en el plan gratuito: la API responde 402 («available on Pro Plans and up»). Se subió el mínimo a 10 caracteres, que por ahora basta (decidido el 6 de noviembre); los dueños también podrán entrar con Google (paso 6). |
 
 ## Scripts
 
@@ -56,30 +56,36 @@ node scripts/staging/corte-navegador.mjs   # unos 5 min
 
 **`humo.mjs`**, contra el servidor real:
 
-1. La configuración declarada (inicio anónimo, correo confirmado, JWT ≤ 300 s, contraseñas ≥ 10, solo
-   canales privados). Lo que se aplica de verdad lo comprueban los pasos siguientes.
+1. La configuración declarada (inicio anónimo, correo confirmado, JWT ≤ 300 s, contraseñas ≥ 10,
+   CAPTCHA con Turnstile, solo canales privados). Lo que se aplica de verdad lo comprueban los pasos
+   siguientes.
 2. Sin sesión (`anon`) no se ejecuta ninguna función.
-3. **Solo canales privados, aplicado:** un canal público se rechaza (`PrivateOnly`) sin sesión y con una
+3. **CAPTCHA, aplicado:** sin token se rechazan el inicio anónimo y el inicio con correo
+   (`captcha_failed`). Los scripts mandan el token de prueba de Cloudflare.
+4. **Solo canales privados, aplicado:** un canal público se rechaza (`PrivateOnly`) sin sesión y con una
    identidad anónima.
-4. Alta: dos personas entran con correo y contraseña y crean su cuenta, su sucursal y su administrador.
-5. Vinculación: los dueños generan códigos; tres identidades anónimas se vinculan (una como monitor); un
+5. Alta: dos personas entran con correo y contraseña y crean su cuenta, su sucursal y su administrador.
+6. Vinculación: los dueños generan códigos; tres identidades anónimas se vinculan (una como monitor); un
    código usado ya no sirve.
-6. Entrada: cada equipo ve solo el personal de su sucursal; el administrador entra y lee el estado inicial.
-7. Aislamiento: el token de otra sucursal, una persona como equipo, un equipo como persona y un dueño con
+7. Entrada: cada equipo ve solo el personal de su sucursal; el administrador entra y lee el estado inicial.
+8. Aislamiento: el token de otra sucursal, una persona como equipo, un equipo como persona y un dueño con
    la cuenta de otro se rechazan.
-8. Tiempo real: el equipo escucha el canal privado de su sucursal; el de otra sucursal, una persona, una
+9. Tiempo real: el equipo escucha el canal privado de su sucursal; el de otra sucursal, una persona, una
    identidad anónima sin vincular y una llamada sin sesión se rechazan.
-9. Un cambio avisa solo a su sucursal en menos de un segundo y sin datos; un cliente no puede publicar.
-10. Revocar: el equipo pierde el acceso a los datos en la siguiente llamada.
-11. Supabase Auth real: un equipo o una persona suspendida, o borrada de forma lógica, deja de servir en
+10. Un cambio avisa solo a su sucursal en menos de un segundo y sin datos; un cliente no puede publicar.
+11. Revocar: el equipo pierde el acceso a los datos en la siguiente llamada.
+12. Supabase Auth real: un equipo o una persona suspendida, o borrada de forma lógica, deja de servir en
     la siguiente llamada (con su JWT todavía vigente); el borrado definitivo de un equipo vinculado se
     rechaza y el equipo sigue igual; una identidad anónima que nunca se vinculó sí se borra.
 
-**`navegador.mjs`**: levanta la app con la URL y la llave pública de staging y, con Chromium, recorre lo que
-hará un equipo nuevo: pide vincularse, se vincula con un código (escrito con minúsculas y guion), el
+**`navegador.mjs`**: compila la app como se publica (URL y llave pública de staging, llave de sitio de prueba
+del CAPTCHA) y la sirve con las cabeceras de `vercel.json`, la CSP incluida (`servirApp` en `comun.mjs`; también
+la usa `corte-navegador.mjs`). Con Chromium recorre lo que hará un equipo nuevo, con el widget real de
+Turnstile: pide vincularse, se vincula con un código (escrito con minúsculas y guion), el
 administrador entra y ve sus mesas, al recargar conserva la identidad y la sesión, el canal privado queda
 conectado («En línea, sincronizado») y, al revocar el equipo, vuelve a «Vincular este equipo» sin datos en
-pantalla ni claves guardadas.
+pantalla ni claves guardadas. Al final comprueba que la CSP no bloqueó nada: sin
+`challenges.cloudflare.com` en la CSP, Turnstile no carga y la vinculación no avanza (comprobado).
 
 **`corte.mjs`** y **`corte-navegador.mjs`**: el tiempo de corte, abajo.
 
@@ -167,17 +173,18 @@ desbloqueo del paso 6 la cubre.
   durante unos minutos (el servicio se reinicia).
 - **Vistas previas que apuntaban a producción:** hasta `e7909fa`, las variables `VITE_SUPABASE_*` de Vercel
   aplicaban a Preview y Production, así que las vistas previas usaban la base de producción. Ahora Preview
-  usa staging, pero las **27 vistas previas compiladas antes** (de `9e5df3b` a `1e4607e`, todas de esta rama) siguen
-  apuntando a producción. Todas exigen iniciar sesión en Vercel con acceso al equipo («Vercel
-  Authentication» en todo menos el dominio de producción), así que solo las abre la cuenta del
-  proyecto. Quedan por borrar (ver «Pendiente»).
+  usa staging, y las **27 vistas previas compiladas antes** (de `9e5df3b` a `1e4607e`, todas de esta rama)
+  se borraron el 6 de noviembre con la API de Vercel; el despliegue de producción no cambió.
+- **El CAPTCHA se comprueba con Cloudflare, no solo que haya token:** con el secreto de prueba que
+  Cloudflare siempre rechaza, el token de prueba se rechazó (`invalid-input-response`); con el que siempre
+  acepta, pasa; sin token, `captcha_failed`. Los cambios de la configuración de Auth tardan unos segundos en
+  aplicarse.
 
 ## Pendiente
 
-- Borrar las 27 vistas previas antiguas que apuntan a producción: con un token de Vercel, o desde el
-  panel (Deployments → Preview, rama `ccr-57bea2be-4betyy`, anteriores al 6 de noviembre).
-- CAPTCHA del inicio anónimo (claves de hCaptcha o Turnstile).
-- Decidir la protección de contraseñas filtradas (plan Pro) o dejar el mínimo de 10 caracteres.
+- Llaves reales de Turnstile para producción (MIGRACION.md §5).
+- La protección de contraseñas filtradas (plan Pro) se deja para después: por ahora, mínimo de 10
+  caracteres (decidido el 6 de noviembre).
 - Repetir la medición con el cliente del paso 6 terminado (panel de dueños y desbloqueo).
 - Al terminar el piloto técnico: revocar el token de administración de Supabase guardado en el entorno de
   Claude Code y, si ya no se usa, pausar staging para reactivar `cazaofertas-ml`.
