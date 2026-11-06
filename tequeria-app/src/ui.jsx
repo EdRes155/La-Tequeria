@@ -52,6 +52,18 @@ export function Modal({ titulo, icono, onClose, cerrable = true, className = "",
   );
 }
 
+/* ---------- cierre de diálogos ---------- */
+// Al cerrar la sesión (o al perder la autorización del equipo) se cierran los diálogos abiertos y los avisos:
+// pueden mostrar datos del negocio y no deben quedar para quien entre después. Las confirmaciones pendientes
+// responden «cancelar».
+const _cerrables = new Set();
+export function cerrarDialogos() { _cerrables.forEach((f) => f()); }
+function useCerrable(cerrar) {
+  const ref = useRef(cerrar);
+  ref.current = cerrar;
+  useEffect(() => { const f = () => ref.current(); _cerrables.add(f); return () => { _cerrables.delete(f); }; }, []);
+}
+
 /* ---------- avisos ---------- */
 let _toastSeq = 0;
 const _toastListeners = new Set();
@@ -61,6 +73,7 @@ export function toast(mensaje, tipo = "info") {
 }
 export function Toaster() {
   const [items, setItems] = useState([]);
+  useCerrable(() => setItems([]));
   useEffect(() => {
     const add = (t) => {
       // el mismo aviso ya visible no se repite (por ejemplo, varios fallos de red seguidos)
@@ -98,8 +111,9 @@ export function confirmDialog(opts) {
 export function ConfirmHost() {
   const [state, setState] = useState(null);
   useEffect(() => { _confirm = setState; return () => { _confirm = null; }; }, []);
+  const cerrar = (val) => { state?.resolve(val); setState(null); };
+  useCerrable(() => cerrar(false));
   if (!state) return null;
-  const cerrar = (val) => { state.resolve(val); setState(null); };
   return (
     <Modal titulo={state.titulo || "Confirmar"} onClose={() => cerrar(false)} className="modal-confirm">
       <p className="confirm-msg">{state.mensaje}</p>
@@ -119,8 +133,9 @@ export function choiceDialog(opts) {
 export function ChoiceHost() {
   const [state, setState] = useState(null);
   useEffect(() => { _choice = setState; return () => { _choice = null; }; }, []);
+  const pick = (v) => { state?.resolve(v); setState(null); };
+  useCerrable(() => pick(null));
   if (!state) return null;
-  const pick = (v) => { state.resolve(v); setState(null); };
   return (
     <Modal titulo={state.titulo || "Elige una opción"} onClose={() => pick(null)} className="modal-confirm">
       {state.mensaje && <p className="confirm-msg">{state.mensaje}</p>}
@@ -147,8 +162,9 @@ export function PinHost() {
   const [pin, setPin] = useState("");
   const id = useId();
   useEffect(() => { _pin = (s) => { setPin(""); setState(s); }; return () => { _pin = null; }; }, []);
+  const cerrar = (val) => { state?.resolve(val); setState(null); setPin(""); };
+  useCerrable(() => cerrar(null));
   if (!state) return null;
-  const cerrar = (val) => { state.resolve(val); setState(null); };
   return (
     <Modal titulo={state.titulo || "Autorizar"} onClose={() => cerrar(null)} className="modal-confirm">
       <form onSubmit={(e) => { e.preventDefault(); if (pin) cerrar(pin); }}>

@@ -19,93 +19,162 @@ panel de Supabase con sus datos intactos).
 
 | Ajuste | Valor | Por qué |
 |---|---|---|
-| Esquema | `tequeria-app/supabase-schema.sql` de la rama, aplicado dos veces (se puede repetir) | Igual que en producción: una sola transacción |
+| Esquema | `tequeria-app/supabase-schema.sql` de la rama, aplicado dos veces seguidas (se puede repetir) | Igual que en producción: una sola transacción |
 | Auth: inicio anónimo | Activado | Identidad de los equipos (MODELO.md §4) |
 | Auth: confirmar correo | Obligatorio | `_identidad` exige correo verificado |
-| Auth: vigencia del JWT | 600 s | Valor a medir para el tiempo de corte del tiempo real |
-| Auth: límite de inicios anónimos | 30 por hora y por IP (el de Supabase) | Protección contra altas masivas de identidades |
+| Auth: contraseñas | Mínimo 10 caracteres | Compensa que no haya revisión de contraseñas filtradas (ver avisos) |
+| Auth: vigencia del JWT | **300 s** | Es el límite elegido para el tiempo de corte del tiempo real (antes, 600 s) |
+| Auth: límite de inicios anónimos | 100 por hora y por IP **solo en staging**, para repetir las mediciones (cada una usa de 5 a 7) | En producción, 30 (el de Supabase) |
 | Auth: CAPTCHA | **Sin configurar** | Necesita claves de hCaptcha o Turnstile; queda pendiente antes del piloto |
-| Realtime: solo canales privados | Activado | Ver «Hallazgos» |
+| Realtime: solo canales privados | Activado **y aplicado** (lo comprueba `humo.mjs`) | Ver «Hallazgos» |
 
-Los avisos de seguridad de Supabase muestran dos tipos, ambos esperados por el diseño: tablas con RLS sin
-políticas (nadie las lee directo; todo pasa por las funciones) y funciones `SECURITY DEFINER` que ejecuta
-`authenticated` (son la API). Ninguna función la ejecuta `anon`.
+## Avisos de seguridad de Supabase
 
-## Prueba de humo
+Los cuatro que muestra el asesor de seguridad, el 6 de noviembre de 2026:
 
-`tequeria-app/scripts/staging/humo.mjs` corre contra staging con `supabase-js`, igual que la app:
+| Aviso | Nivel | Cuántos | Qué es y qué se hizo |
+|---|---|---|---|
+| Tablas con RLS sin políticas (`rls_enabled_no_policy`) | Info | 25 | Esperado: nadie lee ni escribe las tablas directo; todo pasa por las funciones. |
+| Funciones `SECURITY DEFINER` que ejecuta `authenticated` (`authenticated_security_definer_function_executable`) | Aviso | 54 | Esperado: son la API. Cada una valida al equipo, la sesión o la persona (MODELO.md §3); `anon` no ejecuta ninguna (lo comprueba `humo.mjs`). |
+| Política que admite usuarios anónimos (`auth_allow_anonymous_sign_ins`) en `realtime.messages` | Aviso | 1 | Esperado: los equipos son identidades anónimas y escuchan su canal con la política `tequeria_escuchar_sucursal`. Solo deja escuchar a un equipo vinculado, sin revocar y vigente en Auth: una identidad anónima sin vincular, una persona, otra sucursal o una llamada sin sesión se rechazan (lo comprueba `humo.mjs` contra el servidor). |
+| Protección de contraseñas filtradas desactivada (`auth_leaked_password_protection`) | Aviso | 1 | No se puede activar en el plan gratuito: la API responde 402 («available on Pro Plans and up»). Se subió el mínimo a 10 caracteres. Decidir antes del piloto: plan Pro o aceptar el riesgo (los dueños también podrán entrar con Google, paso 6). |
+
+## Scripts
+
+Todos se niegan a correr si el proyecto no se llama «staging» o es el de producción. Leen las llaves con
+la API de administración de Supabase (el token lo inyecta el proxy del entorno de Claude Code); la
+`service_role` solo vive en memoria, para crear personas de prueba con el correo confirmado. Cada
+ejecución crea cuentas nuevas con datos sintéticos. Lo común está en `scripts/staging/comun.mjs`.
 
 ```bash
 cd tequeria-app
-node scripts/staging/humo.mjs                      # unos 30 s
-node scripts/staging/humo.mjs --medir-revocacion   # además, el tiempo de corte (hasta 15 min)
+node scripts/staging/humo.mjs              # unos 30 s
+node scripts/staging/navegador.mjs         # unos 40 s; usa la última sucursal de humo.mjs
+node scripts/staging/corte.mjs             # unos 9 min
+node scripts/staging/corte-navegador.mjs   # unos 5 min
 ```
 
-- Se niega a correr si el proyecto no se llama «staging» o es el de producción.
-- Lee las llaves con la API de administración de Supabase (el token lo inyecta el proxy del entorno de Claude
-  Code); la `service_role` solo vive en memoria para crear personas de prueba con el correo confirmado.
-- Cada ejecución crea dos cuentas nuevas, con sus dueños, equipos y datos sintéticos.
+**`humo.mjs`**, contra el servidor real:
 
-Comprueba, contra el servidor real:
-
-1. La configuración (inicio anónimo, correo confirmado, solo canales privados).
+1. La configuración declarada (inicio anónimo, correo confirmado, JWT ≤ 300 s, contraseñas ≥ 10, solo
+   canales privados). Lo que se aplica de verdad lo comprueban los pasos siguientes.
 2. Sin sesión (`anon`) no se ejecuta ninguna función.
-3. Alta: dos personas entran con correo y contraseña y crean su cuenta, su sucursal y su administrador.
-4. Vinculación: los dueños generan códigos; tres identidades anónimas se vinculan (una como monitor); un
+3. **Solo canales privados, aplicado:** un canal público se rechaza (`PrivateOnly`) sin sesión y con una
+   identidad anónima.
+4. Alta: dos personas entran con correo y contraseña y crean su cuenta, su sucursal y su administrador.
+5. Vinculación: los dueños generan códigos; tres identidades anónimas se vinculan (una como monitor); un
    código usado ya no sirve.
-5. Entrada: cada equipo ve solo el personal de su sucursal; el administrador entra y lee el estado inicial.
-6. Aislamiento: el token de otra sucursal, una persona como equipo, un equipo como persona y un dueño con
+6. Entrada: cada equipo ve solo el personal de su sucursal; el administrador entra y lee el estado inicial.
+7. Aislamiento: el token de otra sucursal, una persona como equipo, un equipo como persona y un dueño con
    la cuenta de otro se rechazan.
-7. Tiempo real: el equipo se suscribe al canal privado de su sucursal; el de otra sucursal y el de una persona
-   se rechazan («Unauthorized»).
-8. Un cambio avisa solo a su sucursal en menos de un segundo y sin datos; un cliente no puede publicar.
-9. Revocar: el equipo pierde el acceso a los datos en la siguiente llamada.
-10. (Con `--medir-revocacion`) cuánto tarda el equipo revocado, con la conexión abierta, en dejar de recibir
-    avisos.
+8. Tiempo real: el equipo escucha el canal privado de su sucursal; el de otra sucursal, una persona, una
+   identidad anónima sin vincular y una llamada sin sesión se rechazan.
+9. Un cambio avisa solo a su sucursal en menos de un segundo y sin datos; un cliente no puede publicar.
+10. Revocar: el equipo pierde el acceso a los datos en la siguiente llamada.
+11. Supabase Auth real: un equipo o una persona suspendida, o borrada de forma lógica, deja de servir en
+    la siguiente llamada (con su JWT todavía vigente); el borrado definitivo de un equipo vinculado se
+    rechaza y el equipo sigue igual; una identidad anónima que nunca se vinculó sí se borra.
 
-## Recorrido de la app en el navegador
+**`navegador.mjs`**: levanta la app con la URL y la llave pública de staging y, con Chromium, recorre lo que
+hará un equipo nuevo: pide vincularse, se vincula con un código (escrito con minúsculas y guion), el
+administrador entra y ve sus mesas, al recargar conserva la identidad y la sesión, el canal privado queda
+conectado («En línea, sincronizado») y, al revocar el equipo, vuelve a «Vincular este equipo» sin datos en
+pantalla ni claves guardadas.
 
-`tequeria-app/scripts/staging/navegador.mjs` levanta la app con la URL y la llave pública de staging y, con
-Chromium, recorre lo que hará un equipo nuevo: pide vincularse, se vincula con un código (escrito con
-minúsculas y guion), el administrador entra y ve sus mesas, al recargar conserva la identidad y la sesión, el
-canal privado queda conectado («En línea, sincronizado») y, al revocar el equipo, vuelve a «Vincular este
-equipo» sin datos en pantalla ni claves guardadas. Usa uno o dos inicios anónimos.
+**`corte.mjs`** y **`corte-navegador.mjs`**: el tiempo de corte, abajo.
 
-## Resultados (6 de noviembre de 2026)
+## Tiempo de corte
 
-- Prueba de humo, pasos 1 a 9: bien. El aviso llega entre 0.4 y 0.5 s después de la llamada.
-- Recorrido en el navegador: 6 de 6 bien.
-- **Tiempo de corte con la conexión abierta:** el equipo revocado recibió el último aviso a los 458 s y ninguno
-  desde los 479 s, con el JWT de 600 s. El corte coincide con la renovación del JWT del equipo, que vuelve a
-  autorizar el canal: el peor caso es la vigencia del JWT (hoy 10 minutos). Desde la revocación el equipo ya
-  no lee ni escribe nada (las funciones lo rechazan en la siguiente llamada) y los avisos no llevan datos:
-  solo el nombre de la tabla. Bajar la vigencia a 300 s acortaría el peor caso a 5 minutos a cambio de
-  renovar el doble de seguido.
+Cuánto puede seguir recibiendo avisos un equipo revocado que tiene la conexión de tiempo real abierta.
+Los avisos no llevan datos (solo el nombre de la tabla) y desde la revocación el equipo ya no lee ni
+escribe nada: las funciones lo rechazan en la siguiente llamada.
+
+**Cómo se mide.** Un cambio cada 5 s en la sucursal. Un equipo de **control**, vigente, escucha el mismo
+canal: si un cambio no le llega, la medición no vale (así una interrupción general no se confunde con un
+corte). Cada equipo revocado debe haber recibido todo antes de revocarlo, no volver a recibir nada después
+de su último aviso, y ese último aviso tiene que llegar dentro del **límite elegido, la vigencia del JWT
+(300 s)**, y del vencimiento del JWT que tenía al revocarlo, con 5 s de tolerancia (la resolución de la
+medición: el servidor cierra el canal al vencer el JWT y un cambio que sale en ese instante todavía llega).
+
+### Un cliente que no suelta el canal (`corte.mjs`)
+
+Un cliente modificado que ignora `DISPOSITIVO` y sigue escuchando. Cuatro equipos revocados a la vez, cada
+uno en un momento distinto de la renovación de su JWT (supabase-js renueva cuando le faltan menos de 120 s):
+
+| Equipo | Edad del JWT al revocar | Último aviso / sin avisos desde | Qué lo cortó |
+|---|---|---|---|
+| `justo-antes` | 172 s · 174 s | 6–11 s · 6–11 s | Su renovación, a los 9 s · 6 s |
+| `a-medias` | 84 s · 89 s | 91–97 s · 90–96 s | Su renovación, a los 97 s · 92 s |
+| `recien` (peor caso de un cliente que renueva) | 13 s · 13 s | 166–171 s · 165–170 s | Su renovación, a los 167 s · 167 s |
+| `token-fijo` (nunca manda otro JWT) | — · 12 s | — · 288–293 s | El servidor, al vencer el JWT (288 s) |
+
+Dos corridas (separadas por «·»), con el control recibiendo los 99 y 100 cambios. En las dos, el canal de
+cada equipo revocado se cerró (`CLOSED`) y no volvió a recibir nada. La primera corrida tenía un
+`sin-renovar` en lugar de `token-fijo` y no medía lo que debía (ver «Hallazgos»).
+
+**Conclusión:** Realtime vuelve a evaluar la política cuando el cliente manda un JWT nuevo, y cierra el
+canal cuando vence el JWT si el cliente nunca manda otro. El peor caso es la vigencia del JWT: **300 s**
+(más unos segundos).
+
+### La app real en el navegador (`corte-navegador.mjs`)
+
+La app en Chromium, con el administrador dentro y en línea. La app no se queda escuchando: con el primer
+aviso (o, sin cambios en la sucursal, con su consulta periódica cada 30 s) llama al servidor, recibe
+`DISPOSITIVO`, vacía la pantalla, borra sus claves y suelta el canal.
+
+| Equipo | Edad del JWT al revocar | Sin datos en pantalla a los |
+|---|---|---|
+| `justo-antes`, sin cambios en la sucursal | 148 s | 29.1 s |
+| `a-medias`, sin cambios | 66 s | 6.2 s |
+| `recien`, sin cambios | 6 s | 32.0 s |
+| `con-cambios`, un cambio cada 5 s | 47 s | 4.8 s |
+
+El control siguió en Mesas y recibió los 10 cambios; ningún equipo revocado recibió avisos después de
+vaciar la pantalla ni conservó claves. Cota comprobada: 45 s sin cambios, 10 s con cambios.
+
+**Limitación conocida:** con la pestaña oculta la app no hace la consulta periódica; si no hay cambios,
+la pantalla se vacía al volver a mostrarse (la primera llamada responde `DISPOSITIVO`). La pantalla de
+desbloqueo del paso 6 la cubre.
 
 ## Hallazgos
 
+- **«Solo canales privados» no se aplicaba.** Con `private_only = true` en la API, un cliente todavía se
+  suscribía a un canal público, con y sin sesión. El ajuste guardado al crear el proyecto no había llegado
+  al servidor de Realtime: al desactivarlo y volver a activarlo, los canales públicos se rechazan con
+  `PrivateOnly: This project only allows private channels` (comprobado durante 6 minutos y en cada
+  ejecución de `humo.mjs`). Por eso `humo.mjs` exige el rechazo efectivo y MIGRACION.md §5 pide
+  comprobarlo en producción, no solo leer la configuración.
+- **supabase-js renueva el JWT aunque se apague la renovación automática:** el tiempo real pide el JWT
+  en cada latido y supabase-js lo renueva si le faltan menos de 90 s. El primer `sin-renovar` se renovó a
+  los 214 s y se cortó entonces, no al vencer. Para medir lo que hace el servidor, `token-fijo` abre el
+  canal con otro cliente que siempre entrega el mismo JWT.
+- **Borrar en Supabase Auth la identidad de un equipo vinculado fallaba por casualidad** («Database
+  error deleting user»): `dispositivos` tenía `on delete cascade`, pero lo impedía la referencia del
+  código con que se vinculó. Ahora es una regla explícita (`on delete restrict`, MODELO.md §4): se
+  conserva su historial; para cortarlo se revoca, se suspende o se borra de forma lógica. El borrado de
+  una persona sigue quitando sus membresías, y el del último propietario de una cuenta activa lo rechaza
+  `cuenta_con_propietario` (prueba en `tests/sql/duenos.test.js`).
 - **Equipo nuevo sin sesión: Supabase responde `42501`, no `DISPOSITIVO`.** Sin identidad anónima la llamada
   va con la llave pública, y `anon` no ejecuta ninguna función. La app mostraba «No hay conexión» en lugar de
-  «Vincular este equipo»; el servidor simulado de los recorridos respondía `DISPOSITIVO` y lo ocultaba.
-  Corregido: la app trata `42501` como equipo sin vincular, y el simulador responde como Supabase real. Así
-  la app no crea una identidad solo por abrirla: la crea al vincular.
-- **Los avisos llevan un `id`** además de `t`: es el identificador del mensaje que agrega Realtime, no un
-  dato de la app. La app solo lee `t`.
-- **Justo después de cambiar la configuración de Realtime**, las suscripciones privadas fallaron durante unos
-  minutos (el servicio se reinicia). Después funcionan.
-- **Canales públicos:** con «solo canales privados» activado, un cliente con la llave pública todavía pudo
-  suscribirse a un canal público; se volvió a comprobar unos 20 minutos después con el mismo resultado (la API
-  sigue diciendo `private_only = true`). Queda por revisar en el panel (Realtime → Settings) o con el soporte
-  de Supabase. La app no usa canales públicos y en su canal privado nadie
-  puede publicar, así que esto no le afecta.
-- **Vistas previas apuntaban a producción:** antes de este cambio, las variables `VITE_SUPABASE_*` de Vercel
-  aplicaban a Preview y Production, así que las vistas previas de esta rama usaban la base de producción
-  (protegidas por el inicio de sesión de Vercel). Ahora Preview usa staging. Las vistas previas que ya estaban
-  compiladas siguen con producción hasta que se borren o se vuelvan a compilar.
+  «Vincular este equipo»; corregido en `e7909fa`, y el simulador de los recorridos responde como Supabase
+  real. La app no crea una identidad solo por abrirla: la crea al vincular.
+- **Los avisos llevan un `id`** además de `t`: es el identificador del mensaje que agrega Realtime. La app
+  solo lee `t`.
+- **Justo después de cambiar la configuración de Realtime**, las suscripciones privadas pueden fallar
+  durante unos minutos (el servicio se reinicia).
+- **Vistas previas que apuntaban a producción:** hasta `e7909fa`, las variables `VITE_SUPABASE_*` de Vercel
+  aplicaban a Preview y Production, así que las vistas previas usaban la base de producción. Ahora Preview
+  usa staging, pero las **27 vistas previas compiladas antes** (de `9e5df3b` a `1e4607e`, todas de esta rama) siguen
+  apuntando a producción. Todas exigen iniciar sesión en Vercel con acceso al equipo («Vercel
+  Authentication» en todo menos el dominio de producción), así que solo las abre la cuenta del
+  proyecto. Quedan por borrar (ver «Pendiente»).
 
 ## Pendiente
 
+- Borrar las 27 vistas previas antiguas que apuntan a producción: con un token de Vercel, o desde el
+  panel (Deployments → Preview, rama `ccr-57bea2be-4betyy`, anteriores al 6 de noviembre).
 - CAPTCHA del inicio anónimo (claves de hCaptcha o Turnstile).
-- Volver a medir el tiempo de corte con la app en el navegador (no solo con el script).
+- Decidir la protección de contraseñas filtradas (plan Pro) o dejar el mínimo de 10 caracteres.
+- Repetir la medición con el cliente del paso 6 terminado (panel de dueños y desbloqueo).
 - Al terminar el piloto técnico: revocar el token de administración de Supabase guardado en el entorno de
   Claude Code y, si ya no se usa, pausar staging para reactivar `cazaofertas-ml`.

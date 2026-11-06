@@ -7,21 +7,10 @@
 // «Vincular este equipo» sin datos en pantalla. Usa 1 o 2 inicios anónimos (límite de staging: 30 por hora).
 import { spawn } from "node:child_process";
 import { chromium } from "playwright";
+import { abrirStaging, sql, REF } from "./comun.mjs";
 
-const REF = process.env.STAGING_REF || "izcaeojzbaoqlxkerria";
-const API = `https://api.supabase.com/v1/projects/${REF}`;
 const PUERTO = 5176;
-const adm = async (ruta, cuerpo) => {
-  const r = await fetch(API + ruta, { method: cuerpo ? "POST" : "GET",
-    headers: { Authorization: "Bearer proxy-injected", "Content-Type": "application/json" }, body: cuerpo && JSON.stringify(cuerpo) });
-  if (!r.ok) throw new Error(`API de administración ${ruta}: HTTP ${r.status}`);
-  return r.json();
-};
-const sql = (query) => adm("/database/query", { query });
-
-const proyecto = await adm("");
-if (REF === "ahmkfmoftpvhdcrjnhoe" || !/staging/i.test(proyecto.name)) { console.error("Se niega: no es staging."); process.exit(2); }
-const ANON = (await adm("/api-keys?reveal=false")).find((k) => k.name === "anon").api_key;
+const { ANON } = await abrirStaging();
 
 // sucursal de prueba y un código nuevo para ella (se guarda solo su hash, como generar_codigo)
 const [suc] = await sql(`select s.id from public.sucursales s where s.nombre = 'Centro A' order by s.creada desc limit 1`);

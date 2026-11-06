@@ -83,12 +83,14 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
 **B. Staging con Supabase real**
 
 4. **Proyecto de staging** (hecho, [STAGING.md](STAGING.md)): el esquema, inicio anónimo, correo con
-   confirmación, JWT de 10 minutos, solo canales privados y las vistas previas de Vercel apuntando a
-   staging. Falta el CAPTCHA del inicio anónimo.
+   confirmación, contraseñas de 10 o más, JWT de 300 s, solo canales privados (comprobado en el
+   servidor, no solo en la configuración) y las vistas previas de Vercel apuntando a staging. Falta el
+   CAPTCHA del inicio anónimo y retirar las vistas previas antiguas que apuntan a producción.
 5. **Pruebas contra Supabase real** (paso 7 del núcleo, MODELO.md §9) (en curso): prueba de humo
-   (`scripts/staging/humo.mjs`) y recorrido de la app en el navegador (`scripts/staging/navegador.mjs`)
-   en verde; tiempo de corte medido (≈ 8 min con JWT de 10). Falta repetirlo con el cliente del paso 6
-   terminado (panel de dueños y desbloqueo).
+   (`humo.mjs`), recorrido de la app (`navegador.mjs`) y tiempo de corte con un receptor de control, en
+   distintos momentos de la renovación del JWT (`corte.mjs`) y con la app real (`corte-navegador.mjs`),
+   en verde: a más tardar al vencer el JWT (300 s) para un cliente que no suelta el canal; ≤ 32 s la
+   app real. Falta repetirlo con el cliente del paso 6 terminado (panel de dueños y desbloqueo).
 6. **Pruebas de capacidad** (PLAN §5): equipos a la vez, llamadas, conexiones, CPU, mensajes de tiempo
    real, almacenamiento y exportaciones; de ahí, los costos.
 7. **Validar La Tequería y «Taquería Piloto B»** con datos sintéticos: venta, cobro, corte, inventario y

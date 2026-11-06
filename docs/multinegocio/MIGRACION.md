@@ -165,12 +165,17 @@ Implementado (paso 2) en `supabase-schema.sql`:
 
 Antes de la ventana, en Supabase:
 
-- Auth: inicio de sesión anónimo activado y protegido (CAPTCHA o límite por IP), inicio con correo con
-  confirmación obligatoria (o con Google) y la expiración del JWT acordada (MODELO.md §4).
+- Auth: inicio de sesión anónimo activado y protegido (CAPTCHA o límite por IP: 30 por hora, el de
+  Supabase), inicio con correo con confirmación obligatoria (o con Google), contraseñas de al menos 10
+  caracteres (sin el plan Pro no hay revisión de contraseñas filtradas) y JWT de 300 s (MODELO.md §4).
 - Realtime: solo canales privados (acceso público desactivado), y ninguna política sobre
   `realtime.messages` que no sea la de la app: si hay otra, el archivo se detiene para revisarla
   (MODELO.md §7).
 - API: el esquema `privado` no se agrega a los esquemas expuestos.
+- **Comprobar que se aplica, no solo lo que dice la configuración** (en staging, «solo canales
+  privados» no se aplicaba hasta desactivarlo y volver a activarlo; [STAGING.md](STAGING.md)): un canal
+  público se rechaza con `PrivateOnly`, con y sin sesión, y la llave pública no ejecuta ninguna función.
+  Es el primer paso de `scripts/staging/humo.mjs`, que se puede adaptar para leer sin escribir.
 
 1. Fuera del horario de servicio, con el personal avisado.
 2. Comprobar que no haya mesas abiertas, comandas en cocina ni cuentas por cobrar. Lo ideal es hacer

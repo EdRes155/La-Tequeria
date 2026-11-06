@@ -275,11 +275,15 @@ servidor solo devuelve el token para armar el enlace.
 - **Revocar:**
   - marca `revocado_en`; desde ese momento `_dispositivo` (y con él `_contexto`) rechaza al equipo en
     todas las funciones;
-  - la sesión de Supabase dura poco (se configura la expiración del JWT; valor a medir, por ejemplo
-    10 minutos);
+  - la sesión de Supabase dura poco: JWT de 300 s (medido en staging, [STAGING.md](STAGING.md));
   - al renovarse, las políticas del tiempo real vuelven a evaluar al equipo (§7).
 - **Recuperación:** un equipo perdido o un navegador borrado se revoca y se vincula de nuevo con otro
   código. La credencial anterior no se recupera.
+- **Borrar la identidad en Supabase Auth:** el borrado definitivo de la identidad de un equipo vinculado
+  se rechaza (`dispositivos.auth_user_id … on delete restrict`): se conserva de qué equipo es cada sesión
+  y cada código. Para cortarlo se revoca, o se suspende o se borra de forma lógica en Supabase Auth
+  (`deleted_at`), y se rechaza en la siguiente llamada. Una identidad anónima que nunca se vinculó sí se
+  puede borrar. Comprobado contra Supabase Auth real (`scripts/staging/humo.mjs`).
 - **Implementado en la app (paso 6, vinculación):**
   - la sesión anónima de Supabase se guarda y se renueva en su propia clave
     (`tequeria-identidad-equipo`, `src/supabaseClient.js`);
@@ -400,8 +404,12 @@ Reglas de aplicación (del plan):
     revocar con `auth_user_id = auth.uid()` y con la identidad vigente (`_auth_vigente`: anónima, sin
     suspender ni borrar), igual que `_dispositivo`;
   - escritura (publicar): **sin política para clientes**, así que ningún dispositivo puede publicar.
-- **Revocación con la conexión abierta:** se comprueba en el piloto y se mide el tiempo máximo en que
-  el equipo aún recibe avisos (sin datos), con las mitigaciones del §4.
+- **Revocación con la conexión abierta** (medido en staging, [STAGING.md](STAGING.md#tiempo-de-corte)):
+  - un cliente que no suelta el canal deja de recibir avisos cuando manda su JWT siguiente (Realtime
+    vuelve a evaluar la política) o, si nunca lo manda, cuando vence: el servidor cierra el canal. El
+    peor caso es la vigencia del JWT (300 s), más unos segundos;
+  - la app real lo suelta antes: con el siguiente aviso o, sin cambios en la sucursal, con su consulta
+    periódica (cada 30 s), la llamada responde `DISPOSITIVO` y la pantalla se vacía.
 - **Implementado (paso 5):**
   - `_avisar_sucursal()` en 28 disparadores por sentencia (inserción, actualización y borrado; en
     `cobros` y `cocina_hechos`, sin borrado) de las 10 tablas que ve la app. Avisa una vez a cada
@@ -413,8 +421,10 @@ Reglas de aplicación (del plan):
   - Publicar: no hay política. Si el proyecto tiene **otra** política sobre `realtime.messages`, el
     archivo se detiene y pide revisarla (una de inserción dejaría publicar a los clientes; una de
     lectura más amplia, escuchar canales ajenos).
-  - Requisitos en Supabase: en Realtime, desactivar el acceso público a los canales (solo privados); no
-    agregar `privado` a los esquemas expuestos de la API.
+  - Requisitos en Supabase: en Realtime, desactivar el acceso público a los canales (solo privados) y
+    **comprobar que se aplica** (un canal público debe responder `PrivateOnly`: en staging el ajuste
+    guardado al crear el proyecto no se aplicaba hasta desactivarlo y volver a activarlo); no agregar
+    `privado` a los esquemas expuestos de la API.
   - Pruebas: `tests/sql/tiempo-real.test.js` reproduce la autorización de Realtime (con
     `realtime.topic()` y la identidad del equipo) para cada regla. La medición con una conexión ya
     abierta necesita Supabase real (§9, paso 7).
@@ -440,7 +450,13 @@ Reglas de aplicación (del plan):
   - en la pantalla, `DISPOSITIVO` y `SESION` cierran la sesión igual llegue en una recarga, en el
     latido de cocina o en una acción: la pantalla se vacía, el reintento pendiente se cancela y lo que
     responda después ya no la toca. Lo prueban los recorridos «remoto simulado»
-    (`tests/e2e/remoto/`), con la app compilada contra un servidor que intercepta Playwright.
+    (`tests/e2e/remoto/`), con la app compilada contra un servidor que intercepta Playwright;
+  - al cerrar la sesión no queda nada de ella para quien entre después: el cobro abierto, la impresión
+    de una comanda, el panel del dispositivo, las confirmaciones (responden «cancelar») y los avisos se
+    cierran, y todo el estado de la sesión vuelve a su valor inicial. Si el equipo dejó de estar
+    autorizado, tampoco queda la lista de personal de su sucursal (ni un instante, al vincularse a
+    otra). Lo prueba `tests/e2e/remoto/limpieza.spec.js` volviendo a entrar con otra persona, en la
+    misma sucursal o en otra.
 - **Borradores** (paso 6):
   - se guardan con la sucursal y el autor;
   - tras un bloqueo, solo se recuperan al reautenticar al mismo operador; el siguiente usuario no
@@ -469,8 +485,8 @@ Reglas de aplicación (del plan):
    vinculación, vinculación, panel de equipos y revocación; identidades suspendidas o borradas en
    Supabase Auth rechazadas en cada llamada; límites que se respetan en cualquier nivel de aislamiento;
    bitácora por cuenta (§3.3 y §4). Pruebas en la matriz y en `tests/sql/duenos.test.js` (flujos,
-   límites y carreras). Falta probarlo contra Supabase Auth real (inicio anónimo, correo verificado,
-   suspensión) en un proyecto de staging antes del piloto.
+   límites y carreras). Probado contra Supabase Auth real en staging (inicio anónimo, correo
+   verificado, suspensión, borrado lógico y definitivo).
 5. **Tiempo real privado y claves del navegador por sucursal** (hecho): canal `sucursal:<id>` que
    solo publica el servidor, política de escucha con las reglas de `_dispositivo`, y claves del navegador
    por sucursal con limpieza al cambiar de sucursal o al revocar el equipo (§7 y §8).
@@ -478,8 +494,10 @@ Reglas de aplicación (del plan):
    validación del PIN de 6 a 8 dígitos en la interfaz (también en el modo local) y borradores por
    autor.
 7. **Validación con Supabase real (staging)** (en curso, [STAGING.md](STAGING.md)): proyecto aparte con
-   el esquema, inicio anónimo, correo verificado y solo canales privados; prueba de humo y recorrido de
-   la app en el navegador contra el servidor real. Medido: con la conexión abierta, un equipo revocado
-   dejó de recibir avisos a los ≈ 8 minutos con un JWT de 10 (el peor caso es la vigencia del JWT). Falta
-   el CAPTCHA del inicio anónimo y repetir la medición con el cliente del paso 6 terminado; el caso
-   «(paso 7)» de la matriz sigue pendiente hasta entonces.
+   el esquema, inicio anónimo, correo verificado, JWT de 300 s y solo canales privados comprobados en el
+   servidor; prueba de humo, recorrido de la app en el navegador y medición del tiempo de corte con un
+   receptor de control, en distintos momentos de la renovación del JWT y con la app real. Medido: un
+   cliente que no suelta el canal lo pierde a más tardar al vencer su JWT (300 s); la app real se queda
+   sin datos en ≤ 32 s sin cambios en la sucursal y en ≤ 5 s con cambios. Falta el CAPTCHA del inicio
+   anónimo y repetir la medición con el cliente del paso 6 terminado; el caso «(paso 7)» de la matriz
+   sigue pendiente hasta entonces.

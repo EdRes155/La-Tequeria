@@ -14,7 +14,7 @@ import {
   ordenarItems, nombreCocina, PASOS_PEDIDO, estadoPedido, unirTickets, pedidosDeMesa, leerAjustes, porPreparar,
   agruparComandas, lineaCocina, ZONAS_MX, ZONA_DEFAULT, MAX_MESAS,
 } from "./dominio.js";
-import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin } from "./ui.jsx";
+import { Modal, Toaster, toast, ConfirmHost, confirmDialog, ChoiceHost, choiceDialog, PinHost, pedirPin, cerrarDialogos } from "./ui.jsx";
 import { leer as leerClave, guardar as guardarClave, leerJson, guardarJson } from "./claves.js";
 import { CSS } from "./estilos.js";
 
@@ -167,19 +167,29 @@ export default function App() {
   // la pantalla, y el reintento pendiente se cancela.
   const epoca = useRef(0);
   const reintento = useRef(null);
-  const cerrarSesion = useCallback((mensaje = null) => {
+  const pedidas = useRef({});
+  const diferidasRef = useRef(new Set());
+  const [diferidas, setDiferidas] = useState([]);
+  // Al cerrar la sesión (o perder la autorización del equipo) no queda nada de ella para quien entre después:
+  // todo estado de aquí con datos del negocio vuelve a su valor inicial, y se cierran los diálogos y avisos.
+  // Si el equipo dejó de estar autorizado, tampoco queda la lista de personal de su sucursal.
+  const cerrarSesion = useCallback((mensaje = null, codigo = null) => {
     epoca.current++;
     clearTimeout(reintento.current); reintento.current = null;
     api.salir();
+    cerrarDialogos();
     setSesion(null); setData(null); setBorradores({}); setView("mesas"); setCtx(null);
-    setAviso(mensaje); setCocinaIncierta(false); setErrorCarga(null); setCambiandoPin(false); setMonitorPref(null);
+    setCobro(null); setPrintTicket(null); setDispositivoAbierto(false); setCambiandoPin(false); setMonitorPref(null);
+    pedidas.current = {}; diferidasRef.current = new Set(); setDiferidas([]);
+    setAviso(mensaje); setCocinaIncierta(false); setErrorCarga(null);
+    if (codigo === "DISPOSITIVO") setPantalla(null);
   }, []);
 
   const manejarError = useCallback((e) => {
     if (!(e instanceof ErrorApi)) { console.error(e); toast("Ocurrió un error inesperado.", "error"); return; }
     if (e.codigo === "DESCARTADA") return;   // respuesta de antes de cambiar de sucursal o de autorización
     // sesión vencida o equipo que dejó de estar autorizado (el almacén ya borró sus claves y canales)
-    if (sinAutorizacion(e)) { cerrarSesion(e.message); return; }
+    if (sinAutorizacion(e)) { cerrarSesion(e.message, e.codigo); return; }
     if (e.codigo === "CAMBIAR_PIN") { setSesion((s) => s && { ...s, debeCambiarPin: true }); return; }
     if (e.codigo === "RED") setSinRed(true);
     toast(e.message, "error");
@@ -188,12 +198,9 @@ export default function App() {
   // Partes pesadas (historial, cortes, gastos): con la pantalla en otra sección no se recargan con cada
   // cambio; quedan pendientes y se cargan al abrir la sección que las usa.
   const vistaRef = useRef({ view: "mesas", monitor: false });
-  const [diferidas, setDiferidas] = useState([]);
-  const diferidasRef = useRef(new Set());
   const marcarDiferidas = (fn) => { fn(diferidasRef.current); setDiferidas([...diferidasRef.current]); };
 
-  // Cada parte del estado solo se reemplaza con la respuesta más reciente que se pidió para ella
-  const pedidas = useRef({});
+  // Cada parte del estado solo se reemplaza con la respuesta más reciente que se pidió para ella (pedidas)
   const contador = useRef(0);
   const refrescar = useCallback(async (pedido = null) => {
     let partes = pedido;
@@ -219,7 +226,7 @@ export default function App() {
       if (r.yo?.cambiarPin) setSesion((s) => (s && !s.debeCambiarPin ? { ...s, debeCambiarPin: true } : s));
     } catch (e) {
       if (ep !== epoca.current || e.codigo === "DESCARTADA") return;
-      if (sinAutorizacion(e)) { cerrarSesion(e.message); return; }
+      if (sinAutorizacion(e)) { cerrarSesion(e.message, e.codigo); return; }
       if (e.codigo === "RED") setSinRed(true);
       setErrorCarga(e);
       // se vuelve a intentar sola en unos segundos (una sola espera a la vez)
@@ -260,7 +267,7 @@ export default function App() {
         if (ok === false) cerrarSesion("Otra cocina tomó la sesión en otro dispositivo.");
       } catch (e) {
         if (!vivo || ep !== epoca.current || e.codigo === "DESCARTADA") return;
-        if (sinAutorizacion(e)) cerrarSesion(e.message); else setCocinaIncierta(true);
+        if (sinAutorizacion(e)) cerrarSesion(e.message, e.codigo); else setCocinaIncierta(true);
       }
     };
     beat();
@@ -759,7 +766,7 @@ function CambiarPin({ forzado, usuario, negocio, sinRed, onListo, onCancelar, on
       const r = await api.cambiarPin(actual, nuevo);
       if (r.ok) onListo(); else setErr(mensajePin(r));
     } catch (ex) {
-      if (ex.codigo === "SESION") onSalir(ex.message); else setErr(ex.message);
+      if (sinAutorizacion(ex)) onSalir(ex.message, ex.codigo); else setErr(ex.message);
     } finally { setBusy(false); }
   };
 

@@ -327,7 +327,7 @@ create table if not exists public.invitaciones (
 create table if not exists public.dispositivos (
   id uuid primary key default gen_random_uuid(),
   sucursal_id uuid not null references public.sucursales (id),
-  auth_user_id uuid not null unique references auth.users (id) on delete cascade,
+  auth_user_id uuid not null unique references auth.users (id) on delete restrict,
   nombre text not null,
   monitor_cocina boolean not null default false,
   aprobado_por uuid,
@@ -487,6 +487,23 @@ begin
     if not exists (select 1 from pg_constraint where conname = r.nombre) then
       execute format('alter table public.%I add constraint %I foreign key %s deferrable initially deferred', r.tabla, r.nombre, r.regla);
     end if;
+  end loop;
+end $$;
+
+-- El borrado definitivo en Supabase Auth de la identidad de un equipo vinculado se rechaza (MODELO.md §4):
+-- se conserva de qué equipo es cada sesión y cada código. Para cortarlo: revocar_dispositivo, o suspender o
+-- borrar de forma lógica en Supabase Auth (se rechaza en la siguiente llamada). Una identidad anónima que
+-- nunca se vinculó sí se puede borrar. (El de una persona quita sus membresías; el del último propietario
+-- de una cuenta activa lo rechaza cuenta_con_propietario.) Aquí se cambia la referencia de bases anteriores.
+do $$
+declare r record;
+begin
+  for r in select c.conname from pg_constraint c
+            where c.contype = 'f' and c.confrelid = 'auth.users'::regclass and c.confdeltype <> 'r'
+              and c.conrelid = 'public.dispositivos'::regclass
+  loop
+    execute format('alter table public.dispositivos drop constraint %I', r.conname);
+    execute format('alter table public.dispositivos add constraint %I foreign key (auth_user_id) references auth.users (id) on delete restrict', r.conname);
   end loop;
 end $$;
 

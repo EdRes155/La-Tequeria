@@ -228,6 +228,24 @@ d("dueños y dispositivos", () => {
     expect((await vincular(await anonimo(), cod)).ok).toBe(true);
   });
 
+  it("borrar de forma definitiva en Supabase Auth a un equipo vinculado o al último propietario se rechaza; a una identidad sin vincular, no", async () => {
+    const { p, cuenta, eq, token, admin } = await equipoConSesion();
+    const borrar = (uid) => sql.query("delete from auth.users where id = $1", [uid]);
+    // el equipo conserva su historial (sesiones, códigos) y sigue igual; para cortarlo se revoca o se suspende
+    const e = await borrar(eq.uid).catch((x) => x);
+    expect([e.code, e.constraint]).toEqual(["23503", "dispositivos_auth_user_id_fkey"]);
+    expect((await eq.con.rpc("usuarios_login")).sucursal).toBeTruthy();
+    // el último propietario: la cuenta no se queda sin propietario
+    expect((await borrar(p.uid).catch((x) => x)).code).toBe("23514");
+    expect(await propietarios(cuenta)).toEqual([p.uid]);
+    // una identidad anónima que nunca se vinculó (por ejemplo, de un código equivocado) sí se borra
+    const suelta = await anonimo();
+    expect((await borrar(suelta.uid)).rowCount).toBe(1);
+    // y el borrado lógico corta al equipo en la siguiente llamada
+    await sql.query("update auth.users set deleted_at = now() where id = $1", [eq.uid]);
+    await sinAcceso(eq, token, admin.id);
+  });
+
   // --- Límites con escrituras simultáneas ----------------------------------------------------------------
   // Partiendo de uno menos que el límite, dos llamadas a la vez. La segunda espera a la primera y, al
   // seguir, ve lo que la primera confirmó: en READ COMMITTED responde «limite»; en REPEATABLE READ y

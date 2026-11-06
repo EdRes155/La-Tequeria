@@ -1,99 +1,61 @@
 #!/usr/bin/env node
 // Prueba de humo contra STAGING (Supabase real; docs/multinegocio/STAGING.md). Nunca contra producción.
-//   node scripts/staging/humo.mjs                      → alta, vinculación, operación, aislamiento y tiempo real
-//   node scripts/staging/humo.mjs --medir-revocacion   → además, cuánto tarda un equipo revocado con la conexión
-//                                                         de tiempo real abierta en dejar de recibir avisos
-// Requisitos: el token de administración de Supabase lo inyecta el proxy del entorno en api.supabase.com, y el
-// host del proyecto está permitido. La llave service_role se lee de la API de administración y solo vive en
-// memoria: crea las personas de prueba con el correo ya confirmado. Nada se imprime ni se guarda.
+//   node scripts/staging/humo.mjs     → configuración efectiva, alta, vinculación, operación, aislamiento y tiempo real
+// El tiempo de corte de un equipo revocado con la conexión abierta se mide aparte: corte.mjs (un cliente que no
+// suelta el canal) y corte-navegador.mjs (la app real).
 // Cada ejecución crea dos cuentas nuevas con personas, equipos y datos sintéticos (dominio .invalid).
+import { abrirStaging, administracion, cliente, datos, suscribir, espera, marca, pasos, igual, URL_PROYECTO } from "./comun.mjs";
 import { createClient } from "@supabase/supabase-js";
 
-const REF = process.env.STAGING_REF || "izcaeojzbaoqlxkerria";
-const PRODUCCION = new Set(["ahmkfmoftpvhdcrjnhoe"]);
-const MEDIR = process.argv.includes("--medir-revocacion");
-const ADMIN_API = `https://api.supabase.com/v1/projects/${REF}`;
-const URL_PROYECTO = `https://${REF}.supabase.co`;
-const espera = (ms) => new Promise((r) => setTimeout(r, ms));
-// única por ejecución: los correos de prueba no se repiten
-const marca = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14) + Math.random().toString(36).slice(2, 6);
-
-async function administracion(ruta) {
-  const r = await fetch(ADMIN_API + ruta, { headers: { Authorization: "Bearer proxy-injected" } });
-  if (!r.ok) throw new Error(`API de administración ${ruta}: HTTP ${r.status}`);
-  return r.json();
-}
-
-const resultados = [];
-async function paso(nombre, fn) {
-  try { const extra = await fn(); resultados.push({ nombre, ok: true }); console.log(`✓ ${nombre}${extra ? " — " + extra : ""}`); }
-  catch (e) { resultados.push({ nombre, ok: false }); console.log(`✗ ${nombre} — ${e.message}`); }
-}
-function igual(a, b, que) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${que}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`); }
+const { proyecto, ANON, SERVICIO } = await abrirStaging({ servicio: true });
+console.log(`Staging: ${proyecto.name}, ${new Date().toISOString()}\n`);
+const { paso, terminar } = pasos();
 async function falla(promesa, codigo) {
   const { data, error } = await promesa;
   if (!error) throw new Error(`se esperaba ${codigo} y respondió ${JSON.stringify(data)}`);
   if (codigo && error.message !== codigo && error.code !== codigo) throw new Error(`se esperaba ${codigo} y fue ${error.code} ${error.message}`);
 }
-async function datos(promesa, que) {
-  const { data, error } = await promesa;
-  if (error) throw new Error(`${que}: ${error.code} ${error.message} ${error.hint || ""}`);
-  return data;
-}
-
-// --- Guardia: solo un proyecto de staging -------------------------------------------------------------
-const proyecto = await administracion("");
-if (PRODUCCION.has(REF) || !/staging/i.test(proyecto.name)) {
-  console.error(`Se niega: ${REF} («${proyecto.name}») no es un proyecto de staging.`);
-  process.exit(2);
-}
-const llaves = await administracion("/api-keys?reveal=true");
-const ANON = llaves.find((k) => k.name === "anon")?.api_key;
-const SERVICIO = llaves.find((k) => k.name === "service_role")?.api_key;
-if (!ANON || !SERVICIO) { console.error("No se encontraron las llaves del proyecto."); process.exit(2); }
-console.log(`Staging: ${proyecto.name} (${REF}), ${new Date().toISOString()}\n`);
-
-const cliente = () => createClient(URL_PROYECTO, ANON, { auth: { persistSession: false, autoRefreshToken: true } });
 const servicio = createClient(URL_PROYECTO, SERVICIO, { auth: { persistSession: false, autoRefreshToken: false } });
-
 async function persona(etiqueta) {
   const correo = `${etiqueta}.${marca}@ejemplo.invalid`;
   const clave = crypto.randomUUID();
   await datos(servicio.auth.admin.createUser({ email: correo, password: clave, email_confirm: true }), "crear persona");
-  const c = cliente();
-  await datos(c.auth.signInWithPassword({ email: correo, password: clave }), "entrar con correo");
-  return { c, correo };
+  const c = cliente(ANON);
+  const r = await datos(c.auth.signInWithPassword({ email: correo, password: clave }), "entrar con correo");
+  return { c, correo, uid: r.user.id };
 }
 async function equipo() {
-  const c = cliente();
+  const c = cliente(ANON);
   const r = await datos(c.auth.signInAnonymously(), "sesión anónima");
   return { c, uid: r.user.id };
-}
-// Se suscribe al canal y espera el resultado (SUBSCRIBED o el error)
-function suscribir(c, topic, alAviso = () => {}) {
-  return new Promise((ok) => {
-    const ch = c.channel(topic, { config: { private: true } }).on("broadcast", { event: "cambio" }, (m) => alAviso(m.payload));
-    const reloj = setTimeout(() => ok({ ch, estado: "SIN_RESPUESTA" }), 15000);
-    c.realtime.setAuth().finally(() => ch.subscribe((estado, err) => {
-      if (estado === "SUBSCRIBED" || estado === "CHANNEL_ERROR" || estado === "TIMED_OUT") {
-        clearTimeout(reloj); ok({ ch, estado, err: err?.message });
-      }
-    }));
-  });
 }
 
 const PIN_A = "583920", PIN_B = "604917";
 let A = {}, B = {};
 
-await paso("configuración: inicio anónimo, correo confirmado y solo canales privados", async () => {
+await paso("configuración declarada: inicio anónimo, correo confirmado, JWT ≤ 300 s, contraseñas ≥ 10 y solo canales privados", async () => {
   const auth = await administracion("/config/auth");
   const rt = await administracion("/config/realtime");
-  igual([auth.external_anonymous_users_enabled, auth.mailer_autoconfirm, rt.private_only], [true, false, true], "configuración");
-  return `JWT de ${auth.jwt_exp} s`;
+  igual([auth.external_anonymous_users_enabled, auth.mailer_autoconfirm, auth.jwt_exp <= 300, auth.password_min_length >= 10, rt.private_only],
+    [true, false, true, true, true], "configuración");
+  return `JWT de ${auth.jwt_exp} s; lo que se aplica de verdad se comprueba en los pasos de abajo`;
 });
 
 await paso("sin sesión (anon) no se ejecuta ninguna función", async () => {
-  await falla(cliente().rpc("usuarios_login"));
+  await falla(cliente(ANON).rpc("usuarios_login"));
+});
+
+await paso("solo canales privados, aplicado: un canal público se rechaza con y sin sesión", async () => {
+  const sinSesion = cliente(ANON);
+  const anonima = (await equipo()).c;
+  const vistos = [];
+  for (const c of [sinSesion, anonima]) {
+    const r = await suscribir(c, `publico-${marca}`, () => {}, { privado: false });
+    if (r.estado === "SUBSCRIBED" || !/PrivateOnly/.test(r.err || "")) throw new Error(`canal público: ${r.estado} ${r.err || ""}`);
+    vistos.push(r.err.split(":")[0]);
+    await c.removeAllChannels();
+  }
+  return vistos.join(", ");
 });
 
 await paso("alta: dos personas crean su cuenta, su sucursal y su administrador", async () => {
@@ -120,6 +82,7 @@ await paso("vinculación: cada dueño genera códigos y los equipos (identidades
       const otro = await equipo();
       const r = await datos(otro.c.rpc("vincular_dispositivo", { p_codigo: cod.codigo, p_nombre: "x" }), "código usado");
       igual(r.error, "codigo", "código usado");
+      X.suelta = otro;   // identidad anónima que no quedó vinculada
     }
   }
 });
@@ -143,7 +106,7 @@ await paso("aislamiento: el token de B no sirve en el equipo de A, ni una person
   await falla(B.dueno.c.rpc("generar_codigo", { p_cuenta: A.cuenta, p_sucursal: A.sucursal, p_monitor: false }), "CUENTA");
 });
 
-await paso("tiempo real: el equipo escucha el canal privado de su sucursal y no el de otra", async () => {
+await paso("tiempo real: el equipo escucha el canal privado de su sucursal; otra sucursal, una persona, una identidad sin vincular y sin sesión no", async () => {
   A.avisos = [];
   const propio = await suscribir(A.cocina.c, "sucursal:" + A.sucursal, (p) => A.avisos.push({ t: Date.now(), p }));
   igual(propio.estado, "SUBSCRIBED", "canal propio");
@@ -152,10 +115,14 @@ await paso("tiempo real: el equipo escucha el canal privado de su sucursal y no 
   if (ajeno.estado === "SUBSCRIBED") throw new Error("se suscribió al canal de otra sucursal");
   const dePersona = await suscribir(A.dueno.c, "sucursal:" + A.sucursal);
   if (dePersona.estado === "SUBSCRIBED") throw new Error("una persona se suscribió al canal de una sucursal");
+  const suelta = await suscribir(A.suelta.c, "sucursal:" + A.sucursal);
+  if (suelta.estado === "SUBSCRIBED") throw new Error("una identidad anónima sin vincular se suscribió al canal de una sucursal");
+  const sinSesion = await suscribir(cliente(ANON), "sucursal:" + A.sucursal);
+  if (sinSesion.estado === "SUBSCRIBED") throw new Error("sin sesión se suscribió al canal de una sucursal");
   B.avisos = [];
   const deB = await suscribir(B.caja.c, "sucursal:" + B.sucursal, (p) => B.avisos.push(p));
   igual(deB.estado, "SUBSCRIBED", "canal de B");
-  return `otra sucursal: ${ajeno.estado}${ajeno.err ? " (" + ajeno.err + ")" : ""}; persona: ${dePersona.estado}`;
+  return `otra sucursal, persona, identidad sin vincular y sin sesión: ${[ajeno, dePersona, suelta, sinSesion].map((r) => r.estado).join(", ")}`;
 });
 
 await paso("tiempo real: un cambio avisa solo a su sucursal, sin datos; un cliente no puede publicar", async () => {
@@ -182,29 +149,26 @@ await paso("tiempo real: un cambio avisa solo a su sucursal, sin datos; un clien
 await paso("revocar: el equipo pierde el acceso a los datos de inmediato", async () => {
   const r = await datos(A.dueno.c.rpc("revocar_dispositivo", { p_cuenta: A.cuenta, p_dispositivo: A.cocina.dispositivo }), "revocar");
   igual(r, { ok: true, yaRevocado: false }, "revocar");
-  A.revocadoEn = Date.now();
   await falla(A.cocina.c.rpc("usuarios_login"), "DISPOSITIVO");
 });
 
-if (MEDIR && resultados.every((r) => r.ok)) {
-  await paso("revocar: con la conexión abierta, cuánto tarda en dejar de recibir avisos", async () => {
-    // cada 10 s un cambio en A; se anota el último aviso que recibe la cocina revocada
-    const limite = A.revocadoEn + 15 * 60 * 1000;
-    let ultimoRecibido = null, sinRecibir = 0;
-    while (Date.now() < limite && sinRecibir < 3) {
-      const n = A.avisos.length;
-      await datos(A.caja.c.rpc("ajustar_bebida", { p_token: A.token, p_id: "coca", p_delta: 1 }), "cambio");
-      await espera(10000);
-      if (A.avisos.length > n) { ultimoRecibido = A.avisos.at(-1).t; sinRecibir = 0; } else sinRecibir++;
-      process.stdout.write(`  ${Math.round((Date.now() - A.revocadoEn) / 1000)} s: ${A.avisos.length > n ? "recibe" : "no recibe"}\n`);
-    }
-    if (sinRecibir < 3) throw new Error("siguió recibiendo avisos 15 minutos después de revocar");
-    const s = ultimoRecibido ? Math.round((ultimoRecibido - A.revocadoEn) / 1000) : 0;
-    return `último aviso recibido ${s} s después de revocar`;
-  });
-}
+await paso("Supabase Auth real: un equipo o una persona suspendida o borrada (borrado lógico) deja de servir en la siguiente llamada; el borrado definitivo de un equipo vinculado se rechaza", async () => {
+  // con el JWT todavía vigente: las funciones leen auth.users en cada llamada
+  await datos(servicio.auth.admin.updateUserById(B.caja.uid, { ban_duration: "24h" }), "suspender equipo");
+  await falla(B.caja.c.rpc("usuarios_login"), "DISPOSITIVO");
+  // el borrado definitivo de un equipo vinculado se rechaza (conserva su historial) y el equipo sigue igual;
+  // el borrado lógico lo corta; una identidad anónima que nunca se vinculó sí se borra
+  const { error } = await servicio.auth.admin.deleteUser(A.caja.uid);
+  if (!error) throw new Error("se pudo borrar de forma definitiva un equipo vinculado");
+  await datos(A.caja.c.rpc("usuarios_login"), "el equipo sigue igual");
+  await datos(servicio.auth.admin.deleteUser(A.caja.uid, true), "borrar equipo (borrado lógico)");
+  await falla(A.caja.c.rpc("usuarios_login"), "DISPOSITIVO");
+  await datos(servicio.auth.admin.deleteUser(A.suelta.uid), "borrar identidad sin vincular");
+  await datos(servicio.auth.admin.updateUserById(A.dueno.uid, { ban_duration: "24h" }), "suspender persona");
+  await falla(A.dueno.c.rpc("mis_cuentas"), "IDENTIDAD");
+  await datos(servicio.auth.admin.deleteUser(B.dueno.uid, true), "borrar persona (borrado lógico)");
+  await falla(B.dueno.c.rpc("mis_cuentas"), "IDENTIDAD");
+});
 
 for (const X of [A, B]) for (const k of ["caja", "cocina"]) await X[k]?.c.removeAllChannels().catch(() => {});
-const fallos = resultados.filter((r) => !r.ok).length;
-console.log(`\n${resultados.length - fallos} de ${resultados.length} pasos bien.`);
-process.exit(fallos ? 1 : 0);
+terminar();

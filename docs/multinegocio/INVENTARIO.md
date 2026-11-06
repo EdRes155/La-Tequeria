@@ -31,7 +31,7 @@ canal y clave del navegador de esta lista debe quedar ligada a una sucursal o ju
 | `cortes` | id, fecha, hora, tickets, total, created_at, detalle, gastos, hecho_por, autorizado_por, cobrado, por_cobrar, sucursal_id | PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
 | `cuentas` | id, nombre, estado, creada, activada_en, revision_propietarios, creada_por, revision | PK (id) | sí |
 | `cuentas_por_persona` | auth_user_id, creadas | FK (auth_user_id) REFERENCES auth.users(id) ON DELETE CASCADE; PK (auth_user_id) | sí |
-| `dispositivos` | id, sucursal_id, auth_user_id, nombre, monitor_cocina, aprobado_por, creado, ultimo_uso, revocado_en, revocado_por | FK (auth_user_id) REFERENCES auth.users(id) ON DELETE CASCADE; único (auth_user_id); PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
+| `dispositivos` | id, sucursal_id, auth_user_id, nombre, monitor_cocina, aprobado_por, creado, ultimo_uso, revocado_en, revocado_por | FK (auth_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT; único (auth_user_id); PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
 | `folios` | sucursal_id, periodo, ultimo | PK (sucursal_id, periodo); FK (sucursal_id) REFERENCES sucursales(id) | sí |
 | `gastos` | id, concepto, monto, fecha, hora, usuario, created_at, corte_id, creado_por, sucursal_id | FK (sucursal_id, corte_id) REFERENCES cortes(sucursal_id, id) DEFERRABLE INITIALLY DEFERRED; PK (id); FK (sucursal_id) REFERENCES sucursales(id); único (sucursal_id, id) | sí |
 | `intentos` | clave, fallos, bloqueado_hasta, ultimo, nivel | PK (clave) | sí |
@@ -238,7 +238,7 @@ deberán adaptarse cuando se implemente, además de agregar casos de rechazo y t
 | `tests/e2e/remoto/servidor-simulado.js` | 1 |
 | `tests/localStore.test.js` | 42 |
 | `tests/sql/credenciales.test.js` | 6 |
-| `tests/sql/duenos.test.js` | 6 |
+| `tests/sql/duenos.test.js` | 8 |
 | `tests/sql/esquema.test.js` | 20 |
 | `tests/sql/reloj.test.js` | 8 |
 | `tests/sql/remoto.test.js` | 3 |
