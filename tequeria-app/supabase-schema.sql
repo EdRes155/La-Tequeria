@@ -1257,13 +1257,16 @@ begin
   return v_id;
 end $$;
 
--- Administrador del personal (PIN ya revisado por quien llama)
-create or replace function public._crear_admin(p_sucursal uuid, p_nombre text, p_pin text)
+-- Administrador del personal (PIN ya revisado por quien llama). p_temporal: el PIN lo fijó otra persona (el
+-- administrador de rescate que crea un dueño): solo sirve para entrar y elegir uno propio antes de operar,
+-- como el que pone un administrador con restablecer_pin (MODELO.md §5.2).
+drop function if exists public._crear_admin(uuid, text, text);
+create or replace function public._crear_admin(p_sucursal uuid, p_nombre text, p_pin text, p_temporal boolean default false)
 returns json language plpgsql set search_path = public as $$
 declare v_id text := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12); v_nombre text := left(btrim(p_nombre), 40);
 begin
-  insert into public.usuarios (id, sucursal_id, nombre, rol, pin_hash, politica_pin, pin_cambiado_en)
-  values (v_id, p_sucursal, v_nombre, 'admin', public._hash_pin(p_pin), 1, public._ahora());
+  insert into public.usuarios (id, sucursal_id, nombre, rol, pin_hash, politica_pin, pin_cambiado_en, debe_cambiar_pin)
+  values (v_id, p_sucursal, v_nombre, 'admin', public._hash_pin(p_pin), 1, public._ahora(), coalesce(p_temporal, false));
   return json_build_object('id', v_id, 'nombre', v_nombre, 'rol', 'admin');
 end $$;
 
@@ -2768,7 +2771,7 @@ begin
   if btrim(coalesce(p_nombre, '')) = '' then return json_build_object('ok', false, 'error', 'nombre'); end if;
   if not public._pin_formato_ok(p_pin) then return json_build_object('ok', false, 'error', 'formato'); end if;
   if public._pin_debil(p_pin) then return json_build_object('ok', false, 'error', 'debil'); end if;
-  v_admin := public._crear_admin(v_suc, p_nombre, p_pin);
+  v_admin := public._crear_admin(v_suc, p_nombre, p_pin, true);   -- temporal: lo cambia al entrar
   perform public._log_cuenta(d.cuenta_id, v_suc, d.auth_user_id, d.correo, 'crear_administrador',
     jsonb_build_object('id', v_admin->>'id', 'nombre', v_admin->>'nombre'));
   return json_build_object('ok', true, 'admin', v_admin);

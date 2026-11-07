@@ -253,6 +253,7 @@ export default function App() {
       if ("periodo" in r && vigente("historial")) parche.periodo = r.periodo;
       setData((d) => ({ ...(d || {}), ...parche }));
       setErrorCarga(null); setSinRed(false);
+      setVerificando(false);   // una respuesta autorizada: la sesión y el equipo siguen vigentes
       if (r.yo?.cambiarPin) setSesion((s) => (s && !s.debeCambiarPin ? { ...s, debeCambiarPin: true } : s));
     } catch (e) {
       if (ep !== epoca.current || e.codigo === "DESCARTADA") return;
@@ -319,9 +320,10 @@ export default function App() {
     const f = () => {
       if (document.visibilityState === "hidden") { oculta = Date.now(); return; }
       if (oculta && Date.now() - oculta >= OCULTA_MAX) {
-        const ep = epoca.current;
+        // el velo solo se quita con una respuesta autorizada (refrescar): un fallo lo deja puesto con su error
+        setErrorCarga(null);
         setVerificando(true);
-        refrescar(null).finally(() => { if (ep === epoca.current) setVerificando(false); });
+        refrescar(null);
       }
       oculta = null;
     };
@@ -492,9 +494,16 @@ export default function App() {
     </>);
   }
   if (verificando) {
+    // sin una respuesta autorizada no se muestran los datos: ante un fallo, el error y la opción de reintentar
     return (<>
       <EntradaShell negocio={pantalla?.negocio || data?.nombreNegocio} sinRed={sinRed}>
-        <p role="status" className="login-sub" style={{ margin: 0, textAlign: "center" }}><Loader2 size={18} className="girando" aria-hidden="true" /> Comprobando la sesión…</p>
+        <div style={{ textAlign: "center" }}>
+          {errorCarga ? (<>
+            <p className="login-err" role="alert">No se pudo comprobar la sesión: {errorCarga.message}</p>
+            <button type="button" className="btn btn-primary btn-block" onClick={() => { setErrorCarga(null); refrescar(null); }}><RefreshCw size={16} aria-hidden="true" /> Reintentar</button>
+            <button type="button" className="btn btn-ghost btn-block" onClick={() => cerrarSesion(null)}>Cerrar sesión</button>
+          </>) : <p role="status" className="login-sub" style={{ margin: 0 }}><Loader2 size={18} className="girando" aria-hidden="true" /> Comprobando la sesión…</p>}
+        </div>
       </EntradaShell>
       {hosts}
     </>);

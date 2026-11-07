@@ -243,10 +243,20 @@ servidor solo devuelve el token para armar el enlace.
     equipos con su último uso y «Dar de baja», el administrador de rescate, nueva sucursal y personas
     con acceso (invitar, cancelar, quitar o salir). Un encargado vincula y da de baja equipos, pero no
     administra personas ni sucursales.
-  - La invitación es un enlace (`/invitacion?clave=…`) que se copia y se envía por WhatsApp o correo:
-    al abrirlo, la persona entra con el correo invitado y la acepta. Enviarlo por correo desde la app
-    queda pendiente de un servidor de correo propio (SMTP).
+  - La invitación es un enlace (`/invitacion?clave=…`): al abrirlo, la persona entra con el correo
+    invitado y la acepta. El panel lo copia, lo comparte por WhatsApp o lo **envía por correo**: Supabase
+    Auth manda a esa persona un enlace de acceso (con el servidor de correo del proyecto, Gmail) que
+    confirma su correo y la trae de vuelta a la invitación con la sesión iniciada; no cambia la sesión de
+    quien la envía.
+  - **Continuar la invitación:** el alta, la recuperación de la contraseña y la entrada con Google hechas
+    desde una invitación vuelven a `/invitacion?clave=…`, no al panel: aunque la persona cierre la
+    pestaña y confirme el correo después (o en otro equipo), al abrir el enlace entra y la acepta.
+  - **Entrar con Google:** el botón aparece solo si el proveedor está activado en Supabase Auth
+    (`/auth/v1/settings`).
   - Con `40001` el panel repite la llamada (hasta 3 veces) y el servidor vuelve a comprobar los límites.
+  - **Administrador de rescate:** su PIN lo fija el dueño, así que es temporal (`debe_cambiar_pin`): al
+    entrar solo puede elegir el suyo (`CAMBIAR_PIN`), como con un PIN restablecido. El administrador que
+    nace con la cuenta o la sucursal no queda pendiente.
   - Lo prueban `tests/e2e/remoto/duenos.spec.js` y, con Supabase real, `scripts/staging/duenos.mjs`.
 
 - **Cambiar el rol de un miembro:** no hay una función propia. `invitar_miembro` responde `ya_miembro`
@@ -532,8 +542,8 @@ Reglas de aplicación (del plan):
    por sucursal con limpieza al cambiar de sucursal o al revocar el equipo (§7 y §8).
 6. **Cliente** (hecho): vinculación del equipo (§4); pantalla de desbloqueo, PIN de 6 a 8 dígitos en la
    interfaz y el modo local, borradores por autor y pestaña oculta (§5.2 y §8); panel de dueños (§3.3).
-   Pendiente de decisiones: el servidor de correo (SMTP) para la confirmación, la recuperación y las
-   invitaciones, y la entrada con Google.
+   Correo por Gmail (SMTP del proyecto) y entrada con Google: el código está listo; falta que el dueño
+   escriba en Supabase la contraseña de aplicación de Gmail y el cliente de Google.
 7. **Validación con Supabase real (staging)** (en curso, [STAGING.md](STAGING.md)): proyecto aparte con
    el esquema, inicio anónimo, correo verificado, JWT de 300 s y solo canales privados comprobados en el
    servidor; prueba de humo, recorrido de la app en el navegador y medición del tiempo de corte con un

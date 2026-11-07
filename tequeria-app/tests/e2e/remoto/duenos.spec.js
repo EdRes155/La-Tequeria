@@ -1,7 +1,7 @@
 // Panel de dueños (paso 6b; MODELO.md §3.3): entrada con correo (con CAPTCHA), alta de la cuenta, códigos de
 // vinculación, equipos y su baja, invitaciones, reintento de 40001 y sesión separada de la del equipo.
 import { test, expect } from "@playwright/test";
-import { servidorSimulado, conIdentidad } from "./servidor-simulado.js";
+import { servidorSimulado, conIdentidad, enlaceConSesion } from "./servidor-simulado.js";
 import { panelSimulado } from "./panel-simulado.js";
 
 const DUENA = "duena@ejemplo.invalid", LUIS = "luis@ejemplo.invalid";
@@ -141,4 +141,88 @@ test("la sesión del dueño no toca la identidad del equipo vinculado en el mism
   await expect(page.getByRole("button", { name: "Entrar" })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("tequeria-identidad-dueno"))).toBeNull();
   expect(await identidadEquipo()).toBe(antes);
+});
+
+// La cuenta de la dueña con una invitación pendiente (directo en el modelo simulado); devuelve la clave
+function cuentaConInvitacion(panel, correo, rol = "encargado") {
+  const comoDuena = { email: DUENA };
+  panel.respuestas.crear_cuenta({ p_nombre: "Tacos Doña Rosa", p_sucursal: "Matriz", p_admin_nombre: "Rosa", p_admin_pin: "582039" }, null, comoDuena);
+  return panel.respuestas.invitar_miembro({ p_cuenta: panel.modelo.cuentas[0].id, p_correo: correo, p_rol: rol }, null, comoDuena).token;
+}
+
+test("alta desde una invitación: el correo de confirmación vuelve a la invitación; con la pestaña original cerrada, al confirmar la acepta", async ({ page, context }) => {
+  const NUEVO = "nuevo@ejemplo.invalid";
+  const panel = panelSimulado();
+  const clave = cuentaConInvitacion(panel, NUEVO);
+  const srv = await servidorSimulado(page, panel.respuestas, { personas: personas() });
+  await page.goto(`/invitacion?clave=${clave}`);
+  const invitacion = `${new URL(page.url()).origin}/invitacion?clave=${clave}`;
+  // crea su acceso: el enlace de confirmación vuelve a la invitación, no al panel
+  await page.getByRole("button", { name: "Crear acceso" }).click();
+  await page.getByLabel("Correo").fill(NUEVO);
+  await page.getByLabel(/^Contraseña/).fill(CLAVE);
+  await page.getByLabel("Repite la contraseña").fill(CLAVE);
+  await page.getByRole("button", { name: "Crear acceso" }).click();
+  await expect(page.getByText(`Te enviamos un correo a ${NUEVO}`, { exact: false })).toBeVisible();
+  const { vuelta } = srv.llamadas.find((x) => x.fn === "auth:signup-correo").args;
+  expect(vuelta).toBe(invitacion);
+  // también la recuperación de la contraseña
+  await page.getByRole("button", { name: "Olvidé mi contraseña" }).click();
+  await page.getByLabel("Correo").fill(NUEVO);
+  await page.getByRole("button", { name: "Enviar enlace" }).click();
+  await expect.poll(() => srv.llamadas.find((x) => x.fn === "auth:recover")?.args.vuelta).toBe(invitacion);
+  await page.close();
+
+  // más tarde, en otra pestaña, abre el enlace del correo: entra y la invitación se acepta
+  const otra = await context.newPage();
+  const srv2 = await servidorSimulado(otra, panel.respuestas, { personas: personas() });
+  await otra.goto(enlaceConSesion(vuelta, NUEVO));
+  await expect(otra.getByRole("heading", { name: "Tacos Doña Rosa" })).toBeVisible();
+  await expect(otra.getByText("Encargado · Activa")).toBeVisible();
+  await expect(otra).toHaveURL(/\/duenos$/);
+  expect(srv2.llamadas.filter((x) => x.fn === "aceptar_invitacion").map((x) => x.args.p_clave)).toEqual([clave]);
+});
+
+test("enviar la invitación por correo: llega un enlace de acceso que vuelve a la invitación, y al abrirlo queda como encargado", async ({ page, context }) => {
+  const panel = panelSimulado();
+  const srv = await servidorSimulado(page, panel.respuestas, { personas: personas() });
+  await page.goto("/duenos");
+  await entrarPanel(page, DUENA);
+  await crearCuenta(page);
+  await expect(page.getByRole("heading", { name: "Tacos Doña Rosa" })).toBeVisible();
+  await page.getByLabel("Correo de la persona").fill(LUIS);
+  await page.getByRole("button", { name: "Invitar" }).click();
+  const enlace = (await page.getByLabel("Enlace de invitación").textContent()).trim();
+  await expect(page.getByRole("link", { name: "Enviar por WhatsApp" })).toHaveAttribute("href", new RegExp(encodeURIComponent(enlace).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  await page.getByRole("button", { name: "Enviar por correo" }).click();
+  await expect(page.getByText(`Invitación enviada a ${LUIS}`)).toBeVisible();
+  const otp = srv.llamadas.find((x) => x.fn === "auth:otp").args;
+  expect(otp).toMatchObject({ correo: LUIS, vuelta: enlace, crear: true });
+  expect(otp.captcha).toBeTruthy();
+  // el envío no cambió la sesión de la dueña
+  await expect(page.locator(".topbar").getByText(DUENA)).toBeVisible();
+
+  const otra = await context.newPage();
+  await servidorSimulado(otra, panel.respuestas, { personas: personas() });
+  await otra.goto(enlaceConSesion(otp.vuelta, LUIS, "magiclink"));
+  await expect(otra.getByText("Encargado · Activa")).toBeVisible();
+});
+
+test("entrar con Google: el botón aparece solo si está activado y vuelve a la invitación para aceptarla", async ({ page, context }) => {
+  const GOOGLE = "rosa.google@ejemplo.invalid";
+  const panel = panelSimulado();
+  const clave = cuentaConInvitacion(panel, GOOGLE, "propietario");
+  await servidorSimulado(page, panel.respuestas, { personas: personas() });   // sin Google
+  await page.goto("/duenos");
+  await expect(page.getByRole("button", { name: "Entrar" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Entrar con Google" })).toHaveCount(0);
+
+  const otra = await context.newPage();
+  const srv = await servidorSimulado(otra, panel.respuestas, { personas: personas(), google: GOOGLE });
+  await otra.goto(`/invitacion?clave=${clave}`);
+  await otra.getByRole("button", { name: "Entrar con Google" }).click();
+  await expect(otra.getByRole("heading", { name: "Tacos Doña Rosa" })).toBeVisible();
+  await expect(otra.getByText("Propietario · Activa")).toBeVisible();
+  expect(srv.llamadas.find((x) => x.fn === "auth:google").args).toMatchObject({ proveedor: "google",
+    vuelta: `${new URL(otra.url()).origin}/invitacion?clave=${clave}` });
 });

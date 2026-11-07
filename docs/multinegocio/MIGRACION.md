@@ -181,9 +181,14 @@ Antes de la ventana, en Supabase:
 - API: el esquema `privado` no se agrega a los esquemas expuestos.
 - Auth, direcciones de vuelta: `site_url` = `https://la-tequeria.vercel.app/duenos` y permitida
   `https://la-tequeria.vercel.app/**` (confirmación del correo y recuperación de la contraseña).
-- Auth, servidor de correo (SMTP) propio: sin él, Supabase solo envía a los miembros del equipo del
-  proyecto y unos pocos por hora, así que los dueños no recibirían la confirmación ni la recuperación.
-  El proveedor y sus datos los decide y los escribe el dueño en Supabase (Authentication → SMTP).
+- Auth, servidor de correo: **Gmail** (decidido el 7 de noviembre). En Authentication → Emails → SMTP
+  Settings: host `smtp.gmail.com`, puerto `465`, usuario y remitente = la cuenta de Gmail, nombre del
+  remitente «La Tequería», contraseña = una **contraseña de aplicación** de esa cuenta (necesita la
+  verificación en dos pasos). La escribe el dueño; nunca pasa por el chat ni por un archivo. Después,
+  las plantillas en español de `tequeria-app/supabase/correos/` y subir el límite de correos por hora.
+- Auth, **entrar con Google** (decidido el 7 de noviembre): cliente OAuth «Aplicación web» en Google
+  Cloud con la dirección autorizada `https://ahmkfmoftpvhdcrjnhoe.supabase.co/auth/v1/callback`; su id
+  y su secreto los escribe el dueño en Authentication → Providers → Google.
 - **Comprobar que se aplica, no solo lo que dice la configuración** (en staging, «solo canales
   privados» no se aplicaba hasta desactivarlo y volver a activarlo; [STAGING.md](STAGING.md)): un canal
   público se rechaza con `PrivateOnly`, con y sin sesión; un inicio anónimo sin token de CAPTCHA se

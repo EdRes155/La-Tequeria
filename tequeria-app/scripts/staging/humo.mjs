@@ -110,6 +110,16 @@ await paso("entrada: cada equipo ve solo el personal de su sucursal y el adminis
   }
 });
 
+await paso("administrador de rescate: entra con el PIN que fijó el dueño, pero debe elegir el suyo antes de operar", async () => {
+  const r = await datos(B.dueno.c.rpc("crear_administrador", { p_cuenta: B.cuenta, p_sucursal: B.sucursal, p_nombre: "Rescate B", p_pin: "739104" }), "crear_administrador");
+  if (!r.ok) throw new Error(JSON.stringify(r));
+  const l = await datos(B.caja.c.rpc("login", { p_id: r.admin.id, p_pin: "739104", p_dispositivo: "humo" }), "login de rescate");
+  igual([l.ok, l.debeCambiarPin], [true, true], "login de rescate");
+  await falla(B.caja.c.rpc("estado", { p_token: l.token }), "CAMBIAR_PIN");
+  igual((await datos(B.caja.c.rpc("cambiar_pin", { p_token: l.token, p_pin_actual: "739104", p_pin_nuevo: "582047" }), "cambiar_pin")).ok, true, "cambiar_pin");
+  igual((await datos(B.caja.c.rpc("estado", { p_token: l.token }), "estado")).yo.rol, "admin", "estado tras cambiar el PIN");
+});
+
 await paso("aislamiento: el token de B no sirve en el equipo de A, ni una persona como equipo, ni un equipo como persona", async () => {
   await falla(A.caja.c.rpc("estado", { p_token: B.token }), "SESION");
   await falla(A.dueno.c.rpc("usuarios_login"), "DISPOSITIVO");

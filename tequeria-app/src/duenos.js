@@ -89,6 +89,14 @@ function errorAuth(error) {
   return new ErrorDueno(codigo || "AUTH", MENSAJES_AUTH[codigo] || "No se pudo completar. Revisa los datos e inténtalo de nuevo.");
 }
 const volverA = (ruta) => `${window.location.origin}${ruta}`;
+// A dónde vuelven los enlaces de los correos y la entrada con Google: la misma página, con su invitación si
+// la hay (/invitacion?clave=…). Así, aunque la persona cierre esta pestaña y confirme el correo después (o en
+// otro equipo), el enlace la lleva a aceptar la invitación.
+export const vueltaActual = () => {
+  const ruta = window.location.pathname.replace(/\/+$/, "");
+  const clave = new URLSearchParams(window.location.search).get("clave");
+  return ruta === "/invitacion" && clave ? `/invitacion?clave=${encodeURIComponent(clave)}` : "/duenos";
+};
 export const auth = {
   async sesion() { const { data } = await supaDueno.auth.getSession(); return data?.session || null; },
   alCambiar: (fn) => supaDueno.auth.onAuthStateChange((ev, s) => fn(ev, s)).data.subscription,
@@ -97,14 +105,14 @@ export const auth = {
     if (error) throw errorAuth(error);
     return data.session;
   },
-  async registrarse(correo, clave, captchaToken) {
+  async registrarse(correo, clave, captchaToken, vuelta = "/duenos") {
     const { data, error } = await supaDueno.auth.signUp({ email: correo.trim(), password: clave,
-      options: { captchaToken, emailRedirectTo: volverA("/duenos") } });
+      options: { captchaToken, emailRedirectTo: volverA(vuelta) } });
     if (error) throw errorAuth(error);
     return { confirmar: !data.session };
   },
-  async recuperar(correo, captchaToken) {
-    const { error } = await supaDueno.auth.resetPasswordForEmail(correo.trim(), { captchaToken, redirectTo: volverA("/duenos") });
+  async recuperar(correo, captchaToken, vuelta = "/duenos") {
+    const { error } = await supaDueno.auth.resetPasswordForEmail(correo.trim(), { captchaToken, redirectTo: volverA(vuelta) });
     if (error) throw errorAuth(error);
   },
   async nuevaClave(clave) {
@@ -112,6 +120,18 @@ export const auth = {
     if (error) throw errorAuth(error);
   },
   async salir() { try { await supaDueno.auth.signOut({ scope: "local" }); } catch {} },
+  // Entrar con Google: sale a Google y vuelve con la sesión a la misma página (con su invitación, si la hay)
+  async conGoogle(vuelta = "/duenos") {
+    const { error } = await supaDueno.auth.signInWithOAuth({ provider: "google", options: { redirectTo: volverA(vuelta) } });
+    if (error) throw errorAuth(error);
+  },
+  // Proveedores activados en Supabase Auth (el botón de Google solo aparece si está activado)
+  async proveedores() {
+    try {
+      const r = await fetch(`${url}/auth/v1/settings`, { headers: { apikey: key } });
+      return r.ok ? (await r.json()).external || {} : {};
+    } catch { return {}; }
+  },
 };
 
 // --- Funciones de dueños (supabase-schema.sql) ---------------------------------------------------------
@@ -137,5 +157,13 @@ export const dueno = {
 
 // Enlace de una invitación: la clave va en la dirección y la persona la acepta al entrar con ese correo
 export const enlaceInvitacion = (clave) => volverA(`/invitacion?clave=${encodeURIComponent(clave)}`);
+// Enviar la invitación por correo: Supabase Auth manda a esa persona un enlace de acceso (con el servidor de
+// correo del proyecto) que confirma su correo y la trae a /invitacion?clave=… con la sesión iniciada, donde
+// la acepta. No cambia la sesión de quien la envía.
+export async function enviarInvitacion(correo, clave, captchaToken) {
+  const { error } = await supaDueno.auth.signInWithOtp({ email: correo.trim(),
+    options: { captchaToken, shouldCreateUser: true, emailRedirectTo: enlaceInvitacion(clave) } });
+  if (error) throw errorAuth(error);
+}
 // Código de vinculación legible: ABCD-2345
 export const codigoLegible = (c) => (c && c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c || "");

@@ -26,7 +26,8 @@ panel de Supabase con sus datos intactos).
 | Auth: vigencia del JWT | **300 s** (aprobado para producción) | Es el límite elegido para el tiempo de corte del tiempo real (antes, 600 s) |
 | Auth: límite de inicios anónimos | 100 por hora y por IP **solo en staging**, para repetir las mediciones (cada una usa de 5 a 7) | En producción, 30 (el de Supabase) |
 | Auth: direcciones de vuelta | `site_url` = la vista previa de esta rama en `/duenos`; permitidas: `https://*-edres155s-projects.vercel.app/**`, `http://127.0.0.1:*/**`, `http://localhost:*/**` | Los enlaces de confirmación y de recuperación de los correos de Auth vuelven al panel |
-| Auth: correo (SMTP) | **El de Supabase** (sin SMTP propio): solo envía a los miembros del equipo del proyecto y 2 por hora | Basta para staging (las personas de prueba se crean ya confirmadas); para dueños reales hace falta un SMTP propio |
+| Auth: correo (SMTP) | **El de Supabase** hasta que el dueño escriba el de Gmail: solo envía a los miembros del equipo del proyecto y 2 por hora | Con Gmail: `node scripts/staging/correos.mjs` aplica las plantillas en español (`supabase/correos/`; Supabase no las deja cambiar sin un SMTP propio) |
+| Auth: entrar con Google | Desactivado hasta que el dueño escriba el cliente de Google | El botón del panel solo aparece con el proveedor activado |
 | Auth: CAPTCHA | Cloudflare Turnstile con las **llaves de prueba** de Cloudflare (públicas; siempre pasan) | Supabase exige un token en cada inicio anónimo y con correo, y lo comprueba con Cloudflare. Producción usará llaves reales (MIGRACION.md §5) |
 | Realtime: solo canales privados | Activado **y aplicado** (lo comprueba `humo.mjs`) | Ver «Hallazgos» |
 
@@ -71,13 +72,15 @@ node scripts/staging/duenos.mjs            # unos 2 min: panel de dueños
 6. Vinculación: los dueños generan códigos; tres identidades anónimas se vinculan (una como monitor); un
    código usado ya no sirve.
 7. Entrada: cada equipo ve solo el personal de su sucursal; el administrador entra y lee el estado inicial.
-8. Aislamiento: el token de otra sucursal, una persona como equipo, un equipo como persona y un dueño con
+8. Administrador de rescate: entra con el PIN que fijó el dueño, pero no lee ni opera (`CAMBIAR_PIN`)
+   hasta elegir el suyo.
+9. Aislamiento: el token de otra sucursal, una persona como equipo, un equipo como persona y un dueño con
    la cuenta de otro se rechazan.
-9. Tiempo real: el equipo escucha el canal privado de su sucursal; el de otra sucursal, una persona, una
+10. Tiempo real: el equipo escucha el canal privado de su sucursal; el de otra sucursal, una persona, una
    identidad anónima sin vincular y una llamada sin sesión se rechazan.
-10. Un cambio avisa solo a su sucursal en menos de un segundo y sin datos; un cliente no puede publicar.
-11. Revocar: el equipo pierde el acceso a los datos en la siguiente llamada.
-12. Supabase Auth real: un equipo o una persona suspendida, o borrada de forma lógica, deja de servir en
+11. Un cambio avisa solo a su sucursal en menos de un segundo y sin datos; un cliente no puede publicar.
+12. Revocar: el equipo pierde el acceso a los datos en la siguiente llamada.
+13. Supabase Auth real: un equipo o una persona suspendida, o borrada de forma lógica, deja de servir en
     la siguiente llamada (con su JWT todavía vigente); el borrado definitivo de un equipo vinculado se
     rechaza y el equipo sigue igual; una identidad anónima que nunca se vinculó sí se borra.
 
@@ -202,6 +205,13 @@ pasa a «Vincular este equipo» sin mostrar nada (`tests/e2e/remoto/desbloqueo.s
 
 - Llave secreta real de Turnstile en Supabase de producción, en la ventana de la migración (la de sitio
   ya está en Vercel para Production; MIGRACION.md §5).
+- **Gmail como servidor de correo** (el dueño, en Authentication → Emails → SMTP Settings de staging):
+  host `smtp.gmail.com`, puerto `465`, usuario y remitente = la cuenta de Gmail, nombre «La Tequería»,
+  contraseña = una contraseña de aplicación de Google. Después: `node scripts/staging/correos.mjs` y una
+  prueba real (alta e invitación por correo a una dirección del dueño).
+- **Entrar con Google** (el dueño, en Google Cloud y en Authentication → Providers → Google de staging):
+  cliente OAuth «Aplicación web» con la dirección autorizada
+  `https://izcaeojzbaoqlxkerria.supabase.co/auth/v1/callback`.
 - La protección de contraseñas filtradas (plan Pro) se deja para después: por ahora, mínimo de 10
   caracteres (decidido el 6 de noviembre).
 - Repetir la medición con el cliente del paso 6 terminado (panel de dueños y desbloqueo).

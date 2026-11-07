@@ -75,6 +75,24 @@ d("dueños y dispositivos", () => {
       ["crear_cuenta", true], ["crear_sucursal", false], ["generar_codigo", false], ["vincular_dispositivo", false]]);
   });
 
+  it("el administrador de rescate entra con el PIN que fijó el dueño, pero debe elegir el suyo antes de operar", async () => {
+    const { p, cuenta, sucursal, admin } = await cuentaNueva();
+    const eq = await anonimo();
+    expect((await vincular(eq, await codigo(p, cuenta, sucursal))).ok).toBe(true);
+    const r = await p.con.rpc("crear_administrador", { p_cuenta: cuenta, p_sucursal: sucursal, p_nombre: "Rescate", p_pin: "739104" });
+    expect(r.ok).toBe(true);
+    const l = await eq.con.rpc("login", { p_id: r.admin.id, p_pin: "739104" });
+    expect([l.ok, l.debeCambiarPin]).toEqual([true, true]);
+    // con ese PIN no lee ni opera: solo cambiarlo (o desbloquear o salir)
+    expect((await falla(eq.con.rpc("estado", { p_token: l.token, p_partes: ["mesas"] }))).message).toBe("CAMBIAR_PIN");
+    expect((await falla(eq.con.rpc("fijar_precio", { p_token: l.token, p_clave: "taco-pastor", p_precio: 25 }))).message).toBe("CAMBIAR_PIN");
+    expect((await eq.con.rpc("cambiar_pin", { p_token: l.token, p_pin_actual: "739104", p_pin_nuevo: "582047" })).ok).toBe(true);
+    expect((await eq.con.rpc("estado", { p_token: l.token, p_partes: ["mesas"] })).yo).toMatchObject({ id: r.admin.id, rol: "admin", cambiarPin: false });
+    // el administrador que nace con la cuenta (lo da de alta el propio dueño) no queda pendiente
+    const l2 = await eq.con.rpc("login", { p_id: admin.id, p_pin: PIN });
+    expect([l2.ok, l2.debeCambiarPin]).toEqual([true, false]);
+  });
+
   it("el catálogo inicial es el mismo en la primera instalación y en cada sucursal nueva", async () => {
     const { sucursal } = await cuentaNueva();
     const inicial = (await sql.query("select s.id from public.sucursales s join public.cuentas c on c.id = s.cuenta_id where c.creada_por is null and c.estado = 'pendiente_activacion'")).rows[0].id;

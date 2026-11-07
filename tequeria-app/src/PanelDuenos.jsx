@@ -6,7 +6,7 @@ import { Loader2, LogOut, RefreshCw, Copy, Smartphone, Trash2, UserPlus, Store, 
 import { CSS } from "./estilos.js";
 import { Toaster, toast, ConfirmHost, confirmDialog } from "./ui.jsx";
 import { useCaptcha } from "./captcha.js";
-import { supaDueno, auth, dueno, ErrorDueno, enlaceInvitacion, codigoLegible } from "./duenos.js";
+import { supaDueno, auth, dueno, ErrorDueno, enlaceInvitacion, enviarInvitacion, codigoLegible, vueltaActual } from "./duenos.js";
 import { ZONAS_MX, ZONA_DEFAULT, PIN_NUEVO_RE, pinDebil } from "./dominio.js";
 
 const MIN_CLAVE = 10;   // contraseña de las personas (Supabase Auth exige el mismo mínimo)
@@ -55,6 +55,9 @@ function Marco({ children }) {
 /* ---------------- entrada con correo ---------------- */
 function EntradaDueno({ invitacion }) {
   const id = useId();
+  const vuelta = vueltaActual();   // la invitación, si la hay: los enlaces de los correos y Google vuelven aquí
+  const [google, setGoogle] = useState(false);
+  useEffect(() => { auth.proveedores().then((p) => setGoogle(!!p.google)); }, []);
   const [modo, setModo] = useState("entrar");   // entrar | crear | recuperar
   const [correo, setCorreo] = useState("");
   const [clave, setClave] = useState("");
@@ -78,10 +81,10 @@ function EntradaDueno({ invitacion }) {
       try { token = await captcha.obtener(); } catch { throw new ErrorDueno("CAPTCHA", "Completa la verificación de seguridad."); }
       if (modo === "entrar") await auth.entrar(correo, clave, token);
       else if (modo === "crear") {
-        const r = await auth.registrarse(correo, clave, token);
+        const r = await auth.registrarse(correo, clave, token, vuelta);
         if (r.confirmar) setOk(`Te enviamos un correo a ${correo.trim()}. Abre el enlace para confirmarlo y después entra aquí.`);
       } else {
-        await auth.recuperar(correo, token);
+        await auth.recuperar(correo, token, vuelta);
         setOk("Si el correo tiene cuenta, te llegará un enlace para elegir una contraseña nueva.");
       }
     } catch (ex) { setErr(mensaje(ex)); } finally { setBusy(false); }
@@ -91,6 +94,10 @@ function EntradaDueno({ invitacion }) {
       <h1 className="login-titulo">{modo === "crear" ? "Crea tu acceso" : modo === "recuperar" ? "Recuperar contraseña" : "Panel de dueños"}</h1>
       <p className="login-sub">{invitacion ? "Te invitaron a una cuenta. Entra (o crea tu acceso) con el correo al que llegó la invitación."
         : modo === "crear" ? "Con tu correo administras tus taquerías. Te pediremos confirmarlo." : "Entra con tu correo para administrar tus taquerías."}</p>
+      {google && modo !== "recuperar" && (<>
+        <button type="button" className="btn btn-line btn-block" onClick={() => auth.conGoogle(vuelta).catch((ex) => setErr(mensaje(ex)))}>Entrar con Google</button>
+        <p className="muted small" style={{ textAlign: "center", margin: "8px 0" }}>o con tu correo y contraseña</p>
+      </>)}
       <div className="campo"><label htmlFor={id + "c"}>Correo</label>
         <input id={id + "c"} className="inp" type="email" autoComplete="email" value={correo} onChange={(e) => { setErr(""); setCorreo(e.target.value); }} /></div>
       {modo !== "recuperar" && <div className="campo"><label htmlFor={id + "p"}>Contraseña{modo === "crear" ? ` (${MIN_CLAVE} caracteres o más)` : ""}</label>
@@ -367,6 +374,9 @@ function NuevaSucursal({ cuenta, onListo }) {
 
 function Miembros({ cuenta, recargar }) {
   const id = useId();
+  const caja = useRef(null);
+  const captcha = useCaptcha(caja);   // el envío por correo pasa por Supabase Auth, que pide CAPTCHA
+  const [enviando, setEnviando] = useState(false);
   const [lista, setLista] = useState(null);
   const [correo, setCorreo] = useState("");
   const [rol, setRol] = useState("encargado");
@@ -379,9 +389,19 @@ function Miembros({ cuenta, recargar }) {
   const invitar = async (e) => {
     e.preventDefault();
     setErr(""); setEnlace(null);
-    try { const r = await dueno.invitarMiembro(cuenta.id, correo, rol); setEnlace({ url: enlaceInvitacion(r.token), correo: r.invitacion.correo }); setCorreo(""); cargar(); }
+    try { const r = await dueno.invitarMiembro(cuenta.id, correo, rol); setEnlace({ url: enlaceInvitacion(r.token), clave: r.token, correo: r.invitacion.correo }); setCorreo(""); cargar(); }
     catch (ex) { setErr(mensaje(ex)); }
   };
+  const porCorreo = async () => {
+    setEnviando(true);
+    try {
+      let token;
+      try { token = await captcha.obtener(); } catch { throw new ErrorDueno("CAPTCHA", "Completa la verificación de seguridad."); }
+      await enviarInvitacion(enlace.correo, enlace.clave, token);
+      toast(`Invitación enviada a ${enlace.correo}`, "ok");
+    } catch (ex) { toast(mensaje(ex), "error"); } finally { setEnviando(false); }
+  };
+  const textoWhatsApp = () => `Te invito a ${cuenta.nombre} en La Tequería. Entra con tu correo ${enlace.correo} en: ${enlace.url}`;
   const copiar = async () => {
     try { await navigator.clipboard.writeText(enlace.url); toast("Enlace copiado", "ok"); } catch { toast("No se pudo copiar: selecciónalo y cópialo a mano.", "error"); }
   };
@@ -427,11 +447,17 @@ function Miembros({ cuenta, recargar }) {
         <button type="submit" className="btn btn-primary"><UserPlus size={16} aria-hidden="true" /> Invitar</button>
       </form>
       {err && <div className="login-err" role="alert">{err}</div>}
+      {captcha.activo && <div ref={caja} className="captcha" />}
       {enlace && (
         <div className="aviso-barra" role="status" style={{ flexDirection: "column", alignItems: "flex-start", gap: 6 }}>
-          <span>Envíale este enlace a {enlace.correo} (por WhatsApp o correo). Sirve una vez, vence en 7 días y solo funciona entrando con ese correo:</span>
+          <span>Invitación para {enlace.correo}: sirve una vez, vence en 7 días y solo funciona entrando con ese correo.</span>
           <code style={{ wordBreak: "break-all" }} aria-label="Enlace de invitación">{enlace.url}</code>
-          <button type="button" className="btn btn-line btn-sm" onClick={copiar}><Copy size={14} aria-hidden="true" /> Copiar enlace</button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" className="btn btn-primary btn-sm" onClick={porCorreo} disabled={enviando}>{enviando ? <Loader2 size={14} className="girando" aria-hidden="true" /> : null} Enviar por correo</button>
+            <a className="btn btn-line btn-sm" href={`https://wa.me/?text=${encodeURIComponent(textoWhatsApp())}`} target="_blank" rel="noopener noreferrer">Enviar por WhatsApp</a>
+            <button type="button" className="btn btn-line btn-sm" onClick={copiar}><Copy size={14} aria-hidden="true" /> Copiar enlace</button>
+          </div>
+          {captcha.estado === "esperando" && <span className="muted small" role="status">Completa la verificación de seguridad para enviar.</span>}
         </div>
       )}
     </section>

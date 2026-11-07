@@ -46,8 +46,16 @@ const TURNSTILE = `(() => {
   };
 })();`;
 
-// personas: { correo: { clave, confirmado } } que pueden entrar con correo y contraseña (panel de dueños)
-export async function servidorSimulado(page, respuestas, { captcha = () => true, personas = {} } = {}) {
+// Enlace con la sesión de una persona, como el que deja Supabase al confirmar un correo, abrir un enlace de
+// acceso o volver de Google (flujo implícito: la sesión va después de #)
+export const enlaceConSesion = (vuelta, correo, tipo = "signup") => {
+  const s = sesionDe("p-" + correo, correo);
+  return `${vuelta}#access_token=${s.access_token}&refresh_token=${s.refresh_token}&expires_in=3600&expires_at=${s.expires_at}&token_type=bearer&type=${tipo}`;
+};
+
+// personas: { correo: { clave, confirmado } } que pueden entrar con correo y contraseña (panel de dueños).
+// google: correo de la persona que entra con Google (sin él, el proveedor está desactivado)
+export async function servidorSimulado(page, respuestas, { captcha = () => true, personas = {}, google = null } = {}) {
   const llamadas = [];
   const identidades = [];
   const captchas = [];   // token de CAPTCHA de cada inicio anónimo (null si no llegó)
@@ -57,8 +65,29 @@ export async function servidorSimulado(page, respuestas, { captcha = () => true,
   await page.route(`${SUPABASE_SIMULADO}/**`, async (route) => {
     const url = new URL(route.request().url());
     const cuerpo = (() => { try { return route.request().postDataJSON() || {}; } catch { return {}; } })();
+    const vuelta = url.searchParams.get("redirect_to");
     const tokenCaptcha = cuerpo.gotrue_meta_security?.captcha_token ?? null;
     const sinCaptcha = () => route.fulfill(errorAuth(400, "captcha_failed", "captcha protection: request disallowed"));
+    if (url.pathname === "/auth/v1/settings") {
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ external: { email: true, google: !!google }, disable_signup: false }) });
+    }
+    if (url.pathname === "/auth/v1/authorize") {
+      // Google aceptó: vuelve a redirect_to con la sesión
+      llamadas.push({ fn: "auth:google", args: { proveedor: url.searchParams.get("provider"), vuelta }, quien: null, t: Date.now() });
+      if (!google) return route.fulfill(errorAuth(400, "validation_failed", "Unsupported provider: provider is not enabled"));
+      return route.fulfill({ status: 302, headers: { location: enlaceConSesion(vuelta, google, "") } });
+    }
+    if (url.pathname === "/auth/v1/user" && route.request().method() === "GET") {
+      const a = route.request().headers()["authorization"] || "";
+      const c = (() => { try { return JSON.parse(Buffer.from(a.split(".")[1], "base64url").toString()); } catch { return null; } })();
+      if (!c?.sub) return route.fulfill(errorAuth(401, "no_authorization", "invalid JWT"));
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(sesionDe(c.sub, c.email || null).user) });
+    }
+    if (url.pathname === "/auth/v1/otp") {
+      // enlace de acceso por correo (la invitación que envía el panel)
+      llamadas.push({ fn: "auth:otp", args: { correo: cuerpo.email, captcha: tokenCaptcha, vuelta, crear: cuerpo.create_user }, quien: null, t: Date.now() });
+      return tokenCaptcha && captcha(tokenCaptcha) ? route.fulfill({ status: 200, contentType: "application/json", body: "{}" }) : sinCaptcha();
+    }
     // persona que entra con correo y contraseña (panel de dueños)
     if (url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "password") {
       captchas.push(tokenCaptcha);
@@ -70,13 +99,13 @@ export async function servidorSimulado(page, respuestas, { captcha = () => true,
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(sesionDe("p-" + cuerpo.email, cuerpo.email)) });
     }
     if (url.pathname === "/auth/v1/recover") {
-      llamadas.push({ fn: "auth:recover", args: { correo: cuerpo.email, captcha: tokenCaptcha }, quien: null, t: Date.now() });
+      llamadas.push({ fn: "auth:recover", args: { correo: cuerpo.email, captcha: tokenCaptcha, vuelta }, quien: null, t: Date.now() });
       return tokenCaptcha && captcha(tokenCaptcha) ? route.fulfill({ status: 200, contentType: "application/json", body: "{}" }) : sinCaptcha();
     }
     if (url.pathname === "/auth/v1/signup" && cuerpo.email) {
       // alta de una persona: queda sin confirmar hasta abrir el enlace del correo
       captchas.push(tokenCaptcha);
-      llamadas.push({ fn: "auth:signup-correo", args: { correo: cuerpo.email, captcha: tokenCaptcha }, quien: null, t: Date.now() });
+      llamadas.push({ fn: "auth:signup-correo", args: { correo: cuerpo.email, captcha: tokenCaptcha, vuelta }, quien: null, t: Date.now() });
       if (!tokenCaptcha || !captcha(tokenCaptcha)) return sinCaptcha();
       personas[cuerpo.email] = { clave: cuerpo.password, confirmado: false };
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "p-" + cuerpo.email, email: cuerpo.email,

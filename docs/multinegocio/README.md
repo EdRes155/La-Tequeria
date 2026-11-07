@@ -77,7 +77,8 @@ En orden. Nada de esto toca producción ni `main` hasta el paso 11, que necesita
    - entrada de dueños con correo verificado y panel: cuentas, sucursales, miembros, invitaciones
      (enlace para compartir), códigos, equipos y revocación; reintento de `40001` en una transacción
      nueva (hecho, paso 6b; `tests/e2e/remoto/duenos.spec.js` y `scripts/staging/duenos.mjs`).
-     Pendiente de decisiones: servidor de correo (SMTP) y entrada con Google;
+     Correo por Gmail (invitaciones, confirmación, recuperación) y entrada con Google: listos en el
+     código; falta la configuración del dueño en Supabase (STAGING.md, «Pendiente»);
    - desbloqueo por inactividad, `CAMBIAR_PIN` y PIN de 6 a 8 dígitos en la interfaz y el modo local;
      borradores por sucursal y autor; pestaña oculta sin datos hasta confirmar (hecho, paso 6c;
      `tests/e2e/remoto/desbloqueo.spec.js`).

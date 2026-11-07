@@ -128,6 +128,43 @@ test("pestaña oculta más de 30 s: al volver no muestra datos hasta confirmar; 
   expect(await page.evaluate(() => window.__vioMesas)).toBe(false);
 });
 
+test("pestaña oculta más de 30 s y el servidor falla al volver: no muestra datos; con un reintento autorizado, sí", async ({ page }) => {
+  await page.clock.install();
+  const centro = personalSimulado({ personas: [ANA], estadoDe: estadoInicial });
+  const srv = await servidorSimulado(page, centro.respuestas);
+  await conIdentidad(page);
+  await page.goto("/");
+  await entrar(page, ANA);
+  await expect(page.getByRole("heading", { name: "Mesas" })).toBeVisible();
+  const visibilidad = (estado) => page.evaluate((e) => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => e });
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => e === "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, estado);
+  await visibilidad("hidden");
+  await page.clock.fastForward(31000);
+  // al volver, el servidor falla (HTTP 500): ni la sesión ni el equipo quedan confirmados
+  srv.responder("estado", () => ({ status: 500, body: { code: "XX000", message: "falla interna", hint: null, details: null } }));
+  await page.evaluate(() => {
+    window.__vioMesas = false;
+    new MutationObserver(() => { if ([...document.querySelectorAll("h2")].some((h) => h.textContent === "Mesas")) window.__vioMesas = true; })
+      .observe(document.body, { subtree: true, childList: true, characterData: true });
+  });
+  await visibilidad("visible");
+  await expect(page.getByText("No se pudo comprobar la sesión", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reintentar" })).toBeVisible();
+  // tampoco con el reintento automático (también falla)
+  const antes = srv.cuantas("estado");
+  await page.clock.fastForward(6000);
+  await expect.poll(() => srv.cuantas("estado")).toBeGreaterThan(antes);
+  await expect(page.getByText("No se pudo comprobar la sesión", { exact: false })).toBeVisible();
+  expect(await page.evaluate(() => window.__vioMesas)).toBe(false);
+  // el servidor responde bien: con «Reintentar», vuelve a ver sus mesas
+  srv.responder("estado", centro.respuestas.estado);
+  await page.getByRole("button", { name: "Reintentar" }).click();
+  await expect(page.getByRole("heading", { name: "Mesas" })).toBeVisible();
+});
+
 test("monitor dedicado con la sesión bloqueada: las comandas se siguen viendo y marcar algo pide el PIN", async ({ page }) => {
   const comanda = { id: "t-1", folio: 3, tipo: "llevar", origen: "Para llevar · Lupita", mesaId: null, paraLlevar: true,
     ordenes: [{ id: "o-1", nombre: "Orden 1", prep: "con-todo", items: [{ key: "taco-pastor", nombre: "Taco de pastor", cat: "taco", precio: 20, cantidad: 1 }] }],
